@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 2026-08-16: icona vettoriale autonoma per distinguere SLATE in taskbar e switcher senza dipendere dal tema installato. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="slate-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34495e"/>
+      <stop offset="1" stop-color="#17212b"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="116" height="116" rx="25" fill="url(#slate-bg)"/>
+  <rect x="13" y="13" width="102" height="102" rx="19" fill="none" stroke="#5fd7d2" stroke-width="4"/>
+  <path d="M34 39 L59 64 L34 89" fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M67 89 H94" fill="none" stroke="#5fd7d2" stroke-width="10" stroke-linecap="round"/>
+</svg>

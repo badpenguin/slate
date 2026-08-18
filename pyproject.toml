@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slate-agent-terminal-environment"
+version = "1.4"
+description = "Simple Linux Agent Terminal Environment with tmux and local SCM status"
+requires-python = ">=3.11"
+
+[project.scripts]
+slate = "slate.launcher:main"
+
+[tool.setuptools.packages.find]
+include = ["slate*"]
+
+[tool.setuptools.package-data]
+slate = ["style.css", "slate.svg", "bell.svg", "codex.svg", "developer-tools.svg", "incognito.svg", "scm-git.svg", "scm-hg.svg"]

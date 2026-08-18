@@ -1,0 +1,35 @@
+# 2026-08-18: i metadati Mercurial restano disponibili localmente, ma non fanno
+# parte della distribuzione Git.
+.hg/
+.hgignore
+.hgtags
+
+# 2026-08-18: le istruzioni operative per gli agenti e le note di lavoro sono
+# documenti locali e non fanno parte della distribuzione.
+AGENTS.md
+TODO.md
+
+# 2026-08-18: gli ambienti virtuali, le cache e gli artefatti Python sono
+# generati localmente e non devono essere versionati.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 2026-08-18: gli artefatti di build e i metadati di packaging sono rigenerabili.
+build/
+dist/
+*.egg-info/
+
+# 2026-08-18: configurazioni IDE, file swap e metadati locali degli strumenti
+# non appartengono ai sorgenti distribuiti.
+.idea/
+.vscode/
+.agents/
+.codex/
+.*.swp

@@ -1,0 +1,170 @@
+/* 2026-08-16: usa esclusivamente colori del tema GTK per integrarsi con i temi
+ * chiari e scuri di Cinnamon senza introdurre una palette applicativa. */
+
+headerbar.slate-header {
+    min-height: 38px;
+}
+
+headerbar.slate-header button {
+    padding-left: 9px;
+    padding-right: 9px;
+}
+
+.project-sidebar {
+    background-color: @theme_base_color;
+    border-right: 1px solid alpha(@theme_fg_color, 0.14);
+}
+
+.sidebar-title,
+.section-title {
+    padding: 10px 10px 5px 10px;
+    color: alpha(@theme_fg_color, 0.65);
+    font-size: 0.82em;
+    font-weight: bold;
+}
+
+.sidebar-empty {
+    padding: 12px;
+    color: alpha(@theme_fg_color, 0.65);
+}
+
+treeview.project-tree,
+treeview.scm-tree {
+    padding: 3px;
+}
+
+/* 2026-08-17: il bordo DnD nativo da un pixel si perde fra i blocchi della
+ * sidebar; 3 px rendono evidente la destinazione senza alterare le righe. */
+treeview.project-tree.before:drop(active) {
+    border: none;
+    border-top: 3px solid @theme_selected_bg_color;
+}
+
+treeview.project-tree.after:drop(active) {
+    border: none;
+    border-bottom: 3px solid @theme_selected_bg_color;
+}
+
+/* 2026-08-16: mantiene checkbox e testo nella colonna gerarchica originale,
+ * riducendo soltanto il rientro generato dall'expander dei gruppi SCM. */
+treeview.scm-tree {
+    -GtkTreeView-expander-size: 7px;
+}
+
+.scm-select-all {
+    padding: 3px 6px;
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
+}
+
+.scm-panel {
+    background-color: @theme_base_color;
+}
+
+/* 2026-08-16: il selettore resta parte della terza colonna condivisa e separa
+ * chiaramente File/Revisioni senza introdurre una quarta area permanente. */
+.right-column {
+    background-color: @theme_base_color;
+    border-left: 1px solid alpha(@theme_fg_color, 0.14);
+}
+
+.file-manager {
+    background-color: @theme_base_color;
+}
+
+.file-manager-toolbar {
+    padding: 6px 8px;
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
+}
+
+/* 2026-08-16: il dialogo usa categorie laterali per restare ordinato quando
+ * verranno aggiunte altre preferenze oltre alle due dimensioni iniziali. */
+.settings-layout stacksidebar {
+    border-right: 1px solid alpha(@theme_fg_color, 0.14);
+}
+
+.settings-page {
+    padding: 22px;
+}
+
+.settings-page-title {
+    font-size: 1.2em;
+    font-weight: bold;
+}
+
+/* 2026-08-16: l'editor usa controlli compatti perché condivide l'area centrale
+ * con il terminale e non deve sottrarre spazio verticale al documento. */
+.editor-toolbar,
+.browser-toolbar,
+.editor-search {
+    padding: 5px 7px;
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.14);
+    background-color: shade(@theme_base_color, 0.98);
+}
+
+/* 2026-08-17: lo sfondo separa visivamente la preview responsive centrata
+ * dall'area disponibile senza simulare la cornice di un dispositivo. */
+.browser-responsive-stage {
+    background-color: shade(@theme_base_color, 0.88);
+}
+
+/* 2026-08-17: l'uscita richiede un controllo esplicito per evitare che un
+ * click accidentale sul canvas disattivi la preview durante il debug. */
+.browser-responsive-exit {
+    padding: 4px 8px;
+}
+
+.editor-search {
+    border-top: 1px solid alpha(@theme_fg_color, 0.14);
+    border-bottom: none;
+}
+
+notebook tab button {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 0;
+}
+
+.empty-state-title {
+    font-weight: bold;
+}
+
+.empty-state-detail {
+    color: alpha(@theme_fg_color, 0.62);
+}
+
+.commit-section {
+    padding: 2px 10px 10px 10px;
+    border-top: 1px solid alpha(@theme_fg_color, 0.14);
+}
+
+.commit-editor {
+    border: 1px solid alpha(@theme_fg_color, 0.22);
+}
+
+.commit-shortcut {
+    color: alpha(@theme_fg_color, 0.62);
+    font-size: smaller;
+}
+
+.scm-actions {
+    padding: 8px 10px;
+    border-top: 1px solid alpha(@theme_fg_color, 0.14);
+}
+
+/* 2026-08-16: la preview deve apparire come superficie opaca sopra le prime
+ * due colonne, senza confondersi con il terminale ancora vivo sottostante. */
+.file-preview {
+    background-color: @theme_base_color;
+    border-right: 1px solid alpha(@theme_fg_color, 0.28);
+    box-shadow: 3px 0 8px alpha(black, 0.18);
+}
+
+.preview-header {
+    padding: 7px 10px;
+    background-color: shade(@theme_base_color, 0.97);
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.16);
+}
+
+.preview-title {
+    font-weight: bold;
+}
