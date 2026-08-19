@@ -69,7 +69,7 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self.dialog = None
 
     def test_git_publish_requires_existing_upstream_and_never_forces(self) -> None:
-        """Configured Git publishing performs only the normal follow-tags push."""
+        """Git publishing keeps a normal push and uses ephemeral credentials."""
 
         dialog = self._open(RepositoryPublishDialog, GitSCM(self.temporary.name))
         self._complete(0, returncode=1)
@@ -78,6 +78,10 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         dialog._submit()
         self.assertEqual(self.calls[3][0], ["git", "push", "--follow-tags"])
         self.assertNotIn("--force", self.calls[3][0])
+        environment = self.calls[3][2]["env"]
+        self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(environment["GIT_CONFIG_VALUE_0"], "")
+        self.assertIn("slate.git_credentials", environment["GIT_CONFIG_VALUE_1"])
 
     def test_git_switch_uses_only_a_loaded_local_branch(self) -> None:
         """Switch never guesses a similarly named remote branch."""

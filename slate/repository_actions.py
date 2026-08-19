@@ -9,6 +9,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk  # noqa: E402
 
+from .git_credentials import credential_environment
 from .processes import CommandResult
 from .repository_dialog import RepositoryOperationDialog
 from .scm.base import BranchTarget, SCM
@@ -254,7 +255,7 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
         self.ready_to_submit = False
         environment = dict(self.scm.environment)
         if isinstance(self.scm, GitSCM):
-            environment["GIT_TERMINAL_PROMPT"] = "0"
+            environment = credential_environment(environment)
         self._run_command(
             self.scm.push_argv(),
             self._on_pushed,
