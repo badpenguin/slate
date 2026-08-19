@@ -841,9 +841,11 @@ class WindowActionTest(unittest.TestCase):
         owner = SimpleNamespace(
             panel=panel,
             active_project_name="repo",
+            unattended_verification_queue=[],
             _repository_scm=MagicMock(return_value=scm),
             _repository_watcher=MagicMock(return_value=watcher),
             _close_preview=MagicMock(),
+            _start_next_unattended_verification=MagicMock(),
         )
         status = FileStatus("a.py", "modified")
         with patch("slate.window.run_async") as run:
@@ -859,6 +861,11 @@ class WindowActionTest(unittest.TestCase):
         completed(CommandResult(("hg", "commit", "a.py"), 0, "", ""))
         watcher.request_full.assert_called_once_with()
         watcher.request_paths.assert_not_called()
+        self.assertEqual(
+            owner.unattended_verification_queue,
+            [("repo", RepositoryRef(".", "hg"))],
+        )
+        owner._start_next_unattended_verification.assert_called_once_with()
         panel.clear_message.assert_not_called()
         panel.clear_error.assert_called_once_with()
         self.assertEqual(
@@ -883,9 +890,11 @@ class WindowActionTest(unittest.TestCase):
         owner = SimpleNamespace(
             panel=panel,
             active_project_name="workspace",
+            unattended_verification_queue=[],
             _repository_scm=MagicMock(side_effect=scms.get),
             _repository_watcher=MagicMock(return_value=None),
             _close_preview=MagicMock(),
+            _start_next_unattended_verification=MagicMock(),
         )
         statuses = [
             FileStatus("a", "modified", repository="one"),
@@ -901,6 +910,11 @@ class WindowActionTest(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         panel.uncheck_statuses.assert_called_once_with([statuses[0]])
         panel.show_error.assert_called_once_with("two: errore")
+        self.assertEqual(
+            owner.unattended_verification_queue,
+            [("workspace", RepositoryRef("one", "hg"))],
+        )
+        owner._start_next_unattended_verification.assert_called_once_with()
         self.assertEqual(panel.set_commit_busy.call_args_list, [call(True), call(False)])
 
     def test_commit_expands_one_moved_row_to_both_mercurial_paths(self) -> None:

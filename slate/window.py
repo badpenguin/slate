@@ -2848,6 +2848,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             return
         groups = SlateWindow._group_statuses_by_repository(statuses)
         operations: list[tuple[RepositoryRef, list[FileStatus], list[str]]] = []
+        project_name = self.active_project_name
         for repository, repository_statuses in groups:
             scm = self._repository_scm(repository)
             if scm is None:
@@ -2903,11 +2904,19 @@ class SlateWindow(Gtk.ApplicationWindow):
                     detail = result.stderr.strip() or "Commit failed."
                     self.panel.show_error(f"{repository.path}: {detail}")
                     return
-                # 2026-08-19: a successful commit changes the local comparison
-                # immediately, but only Verify may contact the remote again.
+                # 2026-08-19: the successful commit invalidates the displayed
+                # comparison and queues a fresh unattended Verify behind any
+                # remote check already in progress.
                 self.panel.set_remote_status(
                     repository, RepositorySyncStatus()
                 )
+                verification_key = (project_name, repository)
+                if (
+                    project_name is not None
+                    and verification_key not in self.unattended_verification_queue
+                ):
+                    self.unattended_verification_queue.append(verification_key)
+                    self._start_next_unattended_verification()
                 # 2026-08-17: cross-repository commits cannot be atomic; clearing
                 # only successful targets makes partial completion explicit.
                 self.panel.uncheck_statuses(repository_statuses)
