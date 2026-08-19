@@ -1,12 +1,34 @@
 [build-system]
-requires = ["setuptools>=68"]
+# 2026-08-19: setuptools 77.0.3 introduce i metadati licenza PEP 639 usati
+# sotto, evitando il precedente formato a tabella ormai deprecato.
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "slate-agent-terminal-environment"
 version = "1.4"
 description = "Simple Linux Agent Terminal Environment with tmux and local SCM status"
+# 2026-08-19: i metadati pubblici collegano il pacchetto alla documentazione,
+# all'autore, alla licenza e ai canali ufficiali del progetto GitHub.
+readme = "README.md"
+authors = [{ name = "Antonio Gallo", email = "agx@linux.it" }]
+license = "GPL-2.0-or-later"
+license-files = ["LICENSE"]
+keywords = ["codex", "git", "gtk3", "linux", "mercurial", "terminal", "tmux"]
 requires-python = ">=3.11"
+classifiers = [
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/badpenguin/slate"
+Source = "https://github.com/badpenguin/slate"
+Issues = "https://github.com/badpenguin/slate/issues"
 
 [project.scripts]
 slate = "slate.launcher:main"
