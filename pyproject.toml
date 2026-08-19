@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slate-agent-terminal-environment"
-version = "1.5"
+version = "1.5.1"
 description = "Simple Linux Agent Terminal Environment with tmux and local SCM status"
 # 2026-08-19: i metadati pubblici collegano il pacchetto alla documentazione,
 # all'autore, alla licenza e ai canali ufficiali del progetto GitHub.
