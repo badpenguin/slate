@@ -82,11 +82,29 @@ stesso terminale.
 
 ## Interfaccia
 
-La finestra è divisa in tre aree:
+La finestra è divisa in tre colonne:
 
 1. **Progetti**: progetti, terminali, editor e pagine Web aperte.
 2. **Area di lavoro**: terminale, editor o browser selezionato.
 3. **Revisioni/File**: modifiche dei repository oppure albero dei file.
+
+```text
+Nuovo progetto | Apri terminale | Esegui | Codex | Apri URL | Incognito
+┌────────────────────────┬──────────────────────────────────────────┬────────────────────────────┐
+│ PROGETTI               │ AREA DI LAVORO                           │ REVISIONI | FILE           │
+├────────────────────────┼──────────────────────────────────────────┼────────────────────────────┤
+│ ▾ progetto-demo        │ $ npm run dev                            │ Git · main                 │
+│   terminale-1          │ Avvio del server di sviluppo...          │                            │
+│   codex-1              │                                          │ Modificati                 │
+│   src/app.py           │ Il terminale, l'editor o il browser      │   [×] src/app.py           │
+│   Pagina Web           │ selezionato occupa questa colonna.       │                            │
+│                        │                                          │ Nuovi                      │
+│ ▸ secondo-progetto     │ Cambiare elemento non interrompe i       │   [ ] tests/test_app.py    │
+│                        │ processi degli altri terminali.          │                            │
+│                        │                                          │ Messaggio di commit        │
+│                        │                                          │ [Tutti i file]  [Commit]   │
+└────────────────────────┴──────────────────────────────────────────┴────────────────────────────┘
+```
 
 Il progetto attivo conserva separatamente terminali, file aperti e pagine Web.
 Le dimensioni del testo di terminale, Revisioni, File ed Editor sono regolabili
