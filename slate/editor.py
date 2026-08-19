@@ -525,15 +525,28 @@ class EditorDocument(Gtk.Box):
         self.save_button.set_sensitive(False)
         self.save_cancellable = Gio.Cancellable()
         expected_etag = None if self.force_next_save else self.etag
-        self.file.replace_contents_bytes_async(
-            GLib.Bytes.new(data),
-            expected_etag,
-            False,
-            Gio.FileCreateFlags.REPLACE_DESTINATION,
-            self.save_cancellable,
-            self._on_saved,
-            None,
-        )
+        if data:
+            self.file.replace_contents_bytes_async(
+                GLib.Bytes.new(data),
+                expected_etag,
+                False,
+                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                self.save_cancellable,
+                self._on_saved,
+                None,
+            )
+        else:
+            # 2026-08-19: the Python-bytes overload handles an empty payload;
+            # GLib.Bytes exposes it as NULL and Gio rejects it before callback.
+            self.file.replace_contents_async(
+                data,
+                expected_etag,
+                False,
+                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                self.save_cancellable,
+                self._on_saved,
+                None,
+            )
 
     def _on_saved(
         self, source: Gio.File, result: Gio.AsyncResult, _data: object

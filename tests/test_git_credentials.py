@@ -11,14 +11,18 @@ class GitCredentialHelperTest(unittest.TestCase):
     """Verify credential protocol output and non-persistent Git configuration."""
 
     def test_environment_replaces_persistent_helpers_for_one_process(self) -> None:
-        """The push environment selects only SLATE's one-use helper."""
+        """The push environment selects a memory cache and SLATE's GTK fallback."""
 
         environment = git_credentials.credential_environment({"LC_ALL": "C"})
         self.assertEqual(environment["LC_ALL"], "C")
         self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
-        self.assertEqual(environment["GIT_CONFIG_COUNT"], "2")
+        self.assertEqual(environment["GIT_CONFIG_COUNT"], "3")
         self.assertEqual(environment["GIT_CONFIG_VALUE_0"], "")
-        self.assertIn("slate.git_credentials", environment["GIT_CONFIG_VALUE_1"])
+        self.assertEqual(
+            environment["GIT_CONFIG_VALUE_1"],
+            "cache --timeout=3600",
+        )
+        self.assertIn("slate.git_credentials", environment["GIT_CONFIG_VALUE_2"])
 
     def test_get_returns_prompted_values_only_on_standard_output(self) -> None:
         """A get request emits the username and token accepted in the GTK form."""

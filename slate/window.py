@@ -32,7 +32,7 @@ from .repository_actions import (
 )
 from .repository_discovery import RepositoryDiscovery
 from .repository_update import RepositoryUpdateDialog
-from .repository_verify import RepositoryVerifyDialog
+from .repository_verify import RepositoryVerifyDialog, UnattendedRepositoryVerifier
 from .scm.base import FileStatus, RepositoryRef, RepositorySyncStatus, SCM
 from .scm.detect import is_normal_repository
 from .scm.git import GitSCM
@@ -126,6 +126,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.project_drag_source: _SidebarIdentity | None = None
         self.closing = False
         self.repository_dialog: Gtk.Dialog | None = None
+        self.unattended_verifier: UnattendedRepositoryVerifier | None = None
+        self.unattended_verifier_key: tuple[str, RepositoryRef] | None = None
+        self.unattended_verification_queue: list[tuple[str, RepositoryRef]] = []
+        self.verified_projects: set[str] = set()
         self._terminate_started_at = 0
         self.attention_terminals: set[Gtk.Widget] = set()
         self.browser_bell_timeout_id: int | None = None
@@ -1169,6 +1173,10 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.panel.set_repositories(repositories, False)
             if error:
                 self.panel.show_error(f"Repository scan failed: {error}")
+            self._queue_unattended_project_verification(
+                project_name,
+                force=refresh_existing,
+            )
 
         discovery = RepositoryDiscovery(
             project["path"],
@@ -1196,6 +1204,104 @@ class SlateWindow(Gtk.ApplicationWindow):
         project = self.config.find_project(self.active_project_name or "")
         if project is not None:
             self._scan_project_repositories(project, refresh_existing=True)
+
+    def _queue_unattended_project_verification(
+        self, project_name: str, *, force: bool = False
+    ) -> None:
+        """Queue one lazy sequential remote check for an initialized project."""
+
+        if (
+            project_name != self.active_project_name
+            or project_name in self.discovery_by_project
+            or (not force and project_name in self.verified_projects)
+        ):
+            return
+        self.verified_projects.add(project_name)
+        queued = set(self.unattended_verification_queue)
+        current = self.unattended_verifier_key
+        for repository in self._sorted_repositories(
+            self.repositories_by_project.get(project_name, set())
+        ):
+            key = (project_name, repository)
+            # 2026-08-19: a manual Scan made during a running initial check must
+            # still schedule one fresh comparison after that in-flight result.
+            if key in queued or (key == current and not force):
+                continue
+            self.unattended_verification_queue.append(key)
+            queued.add(key)
+        self._start_next_unattended_verification()
+
+    def _start_next_unattended_verification(self) -> None:
+        """Start the next queued check while keeping remote traffic single-flight."""
+
+        if self.unattended_verifier is not None:
+            return
+        while self.unattended_verification_queue:
+            key = self.unattended_verification_queue.pop(0)
+            project_name, repository = key
+            if project_name != self.active_project_name:
+                self.verified_projects.discard(project_name)
+                continue
+            scm = self.scm_by_repository.get(key)
+            watcher = self.watchers.get(key)
+            if scm is None or watcher is None:
+                continue
+
+            def verified(
+                status: RepositorySyncStatus,
+                repo_key: tuple[str, RepositoryRef] = key,
+            ) -> None:
+                """Publish a headless result to the owning cached panel model."""
+
+                self.panel.set_project_remote_status(
+                    repo_key[0], repo_key[1], status
+                )
+
+            def closed(repo_key: tuple[str, RepositoryRef] = key) -> None:
+                """Release the completed task and continue the global queue."""
+
+                self._on_unattended_verification_closed(repo_key)
+
+            self.unattended_verifier_key = key
+            self.unattended_verifier = UnattendedRepositoryVerifier(
+                scm,
+                watcher,
+                verified,
+                closed,
+            )
+            self.unattended_verifier.start()
+            return
+
+    def _on_unattended_verification_closed(
+        self, key: tuple[str, RepositoryRef]
+    ) -> None:
+        """Forget one headless task and launch the next queued repository."""
+
+        if self.unattended_verifier_key != key:
+            return
+        self.unattended_verifier = None
+        self.unattended_verifier_key = None
+        self._start_next_unattended_verification()
+
+    def _stop_unattended_verification(self) -> None:
+        """Cancel background verification before an explicit repository modal."""
+
+        self.unattended_verification_queue.clear()
+        verifier = self.unattended_verifier
+        if verifier is not None:
+            verifier.close()
+
+    def _remove_unattended_repository_verification(
+        self, key: tuple[str, RepositoryRef]
+    ) -> None:
+        """Drop queued or active verification for a repository being removed."""
+
+        self.unattended_verification_queue = [
+            queued for queued in self.unattended_verification_queue if queued != key
+        ]
+        self.verified_projects.discard(key[0])
+        if self.unattended_verifier_key == key and self.unattended_verifier is not None:
+            self.unattended_verifier.close()
 
     def _reset_active_project_repositories(self) -> None:
         """Clear repository cache and exclusions, then rediscover from disk."""
@@ -1247,6 +1353,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Close and forget runtime objects belonging to one repository."""
 
         key = (project_name, repository)
+        self._remove_unattended_repository_verification(key)
         watcher = self.watchers.pop(key, None)
         if watcher is not None:
             watcher.close()
@@ -1726,6 +1833,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             if cached:
                 self.panel.update_status(*cached, repository)
         self._update_active_revision_count()
+        self._queue_unattended_project_verification(project["name"])
 
     def _on_row_expanded(
         self, _tree: Gtk.TreeView, tree_iter: Gtk.TreeIter, _path: Gtk.TreePath
@@ -3603,6 +3711,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         if self.repository_dialog is not None:
             self.repository_dialog.present()
             return
+        self._stop_unattended_verification()
         scm = self._repository_scm(repository)
         watcher = self._repository_watcher(repository)
         if scm is None or watcher is None:
@@ -3628,6 +3737,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         if self.repository_dialog is not None:
             self.repository_dialog.present()
             return
+        self._stop_unattended_verification()
         scm = self._repository_scm(repository)
         watcher = self._repository_watcher(repository)
         if scm is None or watcher is None:
@@ -3828,6 +3938,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Release monitors and timers, then destroy the sole window."""
 
         self._close_preview()
+        self._stop_unattended_verification()
         if self.browser_bell_timeout_id is not None:
             GLib.source_remove(self.browser_bell_timeout_id)
             self.browser_bell_timeout_id = None

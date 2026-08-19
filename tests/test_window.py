@@ -14,7 +14,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gtk
 
 from slate.processes import CommandResult
-from slate.scm.base import FileStatus, RepositoryRef
+from slate.scm.base import FileStatus, RepositoryRef, RepositorySyncStatus
 from slate.scm.git import GitSCM
 from slate.window import SlateWindow, _moved_sequence
 
@@ -300,6 +300,7 @@ class WindowActionTest(unittest.TestCase):
             _set_revision_count=MagicMock(),
             _ensure_project_repositories=MagicMock(return_value=[]),
             _update_active_revision_count=MagicMock(),
+            _queue_unattended_project_verification=MagicMock(),
         )
         first = {
             "name": "first",
@@ -471,6 +472,65 @@ class WindowActionTest(unittest.TestCase):
         owner.scanned_projects.add("repo")
         SlateWindow._ensure_project_repositories(owner, project)
         owner._scan_project_repositories.assert_called_once_with(project)
+
+    def test_unattended_verification_is_lazy_once_and_scan_can_force_it(self) -> None:
+        """Only the active initialized project runs one check until manual Scan."""
+
+        repository = RepositoryRef(".", "git")
+        key = ("repo", repository)
+        owner = SimpleNamespace(
+            active_project_name="repo",
+            discovery_by_project={},
+            verified_projects=set(),
+            unattended_verification_queue=[],
+            unattended_verifier=None,
+            unattended_verifier_key=None,
+            repositories_by_project={"repo": {repository}},
+            scm_by_repository={key: GitSCM("/tmp/repo")},
+            watchers={key: MagicMock()},
+            panel=MagicMock(),
+            _sorted_repositories=SlateWindow._sorted_repositories,
+        )
+        owner._start_next_unattended_verification = (
+            SlateWindow._start_next_unattended_verification.__get__(owner)
+        )
+        owner._on_unattended_verification_closed = (
+            SlateWindow._on_unattended_verification_closed.__get__(owner)
+        )
+        with patch("slate.window.UnattendedRepositoryVerifier") as verifier_type:
+            SlateWindow._queue_unattended_project_verification(owner, "repo")
+            verifier_type.assert_called_once()
+            verifier_type.return_value.start.assert_called_once_with()
+            verified = verifier_type.call_args.args[2]
+            closed = verifier_type.call_args.args[3]
+            verified(RepositorySyncStatus("synced"))
+            owner.panel.set_project_remote_status.assert_called_once_with(
+                "repo", repository, RepositorySyncStatus("synced")
+            )
+            closed()
+            SlateWindow._queue_unattended_project_verification(owner, "repo")
+            self.assertEqual(verifier_type.call_count, 1)
+            SlateWindow._queue_unattended_project_verification(
+                owner, "repo", force=True
+            )
+            self.assertEqual(verifier_type.call_count, 2)
+
+    def test_inactive_project_never_queues_unattended_verification(self) -> None:
+        """Configured projects remain network-lazy until explicitly activated."""
+
+        owner = SimpleNamespace(
+            active_project_name="other",
+            discovery_by_project={},
+            verified_projects=set(),
+            unattended_verification_queue=[],
+            unattended_verifier=None,
+            unattended_verifier_key=None,
+            repositories_by_project={"repo": {RepositoryRef(".", "git")}},
+            _start_next_unattended_verification=MagicMock(),
+        )
+        SlateWindow._queue_unattended_project_verification(owner, "repo")
+        self.assertEqual(owner.unattended_verification_queue, [])
+        owner._start_next_unattended_verification.assert_not_called()
 
     def test_project_population_does_not_materialize_lazy_terminals(self) -> None:
         """Sidebar reconstruction creates configured rows without VTE/tmux clients."""

@@ -37,7 +37,10 @@ SLATE richiede:
 - tmux 3.x;
 - Git per clonare SLATE e gestire repository Git.
 
-Su Ubuntu 24.04 e Linux Mint 22, installare i componenti indispensabili con:
+#### Debian, Ubuntu e Linux Mint
+
+Su Debian 12 o successivo, Ubuntu 24.04 o successivo e Linux Mint 22 o
+successivo, installare i componenti indispensabili con:
 
 ```console
 sudo apt update
@@ -45,19 +48,55 @@ sudo apt install git gir1.2-gtk-3.0 gir1.2-gtksource-4 \
     gir1.2-vte-2.91 gir1.2-webkit2-4.1 python3 python3-gi tmux
 ```
 
-Questi strumenti abilitano funzionalità aggiuntive:
+#### Fedora
+
+Installare i componenti indispensabili con:
+
+```console
+sudo dnf install git gtk3 gtksourceview4 python3 python3-gobject \
+    tmux vte291 webkit2gtk4.1
+```
+
+#### Arch Linux
+
+Aggiornare il sistema e installare i componenti indispensabili dai repository
+ufficiali con:
+
+```console
+sudo pacman -Syu --needed git gtk3 gtksourceview4 python python-gobject \
+    tmux vte3 webkit2gtk-4.1
+```
+
+### Strumenti opzionali
+
+Questi strumenti abilitano funzionalità aggiuntive ma non sono necessari per
+avviare SLATE. Su Debian, Ubuntu e Linux Mint, installarli con:
 
 ```console
 sudo apt install meld mercurial tortoisehg vim-gtk3 xdg-utils
 ```
 
-| Pacchetto     | Funzionalità                                      |
-|---------------|---------------------------------------------------|
-| `meld`        | Confronti grafici                                 |
-| `mercurial`   | Repository Mercurial                              |
-| `tortoisehg`  | Interfaccia TortoiseHg per repository Mercurial   |
-| `vim-gtk3`    | Modifica esterna con gVim                         |
-| `xdg-utils`   | Apertura con l'applicazione desktop predefinita   |
+Su Fedora, installarli con:
+
+```console
+sudo dnf install meld mercurial tortoisehg vim-X11 xdg-utils
+```
+
+Su Arch Linux, installare quelli disponibili nei repository ufficiali con:
+
+```console
+sudo pacman -S --needed gvim meld mercurial xdg-utils
+```
+
+TortoiseHg è disponibile separatamente nell'Arch User Repository (AUR).
+
+| Strumento   | Funzionalità                                      |
+|-------------|---------------------------------------------------|
+| Meld        | Confronti grafici                                 |
+| Mercurial   | Repository Mercurial                              |
+| TortoiseHg  | Interfaccia TortoiseHg per repository Mercurial   |
+| gVim        | Modifica esterna con gVim                         |
+| `xdg-open`  | Apertura con l'applicazione desktop predefinita   |
 
 Il pulsante **Codex** richiede la
 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), già installata e
@@ -168,6 +207,7 @@ unstaged e non esegue automaticamente `git add` prima del commit.
 
 Dal menu contestuale della radice del repository sono disponibili:
 
+- **Verify**;
 - **Update**;
 - **Publish**;
 - **New branch**;
@@ -181,11 +221,19 @@ automaticamente destinazioni, non esegue force push o rebase e non crea commit
 automatici durante i merge. Conflitti, divergenze e situazioni ambigue vengono
 segnalati e lasciati alla gestione esplicita dell'utente.
 
+Lo stato remoto viene verificato senza dialog una volta alla prima attivazione
+del progetto e nuovamente dopo ogni **Scan** manuale. I controlli restano lazy
+sul solo progetto attivo, procedono un repository alla volta e non richiedono
+mai credenziali; possono soltanto riutilizzare quelle già disponibili nella
+cache Git in memoria o in un agente SSH. **Verify** resta disponibile per un
+nuovo tentativo esplicito.
+
 Durante **Publish**, Git richiede automaticamente le credenziali necessarie per
 un remote HTTPS. SLATE mostra una finestra per utente e password o token e usa i
-valori soltanto per quella pubblicazione, senza salvarli nella configurazione,
-nel repository o in un gestore di credenziali. GitHub richiede un token personale
-al posto della password dell'account.
+valori tramite la cache Git esclusivamente in memoria per un massimo di 60 minuti.
+Le credenziali non vengono mai scritte nella configurazione di SLATE, nel
+repository o in un gestore di credenziali persistente. GitHub richiede un token
+personale al posto della password dell'account.
 
 Git worktree e submodule con `.git` in forma di file non sono supportati.
 

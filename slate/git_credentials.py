@@ -13,8 +13,11 @@ from gi.repository import Gtk, Pango  # noqa: E402
 
 
 # 2026-08-19: Git's credential protocol decides when HTTPS authentication is
-# needed; SLATE supplies one-use values without putting secrets in argv, URLs,
+# needed; SLATE supplies values without putting secrets in argv, URLs,
 # environment variables, files or persistent credential helpers.
+CREDENTIAL_CACHE_TIMEOUT_SECONDS = 60 * 60
+
+
 class GitCredentialDialog(Gtk.Dialog):
     """Collect one username and password/token pair for a Git HTTPS request."""
 
@@ -33,7 +36,7 @@ class GitCredentialDialog(Gtk.Dialog):
         content.set_spacing(12)
 
         explanation = Gtk.Label(
-            label="Enter credentials valid only for this publication.",
+            label="Credentials remain only in memory for up to 60 minutes.",
             xalign=0,
         )
         explanation.set_line_wrap(True)
@@ -95,20 +98,24 @@ class GitCredentialDialog(Gtk.Dialog):
 
 
 def credential_environment(base: Mapping[str, str]) -> dict[str, str]:
-    """Return a Git environment using only SLATE's ephemeral credential helper."""
+    """Return a Git environment with a one-hour memory cache before SLATE's prompt."""
 
     environment = dict(base)
     helper = f"!{shlex.quote(sys.executable)} -m slate.git_credentials"
-    # An empty first value clears configured helpers for this process only;
-    # otherwise Git could persist the entered token through a global helper.
+    # 2026-08-19: clear configured helpers before adding Git's memory-only cache
+    # and the GTK fallback, so a persistent global helper can never save tokens.
     environment.update(
         {
             "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_COUNT": "3",
             "GIT_CONFIG_KEY_0": "credential.helper",
             "GIT_CONFIG_VALUE_0": "",
             "GIT_CONFIG_KEY_1": "credential.helper",
-            "GIT_CONFIG_VALUE_1": helper,
+            "GIT_CONFIG_VALUE_1": (
+                f"cache --timeout={CREDENTIAL_CACHE_TIMEOUT_SECONDS}"
+            ),
+            "GIT_CONFIG_KEY_2": "credential.helper",
+            "GIT_CONFIG_VALUE_2": helper,
         }
     )
     return environment

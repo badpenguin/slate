@@ -102,6 +102,20 @@ class EditorTest(unittest.TestCase):
         self.assertEqual(self.path.read_text(encoding="utf-8"), "# TODO\n- prova\n")
         editor.close()
 
+    def test_empty_document_save_completes(self) -> None:
+        """Truncating a document still resolves the callback used by Save all."""
+
+        editor = self._document()
+        editor.buffer.set_text("")
+        self.assertTrue(editor.dirty)
+        completed: list[bool] = []
+        editor.save(completed.append)
+        self._wait_until(lambda: bool(completed))
+        self.assertEqual(completed, [True])
+        self.assertEqual(self.path.read_bytes(), b"")
+        self.assertFalse(editor.dirty)
+        editor.close()
+
     def test_external_clean_reload_is_silent(self) -> None:
         """An external write silently reloads a buffer without local edits."""
 

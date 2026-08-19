@@ -33,7 +33,10 @@ SLATE requires:
 - tmux 3.x;
 - Git to clone SLATE and manage Git repositories.
 
-On Ubuntu 24.04 and Linux Mint 22, install the required components with:
+#### Debian, Ubuntu, and Linux Mint
+
+On Debian 12 or later, Ubuntu 24.04 or later, and Linux Mint 22 or later,
+install the required components with:
 
 ```console
 sudo apt update
@@ -41,19 +44,56 @@ sudo apt install git gir1.2-gtk-3.0 gir1.2-gtksource-4 \
     gir1.2-vte-2.91 gir1.2-webkit2-4.1 python3 python3-gi tmux
 ```
 
-These tools enable additional features:
+#### Fedora
+
+Install the required components with:
+
+```console
+sudo dnf install git gtk3 gtksourceview4 python3 python3-gobject \
+    tmux vte291 webkit2gtk4.1
+```
+
+#### Arch Linux
+
+Upgrade the system and install the required components from the official
+repositories with:
+
+```console
+sudo pacman -Syu --needed git gtk3 gtksourceview4 python python-gobject \
+    tmux vte3 webkit2gtk-4.1
+```
+
+### Optional tools
+
+These tools enable additional features but are not required to launch SLATE.
+On Debian, Ubuntu, and Linux Mint, install them with:
 
 ```console
 sudo apt install meld mercurial tortoisehg vim-gtk3 xdg-utils
 ```
 
-| Package      | Feature                                   |
+On Fedora, install them with:
+
+```console
+sudo dnf install meld mercurial tortoisehg vim-X11 xdg-utils
+```
+
+On Arch Linux, install the tools available from the official repositories
+with:
+
+```console
+sudo pacman -S --needed gvim meld mercurial xdg-utils
+```
+
+TortoiseHg is available separately from the Arch User Repository (AUR).
+
+| Tool         | Feature                                   |
 |--------------|-------------------------------------------|
-| `meld`       | Graphical comparisons                     |
-| `mercurial`  | Mercurial repositories                    |
-| `tortoisehg` | TortoiseHg interface for Mercurial repos  |
-| `vim-gtk3`   | External editing with gVim                |
-| `xdg-utils`  | Open with the default desktop application |
+| Meld         | Graphical comparisons                     |
+| Mercurial    | Mercurial repositories                    |
+| TortoiseHg   | TortoiseHg interface for Mercurial repos  |
+| gVim         | External editing with gVim                |
+| `xdg-open`   | Open with the default desktop application |
 
 The **Codex** button requires the
 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), already installed and
@@ -165,6 +205,7 @@ commit.
 
 The repository root context menu provides:
 
+- **Verify**;
 - **Update**;
 - **Publish**;
 - **New branch**;
@@ -178,11 +219,18 @@ configure destinations automatically, perform force pushes or rebases, or
 create commits automatically during merges. Conflicts, divergences, and
 ambiguous situations are reported and left for the user to handle explicitly.
 
+Remote status is verified without a dialog once when the project is first
+activated and again after every manual **Scan**. The checks remain lazy to the
+active project, run one repository at a time, and never request credentials;
+they can only reuse credentials already available in Git's memory cache or an
+SSH agent. **Verify** remains available for an explicit retry.
+
 During **Publish**, Git automatically requests any credentials
 required by an HTTPS remote. SLATE displays a username and password or token
-dialog and uses the values only for that publication, without saving them in
-its configuration, the repository, or a credential manager. GitHub requires a
-personal access token instead of the account password.
+dialog and keeps the values in Git's memory-only credential cache for up to 60
+minutes. Credentials are never written to SLATE's configuration, the repository,
+or a persistent credential manager. GitHub requires a personal access token
+instead of the account password.
 
 Git worktrees and submodules where `.git` is a file are not supported.
 

@@ -9,7 +9,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk  # noqa: E402
 
-from .processes import CommandResult
+from .git_credentials import CREDENTIAL_CACHE_TIMEOUT_SECONDS
+from .processes import AsyncCommand, CommandResult, run_async
 from .repository_dialog import RepositoryOperationDialog
 from .scm.base import RepositorySyncStatus, SCM
 from .scm.git import GitSCM
@@ -21,8 +22,8 @@ def _git_verification_environment(base: Mapping[str, str]) -> dict[str, str]:
     """Disable interactive Git/SSH credential prompts for verification."""
 
     environment = dict(base)
-    # 2026-08-19: verification is explicit but informational; it may reuse
-    # silent credential helpers and SSH agents, but must never open a login UI.
+    # 2026-08-19: verification may reuse only Git's memory cache and SSH agent;
+    # clearing the helper list prevents global helpers from opening login UI.
     environment.update(
         {
             "GIT_TERMINAL_PROMPT": "0",
@@ -31,9 +32,15 @@ def _git_verification_environment(base: Mapping[str, str]) -> dict[str, str]:
             "SSH_ASKPASS_REQUIRE": "never",
             "GIT_SSH_COMMAND": "ssh -oBatchMode=yes",
             "GCM_INTERACTIVE": "Never",
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "credential.interactive",
-            "GIT_CONFIG_VALUE_0": "false",
+            "GIT_CONFIG_COUNT": "3",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "",
+            "GIT_CONFIG_KEY_1": "credential.helper",
+            "GIT_CONFIG_VALUE_1": (
+                f"cache --timeout={CREDENTIAL_CACHE_TIMEOUT_SECONDS}"
+            ),
+            "GIT_CONFIG_KEY_2": "credential.interactive",
+            "GIT_CONFIG_VALUE_2": "false",
         }
     )
     return environment
@@ -50,28 +57,14 @@ def _mercurial_verification_environment(
     return environment
 
 
-class RepositoryVerifyDialog(RepositoryOperationDialog):
-    """Compare one local branch with its configured remote without updating it."""
+class _RepositoryVerificationWorkflow:
+    """Share the asynchronous Git/HG comparison state machine across frontends."""
 
-    def __init__(
-        self,
-        parent: Gtk.Window,
-        scm: SCM,
-        watcher: RepoWatcher,
-        on_closed: Callable[[], None],
-        on_verified: Callable[[RepositorySyncStatus], None],
+    def _initialize_verification(
+        self, on_verified: Callable[[RepositorySyncStatus], None]
     ) -> None:
-        """Build the verification modal and retain its result callback."""
+        """Initialize mutable state used by one repository comparison."""
 
-        super().__init__(
-            parent,
-            "Verify repository",
-            scm,
-            watcher,
-            on_closed,
-            cancellation_title="Verification cancelled",
-            allow_idle_close=False,
-        )
         self.on_verified = on_verified
         self.branch = ""
         self.upstream = ""
@@ -300,9 +293,10 @@ class RepositoryVerifyDialog(RepositoryOperationDialog):
         else:
             state = "synced"
             title = "Repository is up to date"
-        detail = f"Ahead: {ahead} · Behind: {behind}"
         self._finish_verified(
-            RepositorySyncStatus(state, ahead, behind), title, detail
+            RepositorySyncStatus(state, ahead, behind),
+            title,
+            f"Ahead: {ahead} · Behind: {behind}",
         )
 
     def _finish_access_required(self, result: CommandResult) -> None:
@@ -329,3 +323,125 @@ class RepositoryVerifyDialog(RepositoryOperationDialog):
 
         self.on_verified(status)
         self._finish(title, detail)
+
+
+class UnattendedRepositoryVerifier(_RepositoryVerificationWorkflow):
+    """Run one lazy remote comparison without constructing or showing a dialog."""
+
+    def __init__(
+        self,
+        scm: SCM,
+        watcher: RepoWatcher,
+        on_verified: Callable[[RepositorySyncStatus], None],
+        on_closed: Callable[[], None],
+    ) -> None:
+        """Retain one repository, its watcher boundary and completion callbacks."""
+
+        self.scm = scm
+        self.watcher = watcher
+        self.on_closed = on_closed
+        self.command: AsyncCommand | None = None
+        self.watcher_pause_requested = False
+        self.closed = False
+        self._initialize_verification(on_verified)
+
+    def start(self) -> None:
+        """Wait for the watcher read in flight before starting remote work."""
+
+        self.watcher_pause_requested = True
+        self.watcher.pause_after_current(self._on_watcher_paused)
+
+    def _on_watcher_paused(self) -> None:
+        """Start verification after obtaining exclusive repository access."""
+
+        if self.closed:
+            return
+        self._begin()
+
+    def _run_command(
+        self,
+        argv: list[str],
+        callback: Callable[[CommandResult], None],
+        _phase: str,
+        *,
+        cancellable: bool = False,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
+        """Launch one serialized command without exposing progress UI."""
+
+        del cancellable
+        self.command = run_async(
+            argv,
+            callback,
+            cwd=self.scm.root,
+            env=environment or self.scm.environment,
+        )
+
+    def _prepare_result(self) -> bool:
+        """Release the completed command and reject callbacks after closure."""
+
+        self.command = None
+        return not self.closed
+
+    def _finish_verified(
+        self,
+        status: RepositorySyncStatus,
+        _title: str,
+        _detail: str,
+    ) -> None:
+        """Publish a terminal informational status without presenting UI."""
+
+        self.on_verified(status)
+        self._close()
+
+    def _finish_error(self, _title: str, _result: CommandResult) -> None:
+        """Finish silently after the workflow publishes its failure status."""
+
+        self._close()
+
+    def close(self) -> None:
+        """Cancel an unfinished verification and release its watcher boundary."""
+
+        if self.command is not None:
+            self.command.cancel()
+            self.command = None
+        self._close()
+
+    def _close(self) -> None:
+        """Resume the watcher once and notify the unattended queue."""
+
+        if self.closed:
+            return
+        self.closed = True
+        if self.watcher_pause_requested:
+            self.watcher_pause_requested = False
+            self.watcher.resume_with_full_refresh(refresh_branch=True)
+        self.on_closed()
+
+
+class RepositoryVerifyDialog(
+    _RepositoryVerificationWorkflow, RepositoryOperationDialog
+):
+    """Compare one repository with its remote through an explicit modal."""
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        scm: SCM,
+        watcher: RepoWatcher,
+        on_closed: Callable[[], None],
+        on_verified: Callable[[RepositorySyncStatus], None],
+    ) -> None:
+        """Build the verification modal and retain its result callback."""
+
+        RepositoryOperationDialog.__init__(
+            self,
+            parent,
+            "Verify repository",
+            scm,
+            watcher,
+            on_closed,
+            cancellation_title="Verification cancelled",
+            allow_idle_close=False,
+        )
+        self._initialize_verification(on_verified)
