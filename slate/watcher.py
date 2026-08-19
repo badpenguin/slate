@@ -45,6 +45,7 @@ class RepoWatcher:
         on_error: Callable[[str], None] | None = None,
         on_file_change: Callable[[str], None] | None = None,
         on_ignored: Callable[[set[str]], None] | None = None,
+        on_history_change: Callable[[], None] | None = None,
     ) -> None:
         """Discover ignores, mount monitors and publish status and file events."""
 
@@ -54,6 +55,7 @@ class RepoWatcher:
         self.on_error = on_error or self._ignore_error
         self.on_file_change = on_file_change or self._ignore_file_change
         self.on_ignored = on_ignored or self._ignore_ignored
+        self.on_history_change = on_history_change or self._ignore_history_change
         self.monitors: dict[str, Gio.FileMonitor] = {}
         self.ignored: set[str] = set()
         self.nested_repositories: set[str] = set()
@@ -258,10 +260,10 @@ class RepoWatcher:
                 self.ignored = self.scm.parse_ignored(result.stdout)
             except (ValueError, TypeError) as error:
                 self.on_error(
-                    f"File ignorati {self.scm.display_name} non validi: {error}"
+                    f"Invalid {self.scm.display_name} ignored files: {error}"
                 )
         else:
-            self.on_error(self._describe_error("Lettura file ignorati", result))
+            self.on_error(self._describe_error("Reading ignored files", result))
         # 2026-08-16: il file manager riusa la stessa classificazione del
         # watcher, evitando un secondo comando VCS e filtri divergenti.
         self.on_ignored(set(self.ignored))
@@ -275,7 +277,7 @@ class RepoWatcher:
         else:
             self.on_error(
                 self._describe_error(
-                    f"Lettura branch {self.scm.display_name}", result
+                    f"Reading {self.scm.display_name} branch", result
                 )
             )
 
@@ -285,7 +287,7 @@ class RepoWatcher:
         if not result.ok:
             self.on_error(
                 self._describe_error(
-                    f"Aggiornamento {self.scm.display_name}", result
+                    f"Updating {self.scm.display_name}", result
                 )
             )
             if not paths and not self._initial_full_complete:
@@ -294,7 +296,7 @@ class RepoWatcher:
         try:
             statuses = self.scm.parse_status(result.stdout)
         except (ValueError, TypeError) as error:
-            self.on_error(f"Status {self.scm.display_name} non valido: {error}")
+            self.on_error(f"Invalid {self.scm.display_name} status: {error}")
             if not paths and not self._initial_full_complete:
                 self._complete_initial_full_status()
             return
@@ -541,7 +543,7 @@ class RepoWatcher:
                         if entry.is_dir(follow_symlinks=False):
                             self._mount_queue.append(entry.path)
             except (OSError, GLib.Error) as error:
-                self.on_error(f"Monitor non disponibile per {directory}: {error}")
+                self.on_error(f"Monitor unavailable for {directory}: {error}")
         if self._mount_queue and not self.closed:
             # 2026-08-17: startup can observe a lock before the .hg monitor is
             # mounted; each mount batch rechecks release without a poll timer.
@@ -677,6 +679,7 @@ class RepoWatcher:
                 self.request_full()
             return
         if relative == ".hg/branch":
+            self.on_history_change()
             self.request_full(
                 refresh_branch=True,
             )
@@ -686,6 +689,8 @@ class RepoWatcher:
             or relative == ".hg/store"
             or relative.startswith(".hg/merge/")
         ):
+            if relative in {".hg/dirstate", ".hg/store"}:
+                self.on_history_change()
             self.request_full()
 
     def _on_git_metadata_change(
@@ -704,7 +709,13 @@ class RepoWatcher:
                 self.request_full()
             return
         if relative == ".git/HEAD":
+            self.on_history_change()
             self.request_full(refresh_branch=True)
+            return
+        if relative == ".git/packed-refs" or relative.startswith(".git/refs/"):
+            # 2026-08-19: local and remote ref movements make a previous
+            # explicit comparison stale without authorizing another fetch.
+            self.on_history_change()
             return
         if relative == ".git/index":
             self.request_full()
@@ -718,7 +729,7 @@ class RepoWatcher:
         """Build a concise user-facing subprocess error."""
 
         detail = str(result.error) if result.error else result.stderr.strip()
-        return f"{context}: {detail or f'codice {result.returncode}'}"
+        return f"{context}: {detail or f'exit code {result.returncode}'}"
 
     @staticmethod
     def _ignore_error(_message: str) -> None:
@@ -731,3 +742,7 @@ class RepoWatcher:
     @staticmethod
     def _ignore_ignored(_ignored: set[str]) -> None:
         """Accept intentionally unobserved ignore classification updates."""
+
+    @staticmethod
+    def _ignore_history_change() -> None:
+        """Accept intentionally unobserved repository-history changes."""

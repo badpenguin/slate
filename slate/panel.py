@@ -11,7 +11,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from .scm.base import FileStatus, RepositoryRef
+from .scm.base import FileStatus, RepositoryRef, RepositorySyncStatus
 
 
 @dataclass
@@ -26,6 +26,7 @@ class _SCMTreeState:
     iter_by_path: dict[str, Gtk.TreeIter]
     snapshots: dict[RepositoryRef, tuple[FileStatus, ...]]
     branches: dict[RepositoryRef, str]
+    sync_statuses: dict[RepositoryRef, RepositorySyncStatus]
     expanded_rows: set[str] = field(default_factory=set)
     selected_keys: set[str] = field(default_factory=set)
     scroll_value: float = 0.0
@@ -47,12 +48,12 @@ class SCMPanel(Gtk.Box):
     """Display normalized repository state and explicit local SCM actions."""
 
     GROUPS = (
-        ("conflict", "Conflitti", "dialog-warning"),
-        ("modified", "Modificati", "accessories-text-editor"),
-        ("moved", "Spostati", "go-jump"),
-        ("added", "Aggiunti", "list-add"),
-        ("removed", "Rimossi", "list-remove"),
-        ("untracked", "Nuovi", "document-new"),
+        ("conflict", "Conflicts", "dialog-warning"),
+        ("modified", "Modified", "accessories-text-editor"),
+        ("moved", "Moved", "go-jump"),
+        ("added", "Added", "list-add"),
+        ("removed", "Removed", "list-remove"),
+        ("untracked", "New", "document-new"),
     )
     ICONS = {state: icon for state, _title, icon in GROUPS}
     GROUP_ORDER = {state: index for index, (state, _title, _icon) in enumerate(GROUPS)}
@@ -147,14 +148,14 @@ class SCMPanel(Gtk.Box):
         """Create repository controls for the shared select-all toolbar."""
 
         self.scan_button = self._action_button(
-            "Scansiona", "view-refresh", self._on_scan_clicked
+            "Scan", "view-refresh", self._on_scan_clicked
         )
-        self.scan_button.set_tooltip_text("Cerca repository HG e Git nel progetto")
+        self.scan_button.set_tooltip_text("Find HG and Git repositories in the project")
         self.reset_button = self._action_button(
             "Reset", "edit-clear", self._on_reset_clicked
         )
         self.reset_button.set_tooltip_text(
-            "Dimentica cache ed esclusioni e ripete la scansione"
+            "Forget cache and exclusions, then scan again"
         )
 
     def _build_error_bar(self) -> None:
@@ -180,8 +181,8 @@ class SCMPanel(Gtk.Box):
         self.state_stack.add_named(
             self._empty_state(
                 "folder-remote-symbolic",
-                "Nessun repository supportato",
-                "Il terminale resta disponibile, ma non viene avviato alcun watcher.",
+                "No supported repository",
+                "The terminal remains available, but no watcher is started.",
             ),
             "unsupported",
         )
@@ -192,8 +193,8 @@ class SCMPanel(Gtk.Box):
         self.state_stack.add_named(
             self._empty_state(
                 "emblem-ok-symbolic",
-                "Working copy pulita",
-                "Nessuna modifica da esaminare.",
+                "Clean working copy",
+                "No changes to review.",
             ),
             "clean",
         )
@@ -226,7 +227,7 @@ class SCMPanel(Gtk.Box):
         self.text_renderer = Gtk.CellRendererText()
         self.text_renderer.set_property("xpad", 2)
         self.text_renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
-        column = Gtk.TreeViewColumn("Modifiche")
+        column = Gtk.TreeViewColumn("Changes")
         # 2026-08-16: la checkbox resta nella colonna gerarchica originale; si
         # riduce soltanto l'expander via CSS per non alterare allineamento e hitbox.
         column.pack_start(self.toggle_renderer, False)
@@ -245,7 +246,7 @@ class SCMPanel(Gtk.Box):
         )
         self.select_all_bar.set_no_show_all(True)
         self.select_all_bar.get_style_context().add_class("scm-select-all")
-        self.select_all_check = Gtk.CheckButton(label="Seleziona tutti")
+        self.select_all_check = Gtk.CheckButton(label="Select all")
         self.select_all_check.connect("toggled", self._on_select_all_toggled)
         self.select_all_bar.pack_start(self.select_all_check, False, False, 0)
         self.repository_actions = Gtk.Box(
@@ -285,7 +286,7 @@ class SCMPanel(Gtk.Box):
         filtered_store.set_visible_func(self._row_visible)
         return _SCMTreeState(filtered_store=filtered_store, store=store,
             repository_iters={}, group_iters={}, status_by_path={}, iter_by_path={},
-            snapshots={}, branches={})
+            snapshots={}, branches={}, sync_statuses={})
 
     def _compare_status_rows(
         self,
@@ -519,6 +520,7 @@ class SCMPanel(Gtk.Box):
             self.group_iters.pop((repository, state), None)
         self.current_state.snapshots.pop(repository, None)
         self.current_state.branches.pop(repository, None)
+        self.current_state.sync_statuses.pop(repository, None)
         repository_identity = self._repository_identity(repository)
         self.current_state.expanded_rows = {
             row_identity
@@ -545,7 +547,7 @@ class SCMPanel(Gtk.Box):
         )
         self.commit_section.set_no_show_all(True)
         self.commit_section.get_style_context().add_class("commit-section")
-        label = Gtk.Label(label="MESSAGGIO DI COMMIT")
+        label = Gtk.Label(label="COMMIT MESSAGE")
         label.set_xalign(0)
         label.get_style_context().add_class("section-title")
         self.commit_section.pack_start(label, False, False, 0)
@@ -554,7 +556,7 @@ class SCMPanel(Gtk.Box):
         # 2026-08-16: nel messaggio di commit Tab serve alla navigazione della
         # finestra; l'indentazione con tabulazioni non è un caso d'uso utile.
         self.message.set_accepts_tab(False)
-        self.message.set_tooltip_text("Messaggio di commit")
+        self.message.set_tooltip_text("Commit message")
         self.message.get_buffer().connect("changed", self._on_message_changed)
         self.message.connect("key-press-event", self._on_message_key_press)
         message_scroller = Gtk.ScrolledWindow()
@@ -572,10 +574,10 @@ class SCMPanel(Gtk.Box):
         self.tool_actions.set_no_show_all(True)
         self.tool_actions.get_style_context().add_class("scm-actions")
         self.add_new_button = self._action_button(
-            "Aggiungi nuovi", "emblem-default-symbolic", self._on_add_new_clicked
+            "Add new", "emblem-default-symbolic", self._on_add_new_clicked
         )
         self.revert_button = self._action_button(
-            "Ripristina selezionati",
+            "Revert selected",
             "edit-undo-symbolic",
             self._on_revert_checked_clicked,
         )
@@ -598,14 +600,14 @@ class SCMPanel(Gtk.Box):
         self.commit_actions.get_style_context().add_class("scm-actions")
         # 2026-08-16: duplicare il controllo vicino a Commit accorcia il flusso
         # operativo senza rimuovere quello utile durante la revisione in lista.
-        self.commit_select_all_check = Gtk.CheckButton(label="Tutti i file")
+        self.commit_select_all_check = Gtk.CheckButton(label="Select all")
         self.commit_select_all_check.set_no_show_all(True)
         self.commit_select_all_check.connect("toggled", self._on_select_all_toggled)
         self.commit_button = self._action_button(
             "Commit", "document-save-symbolic", self._on_commit_clicked
         )
         self.commit_button.set_no_show_all(True)
-        self.commit_shortcut_label = Gtk.Label(label="Ctrl+Invio")
+        self.commit_shortcut_label = Gtk.Label(label="Ctrl+Enter")
         self.commit_shortcut_label.get_style_context().add_class("commit-shortcut")
         self.commit_actions.pack_start(
             self.commit_select_all_check, False, False, 0
@@ -641,7 +643,7 @@ class SCMPanel(Gtk.Box):
         box.set_valign(Gtk.Align.CENTER)
         spinner = Gtk.Spinner()
         spinner.start()
-        label = Gtk.Label(label="Lettura stato repository…")
+        label = Gtk.Label(label="Reading repository status…")
         label.get_style_context().add_class("empty-state-detail")
         box.pack_start(spinner, False, False, 0)
         box.pack_start(label, False, False, 0)
@@ -755,13 +757,13 @@ class SCMPanel(Gtk.Box):
         self._show_conditional(self.commit_button)
         self._set_action_label(
             self.add_new_button,
-            f"Aggiungi nuovi ({new_count})" if new_count else "Aggiungi nuovi",
+            f"Add new ({new_count})" if new_count else "Add new",
         )
         self.add_new_button.set_sensitive(new_count > 0)
         self._sync_checked_actions()
 
     def _update_repository_label(self, repository: RepositoryRef) -> None:
-        """Render repository path, branch and local change count on its stable row."""
+        """Render repository path, branch and explicit remote state."""
 
         tree_iter = self.repository_iters.get(repository)
         if tree_iter is None:
@@ -772,7 +774,63 @@ class SCMPanel(Gtk.Box):
             base = repository.path
         branch = self.current_state.branches.get(repository, "")
         suffix = f" — {branch}" if branch else ""
-        self.store.set_value(tree_iter, self.COL_TEXT, f"{base}{suffix}")
+        # 2026-08-19: the explicit result lives beside the cached GTK model so
+        # project switches retain it without writing remote state to config.
+        sync_status = self.current_state.sync_statuses.get(
+            repository, RepositorySyncStatus()
+        )
+        if sync_status.state == "synced":
+            remote = "remote: up to date"
+        elif sync_status.state == "ahead":
+            remote = f"remote: ahead {sync_status.ahead}"
+        elif sync_status.state == "behind":
+            remote = f"remote: behind {sync_status.behind}"
+        elif sync_status.state == "diverged":
+            remote = (
+                f"remote: diverged · ahead {sync_status.ahead}, "
+                f"behind {sync_status.behind}"
+            )
+        elif sync_status.state == "local":
+            remote = "local repository"
+        elif sync_status.state == "unconfigured":
+            remote = "upstream not configured"
+        elif sync_status.state == "detached":
+            remote = "detached HEAD"
+        elif sync_status.state == "access_required":
+            remote = "remote access required"
+        else:
+            remote = "remote: not verified"
+        self.store.set_value(
+            tree_iter, self.COL_TEXT, f"{base}{suffix} — {remote}"
+        )
+
+    def set_remote_status(
+        self,
+        repository: RepositoryRef,
+        status: RepositorySyncStatus,
+    ) -> None:
+        """Update one repository's explicit remote result without rebuilding rows."""
+
+        self._ensure_repository(repository)
+        self.current_state.sync_statuses[repository] = status
+        self._update_repository_label(repository)
+
+    def set_project_remote_status(
+        self,
+        project_name: str,
+        repository: RepositoryRef,
+        status: RepositorySyncStatus,
+    ) -> None:
+        """Update remote state in either the visible or an inactive cached model."""
+
+        if project_name == self.current_project:
+            self.set_remote_status(repository, status)
+            return
+        state = self.project_states.get(project_name)
+        if state is not None:
+            # 2026-08-19: inactive models have no visible row to redraw; the
+            # normal project binding will render this invalidation on return.
+            state.sync_statuses[repository] = status
 
     def _reconcile_status_rows(
         self, repository: RepositoryRef, statuses: list[FileStatus]
@@ -1255,16 +1313,18 @@ class SCMPanel(Gtk.Box):
         if self.context_repository is None:
             return False
         menu = Gtk.Menu()
-        update_item = self._menu_item("Aggiorna…", "view-refresh", None)
-        publish_item = self._menu_item("Pubblica…", "document-send", None)
-        new_branch_item = self._menu_item("Nuovo branch…", "list-add", None)
-        switch_branch_item = self._menu_item("Passa a branch…", "go-jump", None)
+        verify_item = self._menu_item("Verify…", "view-refresh", None)
+        update_item = self._menu_item("Update…", "view-refresh", None)
+        publish_item = self._menu_item("Publish…", "document-send", None)
+        new_branch_item = self._menu_item("New branch…", "list-add", None)
+        switch_branch_item = self._menu_item("Switch branch…", "go-jump", None)
         merge_branch_item = self._menu_item("Merge branch…", "insert-link", None)
-        tag_item = self._menu_item("Assegna tag…", "bookmark-new", None)
-        meld_item = self._menu_item("Apri in Meld", "document-open", None)
+        tag_item = self._menu_item("Assign tag…", "bookmark-new", None)
+        meld_item = self._menu_item("Open in Meld", "document-open", None)
         exclude_item = self._menu_item(
-            "Escludi repository", "list-remove", None
+            "Exclude repository", "list-remove", None
         )
+        verify_item.connect("activate", self._on_context_verify)
         update_item.connect("activate", self._on_context_update)
         publish_item.connect("activate", self._on_context_publish)
         new_branch_item.connect("activate", self._on_context_new_branch)
@@ -1276,10 +1336,11 @@ class SCMPanel(Gtk.Box):
         menu.append(meld_item)
         if self.context_repository.scm_type == "hg":
             external_item = self._menu_item(
-                "Apri in TortoiseHg", "applications-system", None
+                "Open in TortoiseHg", "applications-system", None
             )
             external_item.connect("activate", self._on_context_external)
             menu.append(external_item)
+        menu.append(verify_item)
         # 2026-08-18: repository mutations follow harmless inspection tools
         # and remain visually separated from repository-list administration.
         menu.append(Gtk.SeparatorMenuItem())
@@ -1348,12 +1409,12 @@ class SCMPanel(Gtk.Box):
         # colpirebbero silenziosamente soltanto il file contestuale.
         multiple = len(self.context_selected_statuses) > 1
         if not multiple:
-            view_item = self._menu_item("Visualizza", "document-open", Gdk.KEY_v)
+            view_item = self._menu_item("View", "document-open", Gdk.KEY_v)
             internal_item = self._menu_item(
-                "Modifica in SLATE", "accessories-text-editor", Gdk.KEY_m
+                "Edit in SLATE", "accessories-text-editor", Gdk.KEY_m
             )
             external_item = self._menu_item(
-                "Modifica in gVim", "gvim", Gdk.KEY_e
+                "Edit in gVim", "gvim", Gdk.KEY_e
             )
             view_item.connect("activate", self._on_context_view)
             internal_item.connect("activate", self._on_context_edit_internal)
@@ -1373,9 +1434,9 @@ class SCMPanel(Gtk.Box):
         if self.context_checkbox_statuses:
             checkbox_count = len(self.context_checkbox_statuses)
             checkbox_label = (
-                f"Spunta ({checkbox_count})"
+                f"Check ({checkbox_count})"
                 if self.context_checkbox_checked
-                else f"Togli spunta ({checkbox_count})"
+                else f"Uncheck ({checkbox_count})"
             )
             checkbox_item = self._menu_item(
                 checkbox_label, "emblem-ok", Gdk.KEY_space
@@ -1384,19 +1445,19 @@ class SCMPanel(Gtk.Box):
             menu.append(checkbox_item)
         if self.context_add_statuses:
             add_label = (
-                "Aggiungi"
+                "Add"
                 if len(self.context_add_statuses) == 1
-                else f"Aggiungi ({len(self.context_add_statuses)})"
+                else f"Add ({len(self.context_add_statuses)})"
             )
             add_item = self._menu_item(add_label, "list-add", Gdk.KEY_a)
             add_item.connect("activate", self._on_context_add)
             menu.append(add_item)
         if self.context_forget_statuses:
-            forget_item = self._menu_item("Annulla aggiunta", "list-remove", None)
+            forget_item = self._menu_item("Undo add", "list-remove", None)
             forget_item.connect("activate", self._on_context_forget)
             menu.append(forget_item)
         if not multiple:
-            delete_item = self._menu_item("Elimina", "edit-delete", Gdk.KEY_Delete)
+            delete_item = self._menu_item("Delete", "edit-delete", Gdk.KEY_Delete)
             delete_item.connect("activate", self._on_context_delete)
             menu.append(Gtk.SeparatorMenuItem())
             menu.append(delete_item)
@@ -1589,6 +1650,11 @@ class SCMPanel(Gtk.Box):
 
         if self.context_repository is not None:
             self.on_external(self.context_repository)
+
+    def _on_context_verify(self, _item: Gtk.MenuItem) -> None:
+        """Schedule explicit remote verification for the contextual repository."""
+
+        self._schedule_repository_action("verify")
 
     def _on_context_update(self, _item: Gtk.MenuItem) -> None:
         """Schedule the repository update modal after menu deactivation."""

@@ -1,37 +1,39 @@
 # SLATE — Simple Linux Agent Terminal Environment
 
-SLATE riunisce progetti, terminali persistenti, modifiche Git/Mercurial, file,
-editor e pagine Web in un'unica applicazione GTK 3 per Linux.
+English | [Italiano](README.it.md)
 
-È pensato per chi lavora contemporaneamente su più progetti e vuole ritrovare
-terminali e strumenti nello stesso posto, senza creare file di stato nelle
-directory di lavoro.
+SLATE brings projects, persistent terminals, Git/Mercurial changes, files,
+an editor, and web pages together in a single GTK 3 application for Linux.
 
-## Cosa offre
+It is designed for people who work on multiple projects at the same time and
+want to find their terminals and tools in one place, without creating state
+files inside working directories.
 
-- un elenco ordinato di progetti e relativi terminali;
-- terminali persistenti tramite un server tmux dedicato;
-- avvio rapido di Codex o di qualsiasi comando shell;
-- stato e operazioni essenziali per repository Git e Mercurial;
-- esplorazione dei file con anteprima e azioni contestuali;
-- editor GtkSourceView integrato;
-- browser WebKitGTK con modalità normale, incognito e anteprima responsive;
-- caricamento su richiesta: all'avvio non vengono aperti terminali, editor o
-  pagine Web finché non vengono selezionati.
+## Features
 
-## Installazione rapida
+- an ordered list of projects and their terminals;
+- persistent terminals through a dedicated tmux server;
+- quick launch of Codex or any shell command;
+- status and essential operations for Git and Mercurial repositories;
+- file browsing with previews and context actions;
+- an integrated GtkSourceView editor;
+- a WebKitGTK browser with regular, incognito, and responsive preview modes;
+- on-demand loading: no terminals, editors, or web pages are opened at startup
+  until they are selected.
 
-### Requisiti
+## Quick installation
 
-SLATE richiede:
+### Requirements
 
-- Linux con ambiente desktop e sessione grafica;
-- Python 3.11 o successivo con PyGObject;
-- GTK 3, GtkSourceView 4, Vte 2.91 e WebKitGTK 4.1;
+SLATE requires:
+
+- Linux with a desktop environment and graphical session;
+- Python 3.11 or later with PyGObject;
+- GTK 3, GtkSourceView 4, Vte 2.91, and WebKitGTK 4.1;
 - tmux 3.x;
-- Git per clonare SLATE e gestire repository Git.
+- Git to clone SLATE and manage Git repositories.
 
-Su Ubuntu 24.04 e Linux Mint 22, installare i componenti indispensabili con:
+On Ubuntu 24.04 and Linux Mint 22, install the required components with:
 
 ```console
 sudo apt update
@@ -39,25 +41,25 @@ sudo apt install git gir1.2-gtk-3.0 gir1.2-gtksource-4 \
     gir1.2-vte-2.91 gir1.2-webkit2-4.1 python3 python3-gi tmux
 ```
 
-Questi strumenti abilitano funzionalità aggiuntive:
+These tools enable additional features:
 
 ```console
 sudo apt install meld mercurial tortoisehg vim-gtk3 xdg-utils
 ```
 
-| Pacchetto     | Funzionalità                                      |
-|---------------|---------------------------------------------------|
-| `meld`        | Confronti grafici                                 |
-| `mercurial`   | Repository Mercurial                              |
-| `tortoisehg`  | Interfaccia TortoiseHg per repository Mercurial   |
-| `vim-gtk3`    | Modifica esterna con gVim                         |
-| `xdg-utils`   | Apertura con l'applicazione desktop predefinita   |
+| Package      | Feature                                   |
+|--------------|-------------------------------------------|
+| `meld`       | Graphical comparisons                     |
+| `mercurial`  | Mercurial repositories                    |
+| `tortoisehg` | TortoiseHg interface for Mercurial repos  |
+| `vim-gtk3`   | External editing with gVim                |
+| `xdg-utils`  | Open with the default desktop application |
 
-Il pulsante **Codex** richiede la
-[Codex CLI](https://learn.chatgpt.com/docs/codex/cli), già installata e
-autenticata. Tutte le altre funzioni di SLATE restano utilizzabili senza Codex.
+The **Codex** button requires the
+[Codex CLI](https://learn.chatgpt.com/docs/codex/cli), already installed and
+authenticated. All other SLATE features remain available without Codex.
 
-### Clone e avvio
+### Clone and launch
 
 ```console
 git clone https://github.com/badpenguin/slate.git
@@ -65,270 +67,277 @@ cd slate
 ./run-slate
 ```
 
-Non è necessario eseguire `pip install`: il checkout contiene il codice Python
-dell'applicazione e le librerie GTK provengono dai pacchetti di sistema.
+There is no need to run `pip install`: the checkout contains the application's
+Python code, while the GTK libraries are provided by system packages.
 
-## Primo utilizzo
+## First use
 
-1. Premere **Nuovo progetto** e scegliere una directory esistente.
-2. Selezionare il progetto nella colonna sinistra.
-3. Premere **Apri Terminale** per creare il primo terminale del progetto.
-4. Usare **Codex** per aprire `codex resume` oppure **Esegui** per avviare e
-   memorizzare un comando personalizzato.
+1. Click **New Project** and choose an existing directory.
+2. Select the project in the left column.
+3. Click **New Terminal** to create the project's first terminal.
+4. Use **Codex** to open `codex resume`, or **Execute** to start and remember a
+   custom command.
 
-SLATE associa ogni terminale al progetto selezionato. Passare a un altro
-progetto non interrompe i processi e, tornando indietro, viene riutilizzato lo
-stesso terminale.
+SLATE associates each terminal with the selected project. Switching to another
+project does not interrupt any processes, and returning to it reuses the same
+terminal.
 
-## Interfaccia
+## Interface
 
-La finestra è divisa in tre colonne:
+The window is divided into three columns:
 
-1. **Progetti**: progetti, terminali, editor e pagine Web aperte.
-2. **Area di lavoro**: terminale, editor o browser selezionato.
-3. **Revisioni/File**: modifiche dei repository oppure albero dei file.
+1. **Projects**: open projects, terminals, editors, and web pages.
+2. **Workspace**: the selected terminal, editor, or browser.
+3. **Changes/Files**: repository changes or the file tree.
 
 ```text
-Nuovo progetto | Apri terminale | Esegui | Codex | Apri URL | Incognito
+New Project | New Terminal | Execute | Codex | Open URL | Incognito
 ┌────────────────────────┬──────────────────────────────────────────┬────────────────────────────┐
-│ PROGETTI               │ AREA DI LAVORO                           │ REVISIONI | FILE           │
+│ PROJECTS               │ WORKSPACE                                │ CHANGES | FILES            │
 ├────────────────────────┼──────────────────────────────────────────┼────────────────────────────┤
-│ ▾ progetto-demo        │ $ npm run dev                            │ Git · main                 │
-│   terminale-1          │ Avvio del server di sviluppo...          │                            │
-│   codex-1              │                                          │ Modificati                 │
-│   src/app.py           │ Il terminale, l'editor o il browser      │   [×] src/app.py           │
-│   Pagina Web           │ selezionato occupa questa colonna.       │                            │
-│                        │                                          │ Nuovi                      │
-│ ▸ secondo-progetto     │ Cambiare elemento non interrompe i       │   [ ] tests/test_app.py    │
-│                        │ processi degli altri terminali.          │                            │
-│                        │                                          │ Messaggio di commit        │
-│                        │                                          │ [Tutti i file]  [Commit]   │
+│ ▾ demo-project         │ $ npm run dev                            │ Git · main                 │
+│   terminal-1           │ Starting the development server...       │                            │
+│   codex-1              │                                          │ Modified                   │
+│   src/app.py           │ The selected terminal, editor, or        │   [×] src/app.py           │
+│   Web Page             │ browser occupies this column.            │                            │
+│                        │                                          │ New                        │
+│ ▸ second-project       │ Switching items does not interrupt       │   [ ] tests/test_app.py    │
+│                        │ processes in other terminals.            │                            │
+│                        │                                          │ Commit message             │
+│                        │                                          │ [Select all] [Commit]      │
 └────────────────────────┴──────────────────────────────────────────┴────────────────────────────┘
 ```
 
-Il progetto attivo conserva separatamente terminali, file aperti e pagine Web.
-Le dimensioni del testo di terminale, Revisioni, File ed Editor sono regolabili
-da **Impostazioni**.
+The active project keeps its terminals, open files, and web pages separate.
+The text sizes for the terminal, Changes, Files, and Editor views can be
+adjusted in **Settings**.
 
-## Terminali
+## Terminals
 
-### Creazione e persistenza
+### Creation and persistence
 
-**Apri Terminale** crea una shell persistente. **Esegui** accetta una riga di
-comando e assegna automaticamente un nome come `ssh-1` o `npm-1`. **Codex** crea
-un terminale `codex-N` e avvia `codex resume`.
+**New Terminal** creates a persistent shell. **Execute** accepts a command line and
+automatically assigns a name such as `ssh-1` or `npm-1`. **Codex** creates a
+`codex-N` terminal and starts `codex resume`.
 
-SLATE ricorda anche il comando associato al terminale. Se la sessione tmux è
-ancora attiva, si limita a riagganciarla; se non esiste più, la ricrea alla
-prima selezione. Eseguendo `exit`, il terminale concluso viene rimosso
-dall'elenco.
+SLATE also remembers the command associated with each terminal. If the tmux
+session is still active, it simply reconnects to it; if the session no longer
+exists, SLATE recreates it when it is first selected. Running `exit` removes
+the finished terminal from the list.
 
-Un terminale può essere rinominato con **Rinomina** o `F2`.
+A terminal can be renamed with **Rename** or `F2`.
 
-### Scorciatoie
+### Shortcuts
 
-| Azione                 | Scorciatoie                          |
-|------------------------|--------------------------------------|
-| Copia                  | `Ctrl+Shift+C` oppure `Ctrl+Insert`  |
-| Incolla                | `Ctrl+Shift+V` oppure `Shift+Insert` |
-| Interrompi il processo | `Ctrl+C`                             |
-| Rinomina il terminale  | `F2`                                 |
+| Action                | Shortcuts                       |
+|-----------------------|---------------------------------|
+| Copy                  | `Ctrl+Shift+C` or `Ctrl+Insert`  |
+| Paste                 | `Ctrl+Shift+V` or `Shift+Insert` |
+| Interrupt the process | `Ctrl+C`                        |
+| Rename the terminal   | `F2`                            |
 
-`Ctrl+C` senza Shift raggiunge sempre il processo nel terminale.
+`Ctrl+C` without Shift always reaches the process running in the terminal.
 
-## Revisioni Git e Mercurial
+## Git and Mercurial changes
 
-La scheda **Revisioni** rileva i repository Git e Mercurial presenti nella
-directory del progetto e nelle sue sottodirectory. Lo stato viene aggiornato
-automaticamente quando cambiano file o metadati del repository.
+The **Changes** tab detects Git and Mercurial repositories in the
+project directory and its subdirectories. Status is updated automatically when
+files or repository metadata change.
 
-Selezionando un file modificato viene mostrata un'anteprima del diff. I file
-nuovi mostrano il contenuto corrente; quelli rimossi mostrano la versione base;
-gli spostamenti riconosciuti appaiono come `origine → destinazione`.
+Selecting a modified file displays a diff preview. New files show their current
+contents; removed files show their base version; recognized moves appear as
+`source → destination`.
 
-### Commit e ripristino
+### Commit and revert
 
-- i file tracciati si includono nel commit tramite le checkbox;
-- i file nuovi devono essere aggiunti esplicitamente con **Aggiungi**;
-- **Tutti i file** seleziona tutti i file tracciati;
-- il commit diventa disponibile dopo aver scritto il messaggio;
-- `Ctrl+Invio` esegue il commit;
-- il ripristino e l'eliminazione richiedono conferma.
+- tracked files are included in a commit using the checkboxes;
+- new files must be added explicitly with **Add**;
+- **Select all** selects all tracked files;
+- the commit becomes available after entering a message;
+- `Ctrl+Enter` performs the commit;
+- reverting and deleting require confirmation.
 
-La vista Git è intenzionalmente simile a quella Mercurial: non separa staged e
-unstaged e non esegue automaticamente `git add` prima del commit.
+The Git view is intentionally similar to the Mercurial view: it does not split
+staged and unstaged changes, and it never runs `git add` automatically before a
+commit.
 
-### Operazioni repository
+### Repository operations
 
-Dal menu contestuale della radice del repository sono disponibili:
+The repository root context menu provides:
 
-- **Aggiorna**;
-- **Pubblica**;
-- **Nuovo branch**;
-- **Passa a branch**;
+- **Update**;
+- **Publish**;
+- **New branch**;
+- **Switch branch**;
 - **Merge branch**;
-- **Assegna tag**;
-- apertura in Meld e, per Mercurial, in TortoiseHg.
+- **Assign tag**;
+- opening in Meld and, for Mercurial, in TortoiseHg.
 
-SLATE usa soltanto remote e upstream già configurati. Non configura
-automaticamente destinazioni, non esegue force push o rebase e non crea commit
-automatici durante i merge. Conflitti, divergenze e situazioni ambigue vengono
-segnalati e lasciati alla gestione esplicita dell'utente.
+SLATE only uses remotes and upstreams that are already configured. It does not
+configure destinations automatically, perform force pushes or rebases, or
+create commits automatically during merges. Conflicts, divergences, and
+ambiguous situations are reported and left for the user to handle explicitly.
 
-Git worktree e submodule con `.git` in forma di file non sono supportati.
+During **Publish**, Git automatically requests any credentials
+required by an HTTPS remote. SLATE displays a username and password or token
+dialog and uses the values only for that publication, without saving them in
+its configuration, the repository, or a credential manager. GitHub requires a
+personal access token instead of the account password.
 
-### Azioni rapide sui file
+Git worktrees and submodules where `.git` is a file are not supported.
 
-| Azione                                      | Scorciatoia |
-|---------------------------------------------|-------------|
-| Visualizza con l'applicazione predefinita   | `V`         |
-| Modifica nell'editor interno                | `M`         |
-| Modifica con gVim                           | `E`         |
-| Aggiungi un file nuovo                      | `A`         |
-| Elimina con conferma                        | `Canc`      |
-| Uniforma le checkbox dei file evidenziati   | `Spazio`    |
+### Quick file actions
 
-## File ed editor
+| Action                                 | Shortcut |
+|----------------------------------------|----------|
+| View with the default application      | `V`      |
+| Edit in the built-in editor            | `M`      |
+| Edit with gVim                         | `E`      |
+| Add a new file                         | `A`      |
+| Delete with confirmation               | `Delete` |
+| Match checkboxes for highlighted files | `Space`  |
 
-La scheda **File** mostra l'albero del progetto. Le directory vengono caricate
-su richiesta e mantengono espansione e posizione passando fra progetti.
+## Files and editor
 
-- **+ File** crea un file;
-- il menu contestuale permette di creare directory, rinominare, eliminare e
-  aprire un terminale nella posizione scelta;
-- **Nascosti** mostra i file nascosti;
-- **Esclusi** mostra i file ignorati dal repository;
-- **Espandi** apre ricorsivamente l'albero, fermandosi sulle directory escluse
-  più pesanti.
+The **Files** tab displays the project tree. Directories are loaded on demand
+and retain their expansion and position when switching between projects.
 
-I metadati `.git`, `.hg` e `.svn` non vengono mai mostrati. Link simbolici e
-percorsi che escono dalla directory del progetto non possono essere usati per
-leggere, modificare o eliminare file esterni.
+- **+ File** creates a file;
+- the context menu can create directories, rename and delete items, and open a
+  terminal at the selected location;
+- **Hidden** shows hidden files;
+- **Excluded** shows files ignored by the repository;
+- **Expand** recursively opens the tree while stopping at large
+  excluded directories.
 
-**Modifica in SLATE** apre il file nella colonna centrale con evidenziazione
-sintattica, numeri di riga, ricerca, annullamento/ripristino e salvataggio
-atomico. Se il file cambia anche sul disco, SLATE chiede quale versione
-mantenere invece di sovrascriverla automaticamente.
+The `.git`, `.hg`, and `.svn` metadata directories are never displayed.
+Symbolic links and paths that leave the project directory cannot be used to
+read, edit, or delete external files.
 
-L'editor supporta file testuali UTF-8 e non conserva bozze dei contenuti non
-salvati.
+**Edit in SLATE** opens a file in the central column with
+syntax highlighting, line numbers, search, undo/redo, and atomic saving. If the
+file also changes on disk, SLATE asks which version to keep instead of
+overwriting it automatically.
+
+The editor supports UTF-8 text files and does not retain drafts of unsaved
+content.
 
 ## Browser
 
-**Apri URL** aggiunge una pagina Web al progetto. Le pagine normali mantengono
-URL, titolo e posizione e vengono caricate soltanto alla prima selezione.
+**Open URL** adds a web page to the project. Regular pages retain
+their URL, title, and position and are loaded only when first selected.
 
-**Incognito** crea un contesto effimero e isolato per ogni pagina. SLATE ricorda
-la presenza della scheda e l'ultimo URL, ma elimina cookie e storage anonimi; al
-riavvio viene creato un nuovo contesto incognito.
+**Incognito** creates a separate ephemeral context for each page. SLATE
+remembers the tab and its last URL, but discards anonymous cookies and storage;
+after a restart, it creates a new incognito context.
 
-Il menu **Responsive** centra la pagina dentro dimensioni predefinite e la
-riduce quando non entra nello spazio disponibile. Non emula touch, DPR o
-user-agent. `F12` o `Ctrl+Shift+I` aprono gli strumenti di sviluppo WebKit.
+The **Responsive** menu centers the page within predefined dimensions and
+scales it down when it does not fit the available space. It does not emulate
+touch, DPR, or the user agent. `F12` or `Ctrl+Shift+I` opens the WebKit developer
+tools.
 
-| Azione                         | Scorciatoia                 |
-|--------------------------------|-----------------------------|
-| Attiva la barra URL            | `Ctrl+L`                    |
-| Indietro/Avanti                | `Alt+←` / `Alt+→`           |
-| Ricarica                       | `Ctrl+R` oppure `F5`        |
-| Interrompi                     | `Esc`                       |
-| Chiudi la pagina               | `Ctrl+W`                    |
-| Apri gli strumenti di sviluppo | `F12` oppure `Ctrl+Shift+I` |
+| Action                   | Shortcut               |
+|--------------------------|------------------------|
+| Focus the URL bar        | `Ctrl+L`               |
+| Back/Forward             | `Alt+←` / `Alt+→`      |
+| Reload                   | `Ctrl+R` or `F5`        |
+| Stop                     | `Esc`                  |
+| Close the page           | `Ctrl+W`               |
+| Open the developer tools | `F12` or `Ctrl+Shift+I` |
 
-## Dati e sessioni tmux
+## Data and tmux sessions
 
-La configurazione è salvata in:
+The configuration is stored in:
 
 ```text
 ~/.config/slate/config.json
 ```
 
-SLATE non scrive configurazioni, cache o file di stato nelle directory dei
-progetti.
+SLATE does not write configuration, cache, or state files inside project
+directories.
 
-Le pagine Web normali condividono il profilo presente in:
+Regular web pages share the profile stored in:
 
 ```text
 $XDG_DATA_HOME/slate/webkit
 $XDG_CACHE_HOME/slate/webkit
 ```
 
-I terminali usano esclusivamente il server `tmux -L slate`, separato dal server
-tmux personale. Le sessioni sopravvivono a un crash della GUI, ma non a un
-riavvio o a un logout che termini i processi utente.
+Terminals exclusively use the separate `tmux -L slate` server, isolated from
+the user's personal tmux server. Sessions survive a GUI crash, but not a reboot
+or logout that terminates user processes.
 
-Le sessioni ancora attive possono essere elencate e raggiunte manualmente:
+Active sessions can be listed and reached manually:
 
 ```console
 tmux -L slate list-sessions
-tmux -L slate attach-session -t NOME_SESSIONE
+tmux -L slate attach-session -t SESSION_NAME
 ```
 
-Per scollegarsi da tmux senza terminare la sessione, premere `Ctrl+B` e poi `D`.
+To detach from tmux without ending the session, press `Ctrl+B`, then `D`.
 
-Sui sistemi configurati con `KillUserProcesses=yes`, la persistenza oltre il
-logout può richiedere:
+On systems configured with `KillUserProcesses=yes`, persistence beyond logout
+may require:
 
 ```console
 loginctl enable-linger "$USER"
 ```
 
-Valutare questa impostazione consapevolmente perché riguarda l'intera sessione
-utente, non soltanto SLATE.
+Consider this setting carefully because it affects the entire user session,
+not only SLATE.
 
-## Diagnostica
+## Diagnostics
 
-Per mantenere SLATE collegato al terminale e visualizzare errori e traceback:
+To keep SLATE attached to the terminal and display errors and tracebacks:
 
 ```console
 ./run-slate --debug
 ```
 
-La modalità debug usa configurazione e sessioni di produzione. Può inoltre
-stampare URL completi: controllare l'output prima di condividerlo perché query e
-frammenti possono contenere token o altri dati sensibili.
+Debug mode uses the production configuration and sessions. It may also print
+complete URLs: review the output before sharing it because query strings and
+fragments can contain tokens or other sensitive data.
 
-Per avviare un'istanza isolata con configurazione, ID applicazione e socket tmux
-temporanei:
+To start an isolated instance with temporary configuration, application ID,
+and tmux socket:
 
 ```console
 ./run-slate --agent-debug
 ```
 
-Un secondo avvio normale non crea una nuova finestra: presenta l'istanza già
-attiva.
+A second normal launch does not create another window: it presents the already
+running instance.
 
-## Test
+## Tests
 
-La suite automatica non apre finestre GTK:
+The automated suite does not open GTK windows:
 
 ```console
 ./tests/run-final-checks.sh
 ```
 
-La verifica manuale dell'interfaccia resta separata perché il window manager
-può assegnare brevemente il focus a una finestra di test.
+Manual interface verification remains separate because the window manager may
+briefly give focus to a test window.
 
-## Segnalazioni e contributi
+## Issues and contributions
 
-Bug e proposte possono essere aperti nelle
-[issue di GitHub](https://github.com/badpenguin/slate/issues). Indicare la
-distribuzione Linux, la versione di SLATE, i passaggi per riprodurre il problema
-e gli eventuali messaggi di diagnostica dopo aver rimosso dati sensibili.
+Bug reports and proposals can be opened in the
+[GitHub issue tracker](https://github.com/badpenguin/slate/issues). Include the
+Linux distribution, SLATE version, reproduction steps, and any diagnostic
+messages after removing sensitive data.
 
-## Licenza
+## License
 
-- **SLATE** è software libero distribuito secondo i termini della GNU General
-  Public License, versione 2 o, a scelta, una versione successiva. Il testo
-  completo è disponibile nel file [`LICENSE`](LICENSE).
-- Il **logomark Git** è opera di Jason Long ed è distribuito con licenza
-  [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
-- Il logo **“droplets” di Mercurial** è opera di Cali Mastny e Matt Mackall ed è
-  distribuito con licenza GPLv2+.
-- L'icona **Incognito** è un disegno originale di SLATE distribuito con licenza
-  GPLv2+.
-- Il pulsante **Codex** usa il Blossom in scala di grigi per identificare il
-  servizio OpenAI che avvia; OpenAI e i relativi elementi grafici sono marchi
-  di OpenAI.
-- **Git e il logo Git** sono marchi registrati o marchi di Software Freedom
-  Conservancy, Inc., organizzazione che ospita il progetto Git.
+- **SLATE** is free software distributed under the terms of the GNU General
+  Public License, version 2 or, at your option, any later version. The complete
+  text is available in [`LICENSE`](LICENSE).
+- The **Git logomark** was created by Jason Long and is distributed under the
+  [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) license.
+- The Mercurial **“droplets” logo** was created by Cali Mastny and Matt Mackall
+  and is distributed under the GPLv2+ license.
+- The **Incognito** icon is an original SLATE design distributed under the
+  GPLv2+ license.
+- The **Codex** button uses the grayscale Blossom to identify the OpenAI service
+  it launches; OpenAI and its related graphics are trademarks of OpenAI.
+- **Git and the Git logo** are either registered trademarks or trademarks of
+  Software Freedom Conservancy, Inc., the corporate host of the Git project.

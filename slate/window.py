@@ -32,7 +32,8 @@ from .repository_actions import (
 )
 from .repository_discovery import RepositoryDiscovery
 from .repository_update import RepositoryUpdateDialog
-from .scm.base import FileStatus, RepositoryRef, SCM
+from .repository_verify import RepositoryVerifyDialog
+from .scm.base import FileStatus, RepositoryRef, RepositorySyncStatus, SCM
 from .scm.detect import is_normal_repository
 from .scm.git import GitSCM
 from .scm.hg import MercurialSCM
@@ -97,7 +98,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         try:
             self.set_icon_from_file(str(Path(__file__).with_name("slate.svg")))
         except GLib.Error as error:
-            print(f"Icona SLATE non caricata: {error}", file=sys.stderr)
+            print(f"Failed to load SLATE icon: {error}", file=sys.stderr)
         self.config = config
         # 2026-08-17: typed references keep mixed HG/Git runtime objects
         # isolated without changing the lazy per-project lifetime architecture.
@@ -134,6 +135,11 @@ class SlateWindow(Gtk.ApplicationWindow):
         # leggibile anche quando il tema offre soltanto icone symbolic monocrome.
         self.attention_icon = GdkPixbuf.Pixbuf.new_from_file_at_scale(
             str(Path(__file__).with_name("bell.svg")), 16, 16, True
+        )
+        # 2026-08-19: the sidebar reuses the HeaderBar's bundled Incognito
+        # artwork so the same browser mode never has two unrelated icons.
+        self.incognito_icon = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            str(Path(__file__).with_name("incognito.svg")), 16, 16, True
         )
 
         geometry = self.config.data["window"]
@@ -219,8 +225,8 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.right_notebook = Gtk.Notebook()
         self.right_notebook.set_tab_pos(Gtk.PositionType.TOP)
         self.right_notebook.set_scrollable(False)
-        self.changes_tab = Gtk.Label(label="Revisioni")
-        files_tab = Gtk.Label(label="File")
+        self.changes_tab = Gtk.Label(label="Changes")
+        files_tab = Gtk.Label(label="Files")
         # 2026-08-16: margini sulle label aumentano l'area cliccabile verticale
         # conservando bordi, stati e rendering nativi del GtkNotebook.
         for tab in (self.changes_tab, files_tab):
@@ -293,13 +299,13 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.headerbar = header
 
         add_project = self._header_action_button(
-            "Nuovo progetto", "folder-new", self._on_add_project
+            "New Project", "folder-new", self._on_add_project
         )
         add_terminal = self._header_action_button(
-            "Apri Terminale", "utilities-terminal", self._on_add_terminal
+            "New Terminal", "utilities-terminal", self._on_add_terminal
         )
         add_command = self._header_action_button(
-            "Esegui", "system-run", self._on_add_command
+            "Execute", "system-run", self._on_add_command
         )
         resume_codex = self._header_action_button(
             "Codex",
@@ -308,7 +314,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             icon_path=Path(__file__).with_name("codex.svg"),
         )
         add_browser = self._header_action_button(
-            "Apri URL", "web-browser", self._on_add_browser
+            "Open URL", "web-browser", self._on_add_browser
         )
         add_private_browser = self._header_action_button(
             "Incognito",
@@ -341,12 +347,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         overflow.set_image(
             Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON)
         )
-        overflow.set_tooltip_text("Altre azioni")
-        overflow.get_accessible().set_name("Altre azioni")
+        overflow.set_tooltip_text("More actions")
+        overflow.get_accessible().set_name("More actions")
         menu = Gtk.Menu()
-        settings_item = Gtk.MenuItem(label="Impostazioni")
+        settings_item = Gtk.MenuItem(label="Settings")
         settings_item.connect("activate", self._on_settings)
-        orphans = Gtk.MenuItem(label="Sessioni orfane")
+        orphans = Gtk.MenuItem(label="Orphan Sessions")
         orphans.connect("activate", self._on_orphans)
         menu.append(settings_item)
         menu.append(Gtk.SeparatorMenuItem())
@@ -714,11 +720,11 @@ class SlateWindow(Gtk.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.get_style_context().add_class("project-sidebar")
         box.set_size_request(190, -1)
-        sidebar_title = Gtk.Label(label="PROGETTI")
+        sidebar_title = Gtk.Label(label="PROJECTS")
         sidebar_title.set_xalign(0)
         sidebar_title.get_style_context().add_class("sidebar-title")
         box.pack_start(sidebar_title, False, False, 0)
-        self.empty_label = Gtk.Label(label="Aggiungi un progetto per iniziare")
+        self.empty_label = Gtk.Label(label="Add a project to get started")
         self.empty_label.set_line_wrap(True)
         self.empty_label.get_style_context().add_class("sidebar-empty")
         box.pack_start(self.empty_label, False, False, 8)
@@ -769,7 +775,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.project_expander_column.set_cell_data_func(
             expander_renderer, self._render_expander_cell
         )
-        column = Gtk.TreeViewColumn("Progetto")
+        column = Gtk.TreeViewColumn("Project")
         column.pack_start(icon_renderer, False)
         column.pack_start(self.name_renderer, True)
         column.pack_end(activity_renderer, False)
@@ -826,8 +832,8 @@ class SlateWindow(Gtk.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_halign(Gtk.Align.CENTER)
         box.set_valign(Gtk.Align.CENTER)
-        label = Gtk.Label(label="Nessun terminale per questo progetto")
-        button = Gtk.Button(label="Apri Terminale")
+        label = Gtk.Label(label="No terminals for this project")
+        button = Gtk.Button(label="Open Terminal")
         button.connect("clicked", self._on_add_terminal)
         box.pack_start(label, False, False, 0)
         box.pack_start(button, False, False, 0)
@@ -1072,10 +1078,25 @@ class SlateWindow(Gtk.ApplicationWindow):
                 repo_key[0], self._project_ignored_paths(repo_key[0])
             )
 
+        def history_changed(
+            repo_key: tuple[str, RepositoryRef] = key,
+        ) -> None:
+            """Invalidate an explicit remote result after detected history changes."""
+
+            self.panel.set_project_remote_status(
+                repo_key[0], repo_key[1], RepositorySyncStatus()
+            )
+
         # 2026-08-17: each working copy owns a watcher, while cached instances
         # survive project switches to avoid rebuilding large monitor trees.
         watcher = RepoWatcher(
-            root, scm, status_changed, watcher_error, file_changed, ignored_changed
+            root,
+            scm,
+            status_changed,
+            watcher_error,
+            file_changed,
+            ignored_changed,
+            history_changed,
         )
         self.watchers[key] = watcher
         self._update_repository_boundaries(project_name)
@@ -1147,7 +1168,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             )
             self.panel.set_repositories(repositories, False)
             if error:
-                self.panel.show_error(f"Scansione repository fallita: {error}")
+                self.panel.show_error(f"Repository scan failed: {error}")
 
         discovery = RepositoryDiscovery(
             project["path"],
@@ -1461,6 +1482,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         project_row = kind == "project"
         self._set_project_row_background(renderer, project_row)
         renderer.set_property("visible", not project_row)
+        # Gtk reuses one renderer for every row, so clear a custom bitmap before
+        # selecting the themed or MIME icon belonging to the current item.
+        renderer.set_property("pixbuf", None)
         if project_row:
             renderer.set_property("gicon", None)
             renderer.set_property("icon-name", None)
@@ -1479,10 +1503,11 @@ class SlateWindow(Gtk.ApplicationWindow):
             )
             entry = self.browser_manager.pages.get(reference)
             renderer.set_property("gicon", None)
-            renderer.set_property(
-                "icon-name",
-                "user-invisible" if entry is not None and entry.private else "web-browser",
-            )
+            if entry is not None and entry.private:
+                renderer.set_property("icon-name", None)
+                renderer.set_property("pixbuf", self.incognito_icon)
+            else:
+                renderer.set_property("icon-name", "web-browser")
             return
         icon_names = {
             "terminal": "utilities-terminal",
@@ -2073,25 +2098,25 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         menu = Gtk.Menu()
         if kind == "project":
-            add_item = Gtk.MenuItem(label="Apri Terminale")
-            remove_item = Gtk.MenuItem(label="Rimuovi progetto")
+            add_item = Gtk.MenuItem(label="Open Terminal")
+            remove_item = Gtk.MenuItem(label="Remove Project")
             add_item.connect("activate", self._on_add_terminal)
             remove_item.connect("activate", self._on_remove_project)
             menu.append(add_item)
             menu.append(remove_item)
         elif kind == "terminal":
-            rename_item = Gtk.MenuItem(label="Rinomina")
-            close_item = Gtk.MenuItem(label="Chiudi")
+            rename_item = Gtk.MenuItem(label="Rename")
+            close_item = Gtk.MenuItem(label="Close")
             rename_item.connect("activate", self._prompt_terminal_rename)
             close_item.connect("activate", self._on_close_terminal)
             menu.append(rename_item)
             menu.append(close_item)
         elif kind == "editor":
-            close_item = Gtk.MenuItem(label="Chiudi")
+            close_item = Gtk.MenuItem(label="Close")
             close_item.connect("activate", self._on_close_editor)
             menu.append(close_item)
         elif kind == "browser":
-            close_item = Gtk.MenuItem(label="Chiudi")
+            close_item = Gtk.MenuItem(label="Close")
             close_item.connect("activate", self._on_close_browser)
             menu.append(close_item)
         menu.show_all()
@@ -2156,12 +2181,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         project, old_name = selected
         project_name = project["name"]
         dialog = Gtk.Dialog(
-            title="Rinomina terminale",
+            title="Rename Terminal",
             transient_for=self,
             modal=True,
         )
         dialog.add_buttons(
-            "Annulla", Gtk.ResponseType.CANCEL, "Rinomina", Gtk.ResponseType.OK
+            "Cancel", Gtk.ResponseType.CANCEL, "Rename", Gtk.ResponseType.OK
         )
         entry = Gtk.Entry()
         entry.set_text(old_name)
@@ -2213,12 +2238,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Choose and explicitly add one local project directory."""
 
         dialog = Gtk.FileChooserDialog(
-            title="Nuovo progetto",
+            title="New Project",
             transient_for=self,
             action=Gtk.FileChooserAction.SELECT_FOLDER,
         )
         dialog.add_buttons(
-            "Annulla", Gtk.ResponseType.CANCEL, "Aggiungi", Gtk.ResponseType.OK
+            "Cancel", Gtk.ResponseType.CANCEL, "Add", Gtk.ResponseType.OK
         )
         response = dialog.run()
         selected = dialog.get_filename()
@@ -2227,7 +2252,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             return
         path = str(Path(selected).resolve())
         if any(project["path"] == path for project in self.config.data["projects"]):
-            self._show_error("Il progetto è già presente.")
+            self._show_error("The project has already been added.")
             return
         name = Path(path).name
         error = self._validate_project_name(name)
@@ -2277,17 +2302,17 @@ class SlateWindow(Gtk.ApplicationWindow):
             modal=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.NONE,
-            text=f"Rimuovere {project['name']} da SLATE?",
+            text=f"Remove {project['name']} from SLATE?",
         )
         if not relevant:
             # 2026-08-17: senza sessioni tmux reali non esiste alcuna scelta
             # lascia/termina; proporla in base alla sola config è fuorviante.
             dialog.format_secondary_text(
-                "Non risultano sessioni tmux in esecuzione. "
-                "I file del progetto non saranno eliminati."
+                "No running tmux sessions were found. "
+                "The project files will not be deleted."
             )
-            dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
-            dialog.add_button("Rimuovi", Gtk.ResponseType.OK)
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Remove", Gtk.ResponseType.OK)
             response = dialog.run()
             dialog.destroy()
             if response == Gtk.ResponseType.OK:
@@ -2295,16 +2320,16 @@ class SlateWindow(Gtk.ApplicationWindow):
                     self.terminals.forget(project["name"], terminal_name_value)
                 self._finish_project_removal(project)
             return
-        details = ["Puoi lasciare le sessioni tmux in background oppure terminarle."]
+        details = ["You can leave tmux sessions in the background or terminate them."]
         for pane in relevant:
             if pane.active:
-                details.append(f"⚠ {pane.session}: {pane.command} in esecuzione")
+                details.append(f"⚠ {pane.session}: {pane.command} is running")
             else:
-                details.append(f"✓ {pane.session}: shell al prompt")
+                details.append(f"✓ {pane.session}: shell at prompt")
         dialog.format_secondary_text("\n".join(details))
-        dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Lascia in background", 1)
-        dialog.add_button("Termina sessioni", 2)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Leave in Background", 1)
+        dialog.add_button("Terminate Sessions", 2)
         response = dialog.run()
         dialog.destroy()
         if response == 1:
@@ -2368,14 +2393,14 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _on_add_command(self, _button: Gtk.Widget) -> None:
         """Prompt for one persistent shell command and create its terminal."""
 
-        dialog = Gtk.Dialog(title="Esegui", transient_for=self, modal=True)
-        dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Crea", Gtk.ResponseType.OK)
+        dialog = Gtk.Dialog(title="Execute", transient_for=self, modal=True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Create", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         content = dialog.get_content_area()
         content.set_spacing(6)
         content.set_border_width(12)
-        label = Gtk.Label(label="Comando")
+        label = Gtk.Label(label="Command")
         label.set_xalign(0)
         entry = Gtk.Entry()
         entry.set_activates_default(True)
@@ -2394,12 +2419,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         while dialog.run() == Gtk.ResponseType.OK:
             command = entry.get_text().strip()
             if not command or "\n" in command or "\r" in command or "\0" in command:
-                error_label.set_text("Inserire un comando valido su una sola riga.")
+                error_label.set_text("Enter a valid single-line command.")
                 continue
             try:
                 words = shlex.split(command, posix=True)
             except ValueError:
-                error_label.set_text("Il quoting del comando non è valido.")
+                error_label.set_text("The command quoting is invalid.")
                 continue
             # 2026-08-18: gli assegnamenti iniziali configurano l'ambiente ma
             # non identificano l'eseguibile utile per nominare il terminale.
@@ -2502,7 +2527,7 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         absolute_path = self._project_file_path(relative_path)
         if absolute_path is None or not os.path.isdir(absolute_path):
-            self._show_file_error(f"La directory non esiste: {relative_path}")
+            self._show_file_error(f"The directory does not exist: {relative_path}")
             return
         # 2026-08-16: una nuova sessione evita di inviare `cd` a un terminale
         # che potrebbe contenere un agente o un altro processo in foreground.
@@ -2511,7 +2536,7 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _set_revision_count(self, count: int) -> None:
         """Mirror the received active-project count on its tab and sidebar row."""
 
-        self.changes_tab.set_text(f"Revisioni ({count})" if count else "Revisioni")
+        self.changes_tab.set_text(f"Changes ({count})" if count else "Changes")
         project_name = getattr(self, "active_project_name", None)
         if not project_name:
             return
@@ -2536,9 +2561,9 @@ class SlateWindow(Gtk.ApplicationWindow):
             modal=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.OK_CANCEL,
-            text=f"Chiudere il terminale {terminal_name_value}?",
+            text=f"Close terminal {terminal_name_value}?",
         )
-        dialog.format_secondary_text("La sessione tmux e i processi contenuti termineranno.")
+        dialog.format_secondary_text("The tmux session and its processes will terminate.")
         response = dialog.run()
         dialog.destroy()
         if response != Gtk.ResponseType.OK:
@@ -2615,12 +2640,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Allow explicit adoption or termination of one orphan at a time."""
 
         if not orphans:
-            self._info("Sessioni orfane", "Nessuna sessione orfana.")
+            self._info("Orphan Sessions", "No orphan sessions.")
             return
-        dialog = Gtk.Dialog(title="Sessioni orfane", transient_for=self, modal=True)
-        dialog.add_button("Chiudi", Gtk.ResponseType.CLOSE)
-        dialog.add_button("Termina", 2)
-        dialog.add_button("Riadotta", 1)
+        dialog = Gtk.Dialog(title="Orphan Sessions", transient_for=self, modal=True)
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        dialog.add_button("Terminate", 2)
+        dialog.add_button("Adopt", 1)
         combo = Gtk.ComboBoxText()
         for orphan in orphans:
             path = orphan.project_path or orphan.session_path
@@ -2655,7 +2680,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             or session_name(project_name, terminal_name_value) != orphan.session
         ):
             self._show_error(
-                "La sessione non contiene metadati sufficienti per una riadozione sicura."
+                "The session does not contain enough metadata for safe adoption."
             )
             return
         project = self.config.find_project(project_name)
@@ -2664,7 +2689,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 existing["path"] == project_path
                 for existing in self.config.data["projects"]
             ):
-                self._show_error("Il path della sessione appartiene già a un altro progetto.")
+                self._show_error("The session path already belongs to another project.")
                 return
             error = self._validate_project_name(project_name)
             if error:
@@ -2675,7 +2700,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             if project_name not in self.config.data["expanded_projects"]:
                 self.config.data["expanded_projects"].append(project_name)
         elif project["path"] != project_path:
-            self._show_error("I metadati tmux indicano un path diverso dal progetto esistente.")
+            self._show_error("The tmux metadata specifies a different path from the existing project.")
             return
         terminal_error = self._validate_terminal_name(
             project, terminal_name_value, terminal_name_value
@@ -2695,22 +2720,22 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Report an orphan termination failure without altering configuration."""
 
         if not result.ok:
-            self._show_error(result.stderr.strip() or "Impossibile terminare la sessione.")
+            self._show_error(result.stderr.strip() or "Unable to terminate the session.")
 
     def _commit(self, message: str, statuses: list[FileStatus]) -> None:
         """Commit checked files repository-by-repository, stopping on first error."""
 
         if not message:
-            self.panel.show_error("Inserisci un messaggio di commit.")
+            self.panel.show_error("Enter a commit message.")
             return
         if not statuses:
-            self.panel.show_error("Seleziona almeno un file da commettere.")
+            self.panel.show_error("Select at least one file to commit.")
             return
         untracked = [status.path for status in statuses if status.state == "untracked"]
         if untracked:
             self.panel.show_error(
-                "I file non tracciati non vengono aggiunti automaticamente. "
-                "Usa Aggiungi e riprova."
+                "Untracked files are not added automatically. "
+                "Use Add and try again."
             )
             return
         groups = SlateWindow._group_statuses_by_repository(statuses)
@@ -2719,7 +2744,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             scm = self._repository_scm(repository)
             if scm is None:
                 self.panel.show_error(
-                    f"Repository non disponibile: {repository.path}"
+                    f"Repository unavailable: {repository.path}"
                 )
                 return
             operations.append(
@@ -2753,7 +2778,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             if scm is None:
                 self.panel.set_commit_busy(False)
                 self.panel.show_error(
-                    f"Repository non disponibile: {repository.path}"
+                    f"Repository unavailable: {repository.path}"
                 )
                 return
             watcher = self._repository_watcher(repository)
@@ -2767,9 +2792,14 @@ class SlateWindow(Gtk.ApplicationWindow):
                     watcher.request_full()
                 if not result.ok:
                     self.panel.set_commit_busy(False)
-                    detail = result.stderr.strip() or "Commit fallito."
+                    detail = result.stderr.strip() or "Commit failed."
                     self.panel.show_error(f"{repository.path}: {detail}")
                     return
+                # 2026-08-19: a successful commit changes the local comparison
+                # immediately, but only Verify may contact the remote again.
+                self.panel.set_remote_status(
+                    repository, RepositorySyncStatus()
+                )
                 # 2026-08-17: cross-repository commits cannot be atomic; clearing
                 # only successful targets makes partial completion explicit.
                 self.panel.uncheck_statuses(repository_statuses)
@@ -2908,7 +2938,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 operations.append((repository, scm.add_argv(paths), paths))
         # 2026-08-17: la selezione contestuale o il pulsante sono già una scelta
         # esplicita e l'aggiunta al tracking non elimina contenuti.
-        self._run_scm_mutations(operations, "Aggiunta")
+        self._run_scm_mutations(operations, "Add")
 
     def _forget_statuses(self, statuses: list[FileStatus]) -> None:
         """Return explicitly selected added files to their SCM's untracked state."""
@@ -2921,7 +2951,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 operations.append((repository, scm.forget_argv(paths), paths))
         # 2026-08-17: entrambi gli adapter conservano il contenuto sul disco,
         # quindi non serve una conferma distruttiva superflua.
-        self._run_scm_mutations(operations, "Rimozione dal tracking")
+        self._run_scm_mutations(operations, "Untrack")
 
     def _revert_statuses(self, statuses: list[FileStatus]) -> None:
         """Confirm irreversible discard before reverting selected tracked files."""
@@ -2937,9 +2967,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         if not display_paths:
             return
         if not self._confirm_scm_paths(
-            "Ripristinare i file selezionati?",
-            "Le modifiche locali saranno eliminate senza creare file di backup.",
-            "Ripristina",
+            "Revert the selected files?",
+            "Local changes will be discarded without creating backup files.",
+            "Revert",
             display_paths,
             Gtk.MessageType.WARNING,
         ):
@@ -2974,7 +3004,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         # 2026-08-17: un ripristino può ricreare file mancanti, quindi si
         # riconcilia il repository completo invece dei soli vecchi path.
         self._run_scm_mutations(
-            operations, "Ripristino", full_refresh=True
+            operations, "Revert", full_refresh=True
         )
 
     def _project_file_path(
@@ -2990,7 +3020,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             or os.path.isabs(relative_path)
             or ".." in relative_path.split("/")
         ):
-            self._show_file_error(f"Percorso non valido: {relative_path}")
+            self._show_file_error(f"Invalid path: {relative_path}")
             return None
         root = os.path.realpath(os.path.abspath(project["path"]))
         candidate = os.path.abspath(os.path.join(root, relative_path))
@@ -2999,7 +3029,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         except ValueError:
             inside_root = False
         if not inside_root:
-            self._show_file_error(f"Percorso non valido: {relative_path}")
+            self._show_file_error(f"Invalid path: {relative_path}")
             return None
         parent_resolved = os.path.realpath(os.path.dirname(candidate))
         try:
@@ -3008,7 +3038,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             parent_inside = False
         if not parent_inside:
             self._show_file_error(
-                f"Il percorso attraversa un link esterno: {relative_path}"
+                f"The path traverses an external link: {relative_path}"
             )
             return None
         if follow_symlink and os.path.lexists(candidate):
@@ -3019,7 +3049,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 resolved_inside = False
             if not resolved_inside:
                 self._show_file_error(
-                    f"Il link simbolico esce dal progetto: {relative_path}"
+                    f"The symbolic link points outside the project: {relative_path}"
                 )
                 return None
         return candidate
@@ -3044,7 +3074,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             spawn_detached(("xdg-open", path), cwd=project["path"])
         except (GLib.Error, OSError) as error:
             self._show_file_error(
-                f"Impossibile visualizzare {relative_path}: {error}"
+                f"Unable to view {relative_path}: {error}"
             )
 
     def _edit_status_internal(self, status: FileStatus) -> None:
@@ -3094,7 +3124,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             spawn_detached(("gvim", "-f", path), cwd=project["path"])
         except (GLib.Error, OSError) as error:
             self._show_file_error(
-                f"Impossibile aprire {relative_path} con gVim: {error}"
+                f"Unable to open {relative_path} with gVim: {error}"
             )
 
     def _delete_status(self, status: FileStatus) -> None:
@@ -3112,24 +3142,24 @@ class SlateWindow(Gtk.ApplicationWindow):
         scm = self._repository_scm(repository)
         if status.state != "untracked" and scm is None:
             self.panel.show_error(
-                f"Repository non disponibile: {repository.path}"
+                f"Repository unavailable: {repository.path}"
             )
             return
         exists = os.path.lexists(absolute_path)
         scm_detail = (
-            f" e la rimozione sarà registrata in {scm.display_name}"
+            f" and the removal will be recorded in {scm.display_name}"
             if scm is not None and status.state != "untracked"
             else ""
         )
         detail = (
-            f"Il file verrà eliminato definitivamente dal disco{scm_detail}."
+            f"The file will be permanently deleted from disk{scm_detail}."
             if exists
-            else f"Il file è già assente dal disco{scm_detail}."
+            else f"The file is already missing from disk{scm_detail}."
         )
         if not self._confirm_scm_paths(
-            "Eliminare il file selezionato?",
+            "Delete the selected file?",
             detail,
-            "Elimina",
+            "Delete",
             [relative_path],
             Gtk.MessageType.WARNING,
         ):
@@ -3154,7 +3184,7 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         if error is not None:
             self._show_file_error(
-                f"Eliminazione di {relative_path} fallita: {error}"
+                f"Failed to delete {relative_path}: {error}"
             )
             return
         self.file_manager.refresh()
@@ -3168,13 +3198,13 @@ class SlateWindow(Gtk.ApplicationWindow):
         scm = self._repository_scm(repository)
         if scm is None:
             self.panel.show_error(
-                f"Repository non disponibile: {repository.path}"
+                f"Repository unavailable: {repository.path}"
             )
             return
         paths = sorted(set(status.operation_paths()))
         self._run_scm_mutations(
             [(repository, scm.record_removal_argv(paths), paths)],
-            "Registrazione rimozione",
+            "Record removal",
         )
 
     def _new_project_file(self, parent_relative: str) -> None:
@@ -3192,19 +3222,19 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         source_path = self._project_file_path(relative_path, follow_symlink=False)
         if source_path is None or not os.path.lexists(source_path):
-            self._show_file_error(f"Il percorso non esiste: {relative_path}")
+            self._show_file_error(f"The path does not exist: {relative_path}")
             return
         old_name = os.path.basename(relative_path)
         parent_relative = os.path.dirname(relative_path)
         project_name = self.active_project_name or ""
-        dialog = Gtk.Dialog(title="Rinomina", transient_for=self, modal=True)
-        dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Rinomina", Gtk.ResponseType.OK)
+        dialog = Gtk.Dialog(title="Rename", transient_for=self, modal=True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Rename", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         content = dialog.get_content_area()
         content.set_spacing(6)
         content.set_border_width(12)
-        label = Gtk.Label(label="Nuovo nome")
+        label = Gtk.Label(label="New name")
         label.set_xalign(0)
         entry = Gtk.Entry(text=old_name)
         entry.set_activates_default(True)
@@ -3229,7 +3259,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 or "/" in new_name
                 or "\0" in new_name
             ):
-                error_label.set_text("Inserire un nome semplice e valido.")
+                error_label.set_text("Enter a simple, valid name.")
                 continue
             if new_name == old_name:
                 break
@@ -3243,7 +3273,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 new_relative = None
                 break
             if os.path.lexists(destination_path):
-                error_label.set_text("Esiste già un file o una directory con questo nome.")
+                error_label.set_text("A file or folder with this name already exists.")
                 continue
             break
         dialog.destroy()
@@ -3273,7 +3303,7 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         if error is not None:
             self._show_file_error(
-                f"Rinomina di {old_relative} fallita: {error}"
+                f"Failed to rename {old_relative}: {error}"
             )
             return
         project = self.config.find_project(project_name)
@@ -3310,15 +3340,15 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _prompt_project_entry(self, parent_relative: str, directory: bool) -> None:
         """Validate a modal entry name before starting one create operation."""
 
-        title = "Nuova directory" if directory else "Nuovo file"
+        title = "New Folder" if directory else "New File"
         dialog = Gtk.Dialog(title=title, transient_for=self, modal=True)
-        dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Crea", Gtk.ResponseType.OK)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Create", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         content = dialog.get_content_area()
         content.set_spacing(6)
         content.set_border_width(12)
-        label = Gtk.Label(label="Nome")
+        label = Gtk.Label(label="Name")
         label.set_xalign(0)
         entry = Gtk.Entry()
         entry.set_activates_default(True)
@@ -3337,7 +3367,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         while dialog.run() == Gtk.ResponseType.OK:
             name = entry.get_text().strip()
             if not name or name in {".", ".."} or "/" in name or "\0" in name:
-                error_label.set_text("Inserire un nome semplice e valido.")
+                error_label.set_text("Enter a simple, valid name.")
                 continue
             relative_path = f"{parent_relative}/{name}" if parent_relative else name
             absolute_path = self._project_file_path(
@@ -3347,7 +3377,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 relative_path = None
                 break
             if os.path.lexists(absolute_path):
-                error_label.set_text("Esiste già un file o una directory con questo nome.")
+                error_label.set_text("A file or folder with this name already exists.")
                 continue
             break
         else:
@@ -3367,7 +3397,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Report creation errors or refresh views without changing their cursor."""
 
         if error is not None:
-            self._show_file_error(f"Creazione di {relative_path} fallita: {error}")
+            self._show_file_error(f"Failed to create {relative_path}: {error}")
             return
         self._refresh_project_file_views((relative_path,))
 
@@ -3389,9 +3419,9 @@ class SlateWindow(Gtk.ApplicationWindow):
             )
             return
         if not self._confirm_scm_paths(
-            "Eliminare il file selezionato?",
-            "Il file verrà eliminato definitivamente dal disco.",
-            "Elimina",
+            "Delete the selected file?",
+            "The file will be permanently deleted from disk.",
+            "Delete",
             [relative_path],
             Gtk.MessageType.WARNING,
         ):
@@ -3412,27 +3442,27 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         if error is not None or inspection is None:
             self._show_file_error(
-                f"Ispezione di {relative_path} fallita: {error or 'errore sconosciuto'}"
+                f"Failed to inspect {relative_path}: {error or 'unknown error'}"
             )
             return
         if inspection.contains_directory:
             self._show_file_error(
-                "La directory contiene altre directory e non può essere eliminata."
+                "The folder contains other folders and cannot be deleted."
             )
             return
         if inspection.empty:
-            title = "Eliminare la directory?"
-            detail = "La directory vuota verrà eliminata definitivamente."
+            title = "Delete the folder?"
+            detail = "The empty folder will be permanently deleted."
         else:
-            title = "Distruggere la directory non vuota?"
+            title = "Destroy the non-empty folder?"
             detail = (
-                "Tutti i file e i link contenuti saranno eliminati definitivamente. "
-                "La directory non contiene sottodirectory."
+                "All contained files and links will be permanently deleted. "
+                "The folder contains no subfolders."
             )
         if not self._confirm_scm_paths(
             title,
             detail,
-            "Elimina",
+            "Delete",
             [relative_path],
             Gtk.MessageType.WARNING,
         ):
@@ -3450,7 +3480,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Report deletion failure or reconcile both file and SCM views."""
 
         if error is not None:
-            self._show_file_error(f"Eliminazione di {relative_path} fallita: {error}")
+            self._show_file_error(f"Failed to delete {relative_path}: {error}")
             return
         self._close_preview()
         self._refresh_project_file_views((relative_path,))
@@ -3487,7 +3517,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             text=title,
         )
         dialog.format_secondary_text(f"{detail}\n\n" + "\n".join(paths))
-        cancel = dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
+        cancel = dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dialog.add_button(action_label, Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.CANCEL)
         dialog.set_focus(cancel)
@@ -3518,7 +3548,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             scm = self._repository_scm(repository)
             if scm is None:
                 self.panel.show_error(
-                    f"Repository non disponibile: {repository.path}"
+                    f"Repository unavailable: {repository.path}"
                 )
                 return
             watcher = self._repository_watcher(repository)
@@ -3534,7 +3564,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                     else:
                         watcher.request_paths(paths)
                 if not result.ok:
-                    detail = result.stderr.strip() or f"{action_name} fallita."
+                    detail = result.stderr.strip() or f"{action_name} failed."
                     self.panel.show_error(f"{repository.path}: {detail}")
                     return
                 run_operation(index + 1)
@@ -3554,7 +3584,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         try:
             spawn_detached(scm.diff_argv(paths), cwd=scm.root, env=scm.environment)
         except GLib.Error as error:
-            self.panel.show_error(f"Avvio Meld fallito: {error}")
+            self.panel.show_error(f"Failed to start Meld: {error}")
 
     def _open_external(self, repository: RepositoryRef) -> None:
         """Launch TortoiseHg using the contextual repository root."""
@@ -3565,7 +3595,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         try:
             spawn_detached(scm.external_tool_argv(), cwd=scm.root, env=scm.environment)
         except GLib.Error as error:
-            self.panel.show_error(f"Avvio TortoiseHg fallito: {error}")
+            self.panel.show_error(f"Failed to start TortoiseHg: {error}")
 
     def _update_repository(self, repository: RepositoryRef) -> None:
         """Open the dedicated update workflow for the contextual repository."""
@@ -3576,8 +3606,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         scm = self._repository_scm(repository)
         watcher = self._repository_watcher(repository)
         if scm is None or watcher is None:
-            self.panel.show_error(f"Repository non disponibile: {repository.path}")
+            self.panel.show_error(f"Repository unavailable: {repository.path}")
             return
+        self.panel.set_remote_status(repository, RepositorySyncStatus())
         # 2026-08-17: the modal owns one explicit network/update transaction so
         # the main window never mixes it with another repository action.
         self.repository_dialog = RepositoryUpdateDialog(
@@ -3600,11 +3631,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         scm = self._repository_scm(repository)
         watcher = self._repository_watcher(repository)
         if scm is None or watcher is None:
-            self.panel.show_error(f"Repository non disponibile: {repository.path}")
+            self.panel.show_error(f"Repository unavailable: {repository.path}")
             return
         # 2026-08-18: explicit dispatch keeps each modal independent without
         # introducing a workflow controller or a configurable command engine.
         dialog_types = {
+            "verify": RepositoryVerifyDialog,
             "publish": RepositoryPublishDialog,
             "new_branch": RepositoryCreateBranchDialog,
             "switch_branch": RepositorySwitchBranchDialog,
@@ -3613,16 +3645,37 @@ class SlateWindow(Gtk.ApplicationWindow):
         }
         dialog_type = dialog_types.get(action)
         if dialog_type is None:
-            self.panel.show_error(f"Azione repository non supportata: {action}")
+            self.panel.show_error(f"Unsupported repository action: {action}")
             return
-        self.repository_dialog = dialog_type(
-            self,
-            scm,
-            watcher,
-            self._on_repository_dialog_closed,
-        )
+        if dialog_type is RepositoryVerifyDialog:
+            self.repository_dialog = RepositoryVerifyDialog(
+                self,
+                scm,
+                watcher,
+                self._on_repository_dialog_closed,
+                partial(self._on_repository_verified, repository),
+            )
+        else:
+            # 2026-08-19: branch and history actions invalidate a previous
+            # comparison locally; they never trigger an implicit remote check.
+            self.panel.set_remote_status(repository, RepositorySyncStatus())
+            self.repository_dialog = dialog_type(
+                self,
+                scm,
+                watcher,
+                self._on_repository_dialog_closed,
+            )
         self.repository_dialog.show_all()
         self.repository_dialog.start()
+
+    def _on_repository_verified(
+        self,
+        repository: RepositoryRef,
+        status: RepositorySyncStatus,
+    ) -> None:
+        """Publish an explicit remote comparison on the active repository row."""
+
+        self.panel.set_remote_status(repository, status)
 
     def _on_repository_dialog_closed(self) -> None:
         """Forget the completed modal so another repository action may open."""
@@ -3666,24 +3719,24 @@ class SlateWindow(Gtk.ApplicationWindow):
         if not active:
             self._terminate_all(panes)
             return
-        lines = [f"{len(panes)} sessioni aperte:"]
+        lines = [f"{len(panes)} open sessions:"]
         for pane in panes:
             if pane.active:
                 duration = self._format_duration(pane.duration)
-                lines.append(f"⚠ {pane.session} ({pane.command} — in esecuzione {duration})")
+                lines.append(f"⚠ {pane.session} ({pane.command} — running {duration})")
             else:
-                lines.append(f"✓ {pane.session} (shell al prompt)")
+                lines.append(f"✓ {pane.session} (shell at prompt)")
         dialog = Gtk.MessageDialog(
             transient_for=self,
             modal=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.NONE,
-            text="Chiudere SLATE?",
+            text="Close SLATE?",
         )
         dialog.format_secondary_text("\n".join(lines))
-        cancel_button = dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Lascia in background", 1)
-        dialog.add_button("Termina tutte", 2)
+        cancel_button = dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Leave in Background", 1)
+        dialog.add_button("Terminate All", 2)
         dialog.set_default_response(Gtk.ResponseType.CANCEL)
         dialog.set_focus(cancel_button)
         response = dialog.run()
@@ -3893,7 +3946,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                         child, self.COL_ITEM
                     )
                     tooltip = (
-                        f"{terminal_name_value} — processo in esecuzione"
+                        f"{terminal_name_value} — process running"
                         if active
                         else terminal_name_value
                     )
@@ -3909,13 +3962,13 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Reject ambiguous names and tmux slug collisions before config writes."""
 
         if not name or any(character in name for character in "/|\n\r"):
-            return "Il nome progetto è vuoto o contiene caratteri riservati."
+            return "The project name is empty or contains reserved characters."
         candidate = slug(name, 30)
         if not candidate:
-            return "Il nome progetto deve contenere almeno una lettera o cifra ASCII."
+            return "The project name must contain at least one ASCII letter or digit."
         for project in self.config.data["projects"]:
             if project["name"] == name or slug(project["name"], 30) == candidate:
-                return "Nome progetto o slug tmux già utilizzato."
+                return "The project name or tmux slug is already in use."
         return None
 
     def _validate_terminal_name(
@@ -3924,17 +3977,17 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Reject terminal names that cannot map uniquely to a tmux session."""
 
         if project is None:
-            return "Progetto non trovato."
+            return "Project not found."
         if not name or any(character in name for character in "/|\n\r"):
-            return "Il nome terminale è vuoto o contiene caratteri riservati."
+            return "The terminal name is empty or contains reserved characters."
         candidate = slug(name, 20)
         if not candidate:
-            return "Il nome terminale deve contenere almeno una lettera o cifra ASCII."
+            return "The terminal name must contain at least one ASCII letter or digit."
         for existing in project["terminals"]:
             if existing != old_name and (
                 existing == name or slug(existing, 20) == candidate
             ):
-                return "Nome terminale o slug tmux già utilizzato nel progetto."
+                return "The terminal name or tmux slug is already in use in this project."
         return None
 
     def _show_error(self, message: str) -> bool:
@@ -3962,7 +4015,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Format process elapsed seconds for the shutdown warning."""
 
         if seconds is None:
-            return "da tempo non determinato"
+            return "for an unknown duration"
         if seconds < 60:
-            return f"da {seconds}s"
-        return f"da {seconds // 60}m"
+            return f"for {seconds}s"
+        return f"for {seconds // 60}m"

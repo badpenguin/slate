@@ -42,9 +42,9 @@ def _report_blocked_navigation(uri: str, scheme: str, source: str) -> None:
     # dall'utente; la stampa completa è stata richiesta esplicitamente.
     # repr conserva il valore ma impedisce ai caratteri di controllo di creare
     # righe di log ingannevoli o di nascondere parte della destinazione.
-    safe_scheme = scheme or "assente"
+    safe_scheme = scheme or "missing"
     print(
-        f"WebKit: navigazione bloccata ({source}; schema: {safe_scheme}; "
+        f"WebKit: blocked navigation ({source}; scheme: {safe_scheme}; "
         f"URL: {uri!r}).",
         file=sys.stderr,
     )
@@ -134,7 +134,7 @@ class BrowserEntry:
     def display_title(self) -> str:
         """Distinguish private rows without relying on color alone."""
 
-        return f"Anonimo — {self.title}" if self.private else self.title
+        return f"Incognito — {self.title}" if self.private else self.title
 
 
 class _ResponsiveViewport(Gtk.Bin):
@@ -209,7 +209,7 @@ class BrowserPage(Gtk.Box):
         """Build and start one page in its persistent or private context."""
 
         if WebKit2 is None:
-            raise RuntimeError("WebKitGTK 4.1 non è disponibile")
+            raise RuntimeError("WebKitGTK 4.1 is unavailable")
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.entry = entry
         self.project_name = entry.project_name
@@ -231,9 +231,9 @@ class BrowserPage(Gtk.Box):
 
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         toolbar.get_style_context().add_class("browser-toolbar")
-        self.back_button = self._icon_button("go-previous", "Indietro")
-        self.forward_button = self._icon_button("go-next", "Avanti")
-        self.reload_button = self._icon_button("view-refresh", "Ricarica")
+        self.back_button = self._icon_button("go-previous", "Back")
+        self.forward_button = self._icon_button("go-next", "Forward")
+        self.reload_button = self._icon_button("view-refresh", "Reload")
         self.back_button.connect("clicked", self._on_back_clicked)
         self.forward_button.connect("clicked", self._on_forward_clicked)
         self.reload_button.connect("clicked", self._on_reload_clicked)
@@ -241,13 +241,13 @@ class BrowserPage(Gtk.Box):
         toolbar.pack_start(self.forward_button, False, False, 0)
         toolbar.pack_start(self.reload_button, False, False, 0)
 
-        self.development_button = Gtk.MenuButton(label="Sviluppo")
+        self.development_button = Gtk.MenuButton(label="Development")
         self.development_menu = Gtk.Menu()
         self.hard_reload_item = Gtk.MenuItem(
-            label="Ricarica ignorando cache"
+            label="Reload without cache"
         )
         self.clear_site_data_item = Gtk.MenuItem(
-            label="Cancella dati del sito (cookie esclusi)…"
+            label="Clear site data (excluding cookies)…"
         )
         self.hard_reload_item.connect(
             "activate", self._on_hard_reload_activate
@@ -260,16 +260,16 @@ class BrowserPage(Gtk.Box):
         self.development_menu.show_all()
         self.development_button.set_popup(self.development_menu)
         self.development_button.set_tooltip_text(
-            "Azioni di sviluppo per cache e dati del sito"
+            "Development actions for cache and site data"
         )
         toolbar.pack_start(self.development_button, False, False, 0)
 
         self.reload_on_bell_check = Gtk.CheckButton(
-            label="Ricarica su BELL"
+            label="Reload on BELL"
         )
         self.reload_on_bell_check.set_active(entry.reload_on_bell)
         self.reload_on_bell_check.set_tooltip_text(
-            "Ricarica questa pagina quando un terminale del progetto emette BELL"
+            "Reload this page when a project terminal emits BELL"
         )
         self.reload_on_bell_check.connect(
             "toggled", self._on_reload_on_bell_toggled
@@ -277,18 +277,18 @@ class BrowserPage(Gtk.Box):
         toolbar.pack_start(self.reload_on_bell_check, False, False, 0)
 
         self.uri_entry = Gtk.Entry()
-        self.uri_entry.set_placeholder_text("Inserisci URL")
+        self.uri_entry.set_placeholder_text("Enter URL")
         self.uri_entry.set_activates_default(False)
         self.uri_entry.connect("activate", self._on_uri_activated)
         toolbar.pack_start(self.uri_entry, True, True, 0)
 
         self.spinner = Gtk.Spinner()
-        self.spinner.set_tooltip_text("Caricamento in corso")
+        self.spinner.set_tooltip_text("Loading")
         toolbar.pack_start(self.spinner, False, False, 0)
         self.responsive_button = Gtk.MenuButton(label="Responsive")
         self.responsive_menu = Gtk.Menu()
         self.responsive_menu_items: dict[str, Gtk.RadioMenuItem] = {}
-        disabled_item = Gtk.RadioMenuItem.new_with_label(None, "Disattivato")
+        disabled_item = Gtk.RadioMenuItem.new_with_label(None, "Disabled")
         self.responsive_menu.append(disabled_item)
         self.responsive_menu_items["none"] = disabled_item
         disabled_item.connect(
@@ -307,13 +307,13 @@ class BrowserPage(Gtk.Box):
         self.responsive_menu.show_all()
         self.responsive_button.set_popup(self.responsive_menu)
         self.responsive_button.set_tooltip_text(
-            "Scegli un viewport responsive o ripristina Desktop"
+            "Choose a responsive viewport or restore Desktop"
         )
         toolbar.pack_start(self.responsive_button, False, False, 0)
         self.responsive_label = Gtk.Label()
         self.responsive_label.set_no_show_all(True)
         self.responsive_label.set_tooltip_text(
-            "Viewport CSS richiesto e scala usata per adattarlo"
+            "Requested CSS viewport and scale used to fit it"
         )
         toolbar.pack_start(self.responsive_label, False, False, 0)
         self.inspector_button = Gtk.ToggleButton()
@@ -322,9 +322,9 @@ class BrowserPage(Gtk.Box):
                 str(Path(__file__).with_name("developer-tools.svg"))
             )
         )
-        self.inspector_button.set_tooltip_text("Strumenti di sviluppo")
+        self.inspector_button.set_tooltip_text("Developer tools")
         self.inspector_button.get_accessible().set_name(
-            "Strumenti di sviluppo"
+            "Developer tools"
         )
         self.inspector_button.connect("toggled", self._on_inspector_toggled)
         toolbar.pack_start(self.inspector_button, False, False, 0)
@@ -333,7 +333,7 @@ class BrowserPage(Gtk.Box):
         self.error_bar = Gtk.InfoBar()
         self.error_bar.set_message_type(Gtk.MessageType.ERROR)
         self.error_bar.set_show_close_button(True)
-        self.error_bar.add_button("Ricarica", Gtk.ResponseType.ACCEPT)
+        self.error_bar.add_button("Reload", Gtk.ResponseType.ACCEPT)
         self.error_bar.connect("response", self._on_error_response)
         self.error_label = Gtk.Label(xalign=0)
         self.error_label.set_line_wrap(True)
@@ -372,7 +372,7 @@ class BrowserPage(Gtk.Box):
         self.exit_responsive_button.set_margin_end(12)
         self.exit_responsive_button.set_no_show_all(True)
         self.exit_responsive_button.set_tooltip_text(
-            "Esci dalla modalità Responsive"
+            "Exit Responsive mode"
         )
         self.exit_responsive_button.get_style_context().add_class(
             "browser-responsive-exit"
@@ -529,15 +529,15 @@ class BrowserPage(Gtk.Box):
             modal=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.NONE,
-            text=f"Cancellare i dati di {hostname}?",
+            text=f"Clear data for {hostname}?",
         )
         dialog.format_secondary_text(
-            "Saranno rimossi cache, storage, database e service "
-            "worker. I cookie resteranno invariati."
+            "Cache, storage, databases, and service workers will be removed. "
+            "Cookies will remain unchanged."
         )
-        dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         delete_button = dialog.add_button(
-            "Cancella e ricarica", Gtk.ResponseType.ACCEPT
+            "Clear and reload", Gtk.ResponseType.ACCEPT
         )
         delete_button.get_style_context().add_class("destructive-action")
         dialog.set_default_response(Gtk.ResponseType.CANCEL)
@@ -573,7 +573,7 @@ class BrowserPage(Gtk.Box):
             if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 return
             self._finish_site_data_clear(
-                f"Impossibile leggere i dati del sito: {error}"
+                f"Unable to read site data: {error}"
             )
             return
         matching_data = [
@@ -603,12 +603,12 @@ class BrowserPage(Gtk.Box):
             if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 return
             self._finish_site_data_clear(
-                f"Impossibile cancellare i dati del sito: {error}"
+                f"Unable to clear site data: {error}"
             )
             return
         if not removed:
             self._finish_site_data_clear(
-                "WebKit non ha completato la cancellazione dei dati del sito."
+                "WebKit did not finish clearing the site data."
             )
             return
         self._finish_site_data_clear(None)
@@ -755,8 +755,8 @@ class BrowserPage(Gtk.Box):
             if scheme and scheme not in _BLOCKED_SCHEMES:
                 self._open_external_uri(requested)
                 return
-            _report_blocked_navigation(requested, scheme, "barra indirizzi")
-            self.on_error("URL non valida o schema non consentito.")
+            _report_blocked_navigation(requested, scheme, "address bar")
+            self.on_error("Invalid URL or disallowed scheme.")
             return
         self.error_bar.hide()
         self.failed_loading = False
@@ -804,7 +804,7 @@ class BrowserPage(Gtk.Box):
 
         self.failed_loading = True
         self._set_loading(False)
-        self.error_label.set_text(f"Caricamento di {failing_uri} fallito: {error}")
+        self.error_label.set_text(f"Failed to load {failing_uri}: {error}")
         self.error_bar.show_all()
         return True
 
@@ -816,7 +816,7 @@ class BrowserPage(Gtk.Box):
         self.failed_loading = True
         self._set_loading(False)
         self.error_label.set_text(
-            "Il processo della pagina si è interrotto. Premi Ricarica per riprovare."
+            "The page process stopped. Press Reload to try again."
         )
         self.error_bar.show_all()
 
@@ -837,12 +837,12 @@ class BrowserPage(Gtk.Box):
             self.spinner.show()
             self.spinner.start()
             icon_name = "process-stop"
-            tooltip = "Interrompi caricamento"
+            tooltip = "Stop loading"
         else:
             self.spinner.stop()
             self.spinner.hide()
             icon_name = "view-refresh"
-            tooltip = "Ricarica"
+            tooltip = "Reload"
         image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
         image.show()
         self.reload_button.set_image(image)
@@ -953,7 +953,7 @@ class BrowserPage(Gtk.Box):
             ):
                 self._open_external_uri(uri)
             else:
-                _report_blocked_navigation(uri, scheme, "popup della pagina")
+                _report_blocked_navigation(uri, scheme, "page popup")
             return True
         if scheme in {"http", "https", "blob"} or uri == "about:blank":
             # 2026-08-18: Gutenberg costruisce il documento di editor-canvas
@@ -962,11 +962,11 @@ class BrowserPage(Gtk.Box):
             return False
         decision.ignore()
         if scheme == "file":
-            self.on_error("L’accesso a file:// non è consentito nel browser SLATE.")
+            self.on_error("Access to file:// is not allowed in the SLATE browser.")
         elif action.is_user_gesture() and scheme and scheme not in _BLOCKED_SCHEMES:
             self._open_external_uri(uri)
             return True
-        _report_blocked_navigation(uri, scheme, "pagina")
+        _report_blocked_navigation(uri, scheme, "page")
         return True
 
     def _open_external_uri(self, uri: str) -> None:
@@ -988,7 +988,7 @@ class BrowserPage(Gtk.Box):
         try:
             Gio.AppInfo.launch_default_for_uri_finish(result)
         except GLib.Error as error:
-            self.on_error(f"Impossibile aprire {uri}: {error}")
+            self.on_error(f"Unable to open {uri}: {error}")
 
 
 class BrowserManager:
@@ -1041,7 +1041,7 @@ class BrowserManager:
         """Create and display one normal or isolated private browser row."""
 
         if WebKit2 is None:
-            self.on_error("Dipendenza mancante: typelib WebKit2 4.1.")
+            self.on_error("Missing dependency: WebKit2 4.1 typelib.")
             return None
         identifier = self._next_identifier()
         entry = BrowserEntry(
@@ -1075,7 +1075,7 @@ class BrowserManager:
         if entry.page is not None:
             return entry.page
         if WebKit2 is None:
-            self.on_error("Dipendenza mancante: typelib WebKit2 4.1.")
+            self.on_error("Missing dependency: WebKit2 4.1 typelib.")
             return None
         # 2026-08-17: una tab anonima ripristinata conserva URL e identità, ma
         # riceve un profilo effimero nuovo per non ripristinare cookie/sessione.
@@ -1107,7 +1107,7 @@ class BrowserManager:
         """Create the one app-wide persistent WebKit profile on first use."""
 
         if WebKit2 is None:
-            raise RuntimeError("WebKitGTK 4.1 non è disponibile")
+            raise RuntimeError("WebKitGTK 4.1 is unavailable")
         if self.context is None:
             # 2026-08-17: directory XDG esplicite impediscono a WebKit di
             # scegliere percorsi impliciti o scrivere dentro le working copy.

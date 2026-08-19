@@ -64,7 +64,7 @@ def validate_dependencies() -> bool:
     if not missing:
         return True
     print(
-        "Dipendenze mancanti: " + ", ".join(missing),
+        "Missing dependencies: " + ", ".join(missing),
         file=sys.stderr,
     )
     return False
@@ -81,7 +81,7 @@ def load_stylesheet() -> None:
     try:
         provider.load_from_path(str(stylesheet))
     except GLib.Error as error:
-        print(f"Stylesheet non caricato: {error}", file=sys.stderr)
+        print(f"Failed to load stylesheet: {error}", file=sys.stderr)
         return
     Gtk.StyleContext.add_provider_for_screen(
         screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION

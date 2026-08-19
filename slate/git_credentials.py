@@ -21,11 +21,11 @@ class GitCredentialDialog(Gtk.Dialog):
     def __init__(self, host: str, username: str) -> None:
         """Build the credential form with an optional username suggested by Git."""
 
-        super().__init__(title="Autenticazione Git HTTPS", modal=True)
+        super().__init__(title="Git HTTPS Authentication", modal=True)
         self.set_default_size(440, -1)
         self.set_keep_above(True)
-        self.add_button("Annulla", Gtk.ResponseType.CANCEL)
-        self.confirm_button = self.add_button("Continua", Gtk.ResponseType.OK)
+        self.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        self.confirm_button = self.add_button("Continue", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
 
         content = self.get_content_area()
@@ -33,7 +33,7 @@ class GitCredentialDialog(Gtk.Dialog):
         content.set_spacing(12)
 
         explanation = Gtk.Label(
-            label="Inserisci credenziali valide soltanto per questa pubblicazione.",
+            label="Enter credentials valid only for this publication.",
             xalign=0,
         )
         explanation.set_line_wrap(True)
@@ -43,13 +43,13 @@ class GitCredentialDialog(Gtk.Dialog):
         content.pack_start(grid, False, False, 0)
 
         host_title = Gtk.Label(label="Server", xalign=0)
-        host_value = Gtk.Label(label=host or "Repository remoto", xalign=0)
+        host_value = Gtk.Label(label=host or "Remote repository", xalign=0)
         host_value.set_selectable(True)
         host_value.set_ellipsize(Pango.EllipsizeMode.END)
         grid.attach(host_title, 0, 0, 1, 1)
         grid.attach(host_value, 1, 0, 1, 1)
 
-        username_label = Gtk.Label(label="Utente", xalign=0)
+        username_label = Gtk.Label(label="Username", xalign=0)
         self.username_entry = Gtk.Entry()
         self.username_entry.set_text(username)
         self.username_entry.set_activates_default(True)
@@ -59,9 +59,9 @@ class GitCredentialDialog(Gtk.Dialog):
 
         password_label = Gtk.Label(
             label=(
-                "Token personale"
+                "Personal access token"
                 if host.lower() == "github.com"
-                else "Password o token"
+                else "Password or token"
             ),
             xalign=0,
         )

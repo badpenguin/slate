@@ -432,8 +432,10 @@ class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase
         """A normal external transaction refreshes status without rereading branch."""
 
         self._finish_startup()
+        self.watcher.on_history_change = MagicMock()
         self.watcher._on_metadata_change(".hg/dirstate", 0)
         self._drain_main_context()
+        self.watcher.on_history_change.assert_called_once_with()
         self.assertEqual(
             self.calls[3][0], ["hg", "status", "--copies", "-Tjson"]
         )
@@ -516,15 +518,28 @@ class GitRepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestC
         """Index refreshes status while HEAD refreshes branch then status."""
 
         self._finish_startup()
+        self.watcher.on_history_change = MagicMock()
         self.watcher._on_metadata_change(".git/index", 0)
         self._drain_main_context()
+        self.watcher.on_history_change.assert_not_called()
         self.assertEqual(self.calls[3][0][:3], ["git", "status", "--porcelain=v2"])
         self._complete(3)
         self.watcher._on_metadata_change(".git/HEAD", 0)
         self._drain_main_context()
+        self.watcher.on_history_change.assert_called_once_with()
         self.assertEqual(self.calls[4][0], ["git", "branch", "--show-current"])
         self._complete(4, "feature\n")
         self.assertEqual(self.calls[5][0][:3], ["git", "status", "--porcelain=v2"])
+
+    def test_git_ref_change_only_invalidates_explicit_remote_status(self) -> None:
+        """A moved Git ref never authorizes an automatic remote command."""
+
+        self._finish_startup()
+        self.watcher.on_history_change = MagicMock()
+        self.watcher._on_metadata_change(".git/refs/heads/main", 0)
+        self._drain_main_context()
+        self.watcher.on_history_change.assert_called_once_with()
+        self.assertEqual(len(self.calls), 3)
 
 
 if __name__ == "__main__":

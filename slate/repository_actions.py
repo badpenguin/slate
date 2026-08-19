@@ -42,7 +42,7 @@ class _RepositoryActionDialog(RepositoryOperationDialog):
             watcher,
             on_closed,
             action_label=action_label,
-            cancellation_title="Operazione annullata",
+            cancellation_title="Operation cancelled",
             allow_idle_close=True,
         )
         assert self.action_button is not None
@@ -61,7 +61,7 @@ class _RepositoryActionDialog(RepositoryOperationDialog):
         self._run_command(
             self.scm.update_merge_state_argv(),
             self._on_merge_checked,
-            "Controllo lo stato del repository…",
+            "Checking repository status…",
         )
 
     def _on_merge_checked(self, result: CommandResult) -> None:
@@ -76,12 +76,12 @@ class _RepositoryActionDialog(RepositoryOperationDialog):
             query_failed = result.error is not None or result.returncode not in (0, 1)
             merge_pending = result.ok
         if query_failed:
-            self._finish_error("Verifica del repository fallita", result)
+            self._finish_error("Repository check failed", result)
             return
         if merge_pending:
             self._finish(
-                "Merge già in corso",
-                "Concludi o annulla manualmente il merge prima di continuare.",
+                "Merge already in progress",
+                "Complete or abort the merge manually before continuing.",
             )
             return
         callback = self.after_merge_check
@@ -96,7 +96,7 @@ class _RepositoryActionDialog(RepositoryOperationDialog):
         self._run_command(
             self.scm.update_tracked_status_argv(),
             self._on_clean_checked,
-            "Controllo le modifiche locali…",
+            "Checking local changes…",
         )
 
     def _on_clean_checked(self, result: CommandResult) -> None:
@@ -105,17 +105,17 @@ class _RepositoryActionDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura dello stato fallita", result)
+            self._finish_error("Failed to read status", result)
             return
         try:
             dirty = bool(self.scm.parse_status(result.stdout))
         except (KeyError, IndexError, TypeError, ValueError) as error:
-            self._finish("Stato repository non valido", str(error))
+            self._finish("Invalid repository status", str(error))
             return
         if dirty:
             self._finish(
-                "Modifiche locali presenti",
-                "Commit o ripristina le modifiche tracciate prima di continuare.",
+                "Local changes present",
+                "Commit or revert tracked changes before continuing.",
             )
             return
         callback = self.after_clean_check
@@ -143,8 +143,8 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
 
         super().__init__(
             parent,
-            "Pubblica repository",
-            "Pubblica",
+            "Publish repository",
+            "Publish",
             scm,
             watcher,
             on_closed,
@@ -162,13 +162,13 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
             self._run_command(
                 self.scm.remote_path_argv("default-push"),
                 self._on_hg_default_push,
-                "Cerco la destinazione Mercurial…",
+                "Finding the Mercurial destination…",
             )
         else:
             self._run_command(
                 self.scm.remotes_argv(),
                 self._on_git_remotes,
-                "Cerco la destinazione Git…",
+                "Finding the Git destination…",
             )
 
     def _on_hg_default_push(self, result: CommandResult) -> None:
@@ -180,12 +180,12 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
             self._enable_publish()
             return
         if result.error is not None or result.returncode not in (1,):
-            self._finish_error("Verifica della destinazione fallita", result)
+            self._finish_error("Destination check failed", result)
             return
         self._run_command(
             self.scm.remote_path_argv("default"),
             self._on_hg_default,
-            "Cerco la destinazione Mercurial…",
+            "Finding the Mercurial destination…",
         )
 
     def _on_hg_default(self, result: CommandResult) -> None:
@@ -197,11 +197,11 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
             self._enable_publish()
         elif result.returncode == 1 and result.error is None:
             self._finish(
-                "Nessuna destinazione remota",
-                "Il repository è locale: non c'è nulla da pubblicare.",
+                "No remote destination",
+                "This is a local repository: there is nothing to publish.",
             )
         else:
-            self._finish_error("Verifica della destinazione fallita", result)
+            self._finish_error("Destination check failed", result)
 
     def _on_git_remotes(self, result: CommandResult) -> None:
         """Distinguish a local-only Git repository before checking upstream."""
@@ -209,18 +209,18 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura dei remote Git fallita", result)
+            self._finish_error("Failed to read Git remotes", result)
             return
         if not result.stdout.split():
             self._finish(
-                "Nessuna destinazione remota",
-                "Il repository è locale: non c'è nulla da pubblicare.",
+                "No remote destination",
+                "This is a local repository: there is nothing to publish.",
             )
             return
         self._run_command(
             self.scm.update_upstream_argv(),
             self._on_git_upstream,
-            "Controllo l'upstream Git…",
+            "Checking the Git upstream…",
         )
 
     def _on_git_upstream(self, result: CommandResult) -> None:
@@ -232,11 +232,11 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
             self._enable_publish()
         elif result.returncode != 0 and result.error is None:
             self._finish(
-                "Upstream non configurato",
-                "Configura manualmente l'upstream del branch prima di pubblicare.",
+                "Upstream not configured",
+                "Configure the branch upstream manually before publishing.",
             )
         else:
-            self._finish_error("Verifica dell'upstream fallita", result)
+            self._finish_error("Upstream check failed", result)
 
     def _enable_publish(self) -> None:
         """Expose the single explicit confirmation after destination validation."""
@@ -245,8 +245,8 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
         self.ready_to_submit = True
         self.action_button.set_sensitive(True)
         self._set_progress(
-            "Pronto per pubblicare",
-            "Verranno inviati i commit e i tag previsti dal normale push.",
+            "Ready to publish",
+            "The commits and tags included in a normal push will be sent.",
         )
 
     def _submit(self) -> None:
@@ -259,7 +259,7 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
         self._run_command(
             self.scm.push_argv(),
             self._on_pushed,
-            "Pubblico il repository…",
+            "Publishing repository…",
             environment=environment,
         )
 
@@ -269,9 +269,9 @@ class RepositoryPublishDialog(_RepositoryActionDialog):
         if not self._prepare_result():
             return
         if result.ok:
-            self._finish("Repository pubblicato", "Il push è terminato correttamente.")
+            self._finish("Repository published", "The push completed successfully.")
         else:
-            self._finish_error("Pubblicazione fallita", result)
+            self._finish_error("Publication failed", result)
 
 
 class _NamedRepositoryDialog(_RepositoryActionDialog):
@@ -310,7 +310,7 @@ class _NamedRepositoryDialog(_RepositoryActionDialog):
         self.ready_to_submit = True
         self.name_entry.set_sensitive(True)
         self._on_name_changed(self.name_entry)
-        self._set_progress("Inserisci un nome", detail)
+        self._set_progress("Enter a name", detail)
         self.name_entry.grab_focus()
 
 
@@ -326,8 +326,8 @@ class RepositoryCreateBranchDialog(_NamedRepositoryDialog):
     ) -> None:
         """Build the New branch modal."""
 
-        super().__init__(parent, "Nuovo branch", "Crea", scm, watcher, on_closed)
-        self.name_entry.set_placeholder_text("Nome del branch")
+        super().__init__(parent, "New branch", "Create", scm, watcher, on_closed)
+        self.name_entry.set_placeholder_text("Branch name")
 
     def _begin(self) -> None:
         """Allow branch creation only outside an existing merge."""
@@ -338,7 +338,7 @@ class RepositoryCreateBranchDialog(_NamedRepositoryDialog):
     def _ready(self) -> None:
         """Enable the sole branch-name input."""
 
-        self._enable_name("Le modifiche locali resteranno nella working copy.")
+        self._enable_name("Local changes will remain in the working copy.")
 
     def _submit(self) -> None:
         """Create the exact trimmed branch name without tracking inference."""
@@ -346,7 +346,7 @@ class RepositoryCreateBranchDialog(_NamedRepositoryDialog):
         self.ready_to_submit = False
         name = self.name_entry.get_text().strip()
         argv = self.scm.create_branch_argv(name)
-        self._run_command(argv, self._on_created, "Creo il branch…")
+        self._run_command(argv, self._on_created, "Creating branch…")
 
     def _on_created(self, result: CommandResult) -> None:
         """Report branch creation without force or alternate names."""
@@ -354,9 +354,9 @@ class RepositoryCreateBranchDialog(_NamedRepositoryDialog):
         if not self._prepare_result():
             return
         if result.ok:
-            self._finish("Branch creato", "La working copy usa ora il nuovo branch.")
+            self._finish("Branch created", "The working copy now uses the new branch.")
         else:
-            self._finish_error("Creazione del branch fallita", result)
+            self._finish_error("Failed to create branch", result)
 
 
 class RepositoryTagDialog(_NamedRepositoryDialog):
@@ -371,12 +371,12 @@ class RepositoryTagDialog(_NamedRepositoryDialog):
     ) -> None:
         """Build the Assign tag modal."""
 
-        super().__init__(parent, "Assegna tag", "Assegna", scm, watcher, on_closed)
+        super().__init__(parent, "Assign tag", "Assign", scm, watcher, on_closed)
         self.recent_tags_label = Gtk.Label(xalign=0)
         self.recent_tags_label.set_line_wrap(True)
         self.recent_tags_label.set_selectable(True)
         self.content.pack_start(self.recent_tags_label, False, False, 0)
-        self.name_entry.set_placeholder_text("Nome del tag")
+        self.name_entry.set_placeholder_text("Tag name")
 
     def _begin(self) -> None:
         """Require no merge and a clean visible revision before tagging."""
@@ -397,7 +397,7 @@ class RepositoryTagDialog(_NamedRepositoryDialog):
         self._run_command(
             self.scm.recent_tags_argv(),
             self._on_recent_tags,
-            "Carico gli ultimi tag…",
+            "Loading recent tags…",
         )
 
     def _on_recent_tags(self, result: CommandResult) -> None:
@@ -413,19 +413,19 @@ class RepositoryTagDialog(_NamedRepositoryDialog):
             except (KeyError, TypeError, ValueError):
                 history_available = False
         if recent_tags:
-            self.recent_tags_label.set_text(f"Ultimi tag: {'  ·  '.join(recent_tags)}")
+            self.recent_tags_label.set_text(f"Recent tags: {'  ·  '.join(recent_tags)}")
         elif history_available:
-            self.recent_tags_label.set_text("Ultimi tag: nessuno")
+            self.recent_tags_label.set_text("Recent tags: none")
         else:
-            self.recent_tags_label.set_text("Ultimi tag: non disponibili")
-        self._enable_name("Il tag verrà assegnato alla revisione corrente.")
+            self.recent_tags_label.set_text("Recent tags: unavailable")
+        self._enable_name("The tag will be assigned to the current revision.")
 
     def _submit(self) -> None:
         """Create one tag without replacing an existing name."""
 
         self.ready_to_submit = False
         name = self.name_entry.get_text().strip()
-        self._run_command(self.scm.tag_argv(name), self._on_tagged, "Creo il tag…")
+        self._run_command(self.scm.tag_argv(name), self._on_tagged, "Creating tag…")
 
     def _on_tagged(self, result: CommandResult) -> None:
         """Report the normal non-force tag result."""
@@ -433,9 +433,9 @@ class RepositoryTagDialog(_NamedRepositoryDialog):
         if not self._prepare_result():
             return
         if result.ok:
-            self._finish("Tag assegnato", "Il nuovo tag è stato creato localmente.")
+            self._finish("Tag assigned", "The new tag was created locally.")
         else:
-            self._finish_error("Creazione del tag fallita", result)
+            self._finish_error("Failed to create tag", result)
 
 
 class _BranchChoiceDialog(_RepositoryActionDialog):
@@ -467,7 +467,7 @@ class _BranchChoiceDialog(_RepositoryActionDialog):
         self._run_command(
             self.scm.branch_argv(),
             self._on_current_branch,
-            "Leggo il branch corrente…",
+            "Reading current branch…",
         )
 
     def _on_current_branch(self, result: CommandResult) -> None:
@@ -477,12 +477,12 @@ class _BranchChoiceDialog(_RepositoryActionDialog):
             return
         self.current_branch = result.stdout.strip()
         if not result.ok or not self.current_branch:
-            self._finish("Branch corrente non disponibile", "L'operazione richiede un branch locale attivo.")
+            self._finish("Current branch unavailable", "This operation requires an active local branch.")
             return
         self._run_command(
             self.scm.branches_argv(),
             self._on_branches,
-            "Carico i branch locali…",
+            "Loading local branches…",
         )
 
     def _on_branches(self, result: CommandResult) -> None:
@@ -491,16 +491,16 @@ class _BranchChoiceDialog(_RepositoryActionDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura dei branch fallita", result)
+            self._finish_error("Failed to read branches", result)
             return
         try:
             branches = self.scm.parse_branches(result.stdout)
         except (KeyError, TypeError, ValueError) as error:
-            self._finish("Elenco branch non valido", str(error))
+            self._finish("Invalid branch list", str(error))
             return
         choices = [target for target in branches if target.name != self.current_branch]
         if not choices:
-            self._finish("Nessun branch disponibile", "Non esistono altri branch locali selezionabili.")
+            self._finish("No branch available", "There are no other selectable local branches.")
             return
         self.targets = {target.name: target for target in choices}
         for target in choices:
@@ -509,7 +509,7 @@ class _BranchChoiceDialog(_RepositoryActionDialog):
         self.branch_combo.set_sensitive(True)
         self.ready_to_submit = True
         self.spinner.stop()
-        self._set_progress("Scegli un branch")
+        self._set_progress("Choose a branch")
         self._on_branch_changed(self.branch_combo)
 
     def _on_branch_changed(self, _combo: Gtk.ComboBoxText) -> None:
@@ -532,7 +532,7 @@ class RepositorySwitchBranchDialog(_BranchChoiceDialog):
     ) -> None:
         """Build the Switch branch modal."""
 
-        super().__init__(parent, "Passa a branch", "Passa", scm, watcher, on_closed)
+        super().__init__(parent, "Switch branch", "Switch", scm, watcher, on_closed)
 
     def _begin(self) -> None:
         """Require no merge and clean tracked state before loading branches."""
@@ -553,13 +553,13 @@ class RepositorySwitchBranchDialog(_BranchChoiceDialog):
             self._run_command(
                 self.scm.branch_heads_argv(name),
                 self._on_hg_heads,
-                "Controllo la head Mercurial…",
+                "Checking the Mercurial head…",
             )
         else:
             self._run_command(
                 self.scm.switch_branch_argv(name),
                 self._on_switched,
-                "Cambio branch…",
+                "Switching branch…",
             )
 
     def _on_hg_heads(self, result: CommandResult) -> None:
@@ -568,17 +568,17 @@ class RepositorySwitchBranchDialog(_BranchChoiceDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura della head Mercurial fallita", result)
+            self._finish_error("Failed to read the Mercurial head", result)
             return
         try:
             heads = self.scm.parse_update_heads(result.stdout)
         except (KeyError, TypeError, ValueError) as error:
-            self._finish("Elenco head Mercurial non valido", str(error))
+            self._finish("Invalid Mercurial head list", str(error))
             return
         if len(heads) != 1:
-            self._finish("Branch ambiguo", "Il branch Mercurial ha più head e va gestito manualmente.")
+            self._finish("Ambiguous branch", "The Mercurial branch has multiple heads and must be handled manually.")
             return
-        self._run_command(self.scm.update_to_argv(heads[0]), self._on_switched, "Cambio branch…")
+        self._run_command(self.scm.update_to_argv(heads[0]), self._on_switched, "Switching branch…")
 
     def _on_switched(self, result: CommandResult) -> None:
         """Report the exact checked branch switch result."""
@@ -586,9 +586,9 @@ class RepositorySwitchBranchDialog(_BranchChoiceDialog):
         if not self._prepare_result():
             return
         if result.ok:
-            self._finish("Branch cambiato", "La working copy usa ora il branch selezionato.")
+            self._finish("Branch switched", "The working copy now uses the selected branch.")
         else:
-            self._finish_error("Cambio branch fallito", result)
+            self._finish_error("Failed to switch branch", result)
 
 
 class RepositoryMergeBranchDialog(_BranchChoiceDialog):
@@ -605,7 +605,7 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
 
         super().__init__(parent, "Merge branch", "Merge", scm, watcher, on_closed)
         self.merge_result: CommandResult | None = None
-        self.meld_button = self.add_button("Apri in Meld", Gtk.ResponseType.APPLY)
+        self.meld_button = self.add_button("Open in Meld", Gtk.ResponseType.APPLY)
         self.meld_button.set_no_show_all(True)
 
     def _begin(self) -> None:
@@ -627,13 +627,13 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
             self._run_command(
                 self.scm.branch_heads_argv(name),
                 self._on_hg_heads,
-                "Controllo la head Mercurial…",
+                "Checking the Mercurial head…",
             )
         else:
             self._run_command(
                 self.scm.merge_branch_argv(name),
                 self._on_merge_completed,
-                "Eseguo il merge…",
+                "Merging…",
             )
 
     def _on_hg_heads(self, result: CommandResult) -> None:
@@ -642,20 +642,20 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura della head Mercurial fallita", result)
+            self._finish_error("Failed to read the Mercurial head", result)
             return
         try:
             heads = self.scm.parse_update_heads(result.stdout)
         except (KeyError, TypeError, ValueError) as error:
-            self._finish("Elenco head Mercurial non valido", str(error))
+            self._finish("Invalid Mercurial head list", str(error))
             return
         if len(heads) != 1:
-            self._finish("Branch ambiguo", "Il branch Mercurial ha più head e va gestito manualmente.")
+            self._finish("Ambiguous branch", "The Mercurial branch has multiple heads and must be handled manually.")
             return
         self._run_command(
             self.scm.merge_branch_argv(heads[0]),
             self._on_merge_completed,
-            "Eseguo il merge…",
+            "Merging…",
         )
 
     def _on_merge_completed(self, result: CommandResult) -> None:
@@ -668,13 +668,13 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
             self._run_command(
                 self.scm.update_merge_state_argv(),
                 self._on_post_merge_state,
-                "Verifico il risultato del merge…",
+                "Checking the merge result…",
             )
         else:
             self._run_command(
                 self.scm.merge_conflicts_argv(),
                 self._on_merge_conflicts,
-                "Controllo i conflitti…",
+                "Checking conflicts…",
             )
 
     def _on_post_merge_state(self, result: CommandResult) -> None:
@@ -689,14 +689,14 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
             failed = result.error is not None or result.returncode not in (0, 1)
             pending = result.ok
         if failed:
-            self._finish_error("Verifica del merge fallita", result)
+            self._finish_error("Merge check failed", result)
         elif pending:
             self._finish(
-                "Merge pronto",
-                "Completa il commit o annulla il merge manualmente.",
+                "Merge ready",
+                "Complete the commit or abort the merge manually.",
             )
         else:
-            self._finish("Nessuna modifica", "Il branch selezionato è già integrato.")
+            self._finish("No changes", "The selected branch is already integrated.")
 
     def _on_merge_conflicts(self, result: CommandResult) -> None:
         """Offer Meld only when a machine-readable conflict list is non-empty."""
@@ -704,22 +704,22 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Verifica dei conflitti fallita", result)
+            self._finish_error("Conflict check failed", result)
             return
         try:
             conflicts = self.scm.parse_merge_conflicts(result.stdout)
         except (KeyError, TypeError, ValueError) as error:
-            self._finish("Elenco conflitti non valido", str(error))
+            self._finish("Invalid conflict list", str(error))
             return
         if not conflicts:
             if self.merge_result is not None:
-                self._finish_error("Merge fallito", self.merge_result)
+                self._finish_error("Merge failed", self.merge_result)
             return
         self.finished = True
         self.spinner.stop()
         self._set_progress(
-            "Conflitti nel merge",
-            f"{len(conflicts)} file da risolvere. Puoi aprirli in Meld oppure continuare manualmente.",
+            "Merge conflicts",
+            f"{len(conflicts)} files to resolve. You can open them in Meld or continue manually.",
         )
         self.cancel_button.hide()
         self.action_button.hide()
@@ -739,7 +739,7 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
             self._run_command(
                 self.scm.merge_tool_argv(),
                 self._on_meld_completed,
-                "Attendo Meld…",
+                "Waiting for Meld…",
             )
             return
         super()._on_response(dialog, response)
@@ -751,8 +751,8 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
             return
         if result.ok:
             self._finish(
-                "Meld terminato",
-                "Completa il commit o annulla il merge manualmente.",
+                "Meld finished",
+                "Complete the commit or abort the merge manually.",
             )
         else:
-            self._finish_error("Meld non ha completato la risoluzione", result)
+            self._finish_error("Meld did not complete conflict resolution", result)

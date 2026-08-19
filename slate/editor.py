@@ -144,23 +144,23 @@ class EditorDocument(Gtk.Box):
         # 2026-08-16: Salva rappresenta un'azione applicabile soltanto a un
         # buffer dirty; conservarlo visibile ma disabilitato evita falsi stati.
         self.save_button = self._tool_button(
-            "document-save", "Salva (Ctrl+S)", self._on_save_clicked
+            "document-save", "Save (Ctrl+S)", self._on_save_clicked
         )
         self.save_button.set_sensitive(False)
         toolbar.pack_start(self.save_button, False, False, 0)
         self.undo_button = self._tool_button(
-            "edit-undo", "Annulla (Ctrl+Z)", self._on_undo_clicked
+            "edit-undo", "Undo (Ctrl+Z)", self._on_undo_clicked
         )
         self.redo_button = self._tool_button(
-            "edit-redo", "Ripristina (Ctrl+Shift+Z)", self._on_redo_clicked
+            "edit-redo", "Redo (Ctrl+Shift+Z)", self._on_redo_clicked
         )
         self.undo_button.set_sensitive(False)
         self.redo_button.set_sensitive(False)
         toolbar.pack_start(self.undo_button, False, False, 0)
         toolbar.pack_start(self.redo_button, False, False, 0)
         for icon, tooltip, callback in (
-            ("edit-find", "Trova (Ctrl+F)", self._on_find_clicked),
-            ("go-jump", "Vai alla riga (Ctrl+G)", self._on_goto_clicked),
+            ("edit-find", "Find (Ctrl+F)", self._on_find_clicked),
+            ("go-jump", "Go to line (Ctrl+G)", self._on_goto_clicked),
         ):
             toolbar.pack_start(self._tool_button(icon, tooltip, callback), False, False, 0)
         self.pack_start(toolbar, False, False, 0)
@@ -222,14 +222,14 @@ class EditorDocument(Gtk.Box):
         search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         search_box.get_style_context().add_class("editor-search")
         self.search_entry = Gtk.SearchEntry()
-        self.search_entry.set_placeholder_text("Trova…")
+        self.search_entry.set_placeholder_text("Find…")
         self.search_entry.connect("search-changed", self._on_search_changed)
         self.search_entry.connect("key-press-event", self._on_search_key_press)
         search_box.pack_start(self.search_entry, True, True, 0)
         for icon, tooltip, callback in (
-            ("go-up", "Risultato precedente", self._on_search_previous_clicked),
-            ("go-down", "Risultato successivo", self._on_search_next_clicked),
-            ("window-close-symbolic", "Chiudi ricerca", self._on_search_close_clicked),
+            ("go-up", "Previous result", self._on_search_previous_clicked),
+            ("go-down", "Next result", self._on_search_next_clicked),
+            ("window-close-symbolic", "Close search", self._on_search_close_clicked),
         ):
             search_box.pack_start(self._tool_button(icon, tooltip, callback), False, False, 0)
         self.search_revealer.add(search_box)
@@ -250,7 +250,7 @@ class EditorDocument(Gtk.Box):
         """Load current disk contents asynchronously for opening or reloading."""
 
         if self.file is None:
-            self.on_removed(self, f"Percorso editor non valido: {self.relative_path}")
+            self.on_removed(self, f"Invalid editor path: {self.relative_path}")
             return
         if self.load_cancellable is not None:
             self.load_cancellable.cancel()
@@ -276,27 +276,27 @@ class EditorDocument(Gtk.Box):
             if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 return
             if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND):
-                self.on_removed(self, f"File non più presente: {self.relative_path}")
+                self.on_removed(self, f"File no longer exists: {self.relative_path}")
                 return
-            self._show_notice(f"Impossibile leggere il file: {error}", Gtk.MessageType.ERROR)
+            self._show_notice(f"Unable to read the file: {error}", Gtk.MessageType.ERROR)
             return
         data = bytes(contents)
         if len(data) > self.MAX_TEXT_BYTES:
             self.loading = False
             self.view.set_editable(False)
-            self._show_notice("File oltre 5 MiB: modifica interna non disponibile.", Gtk.MessageType.ERROR)
+            self._show_notice("File over 5 MiB: internal editing is unavailable.", Gtk.MessageType.ERROR)
             return
         if b"\0" in data:
             self.loading = False
             self.view.set_editable(False)
-            self._show_notice("File binario: modifica interna non disponibile.", Gtk.MessageType.ERROR)
+            self._show_notice("Binary file: internal editing is unavailable.", Gtk.MessageType.ERROR)
             return
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             self.loading = False
             self.view.set_editable(False)
-            self._show_notice("Il file non è UTF-8: usa gVim per modificarlo.", Gtk.MessageType.ERROR)
+            self._show_notice("The file is not UTF-8: use gVim to edit it.", Gtk.MessageType.ERROR)
             return
         cursor_line = self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line()
         # 2026-08-16: il contenuto letto dal disco è lo stato iniziale, non una
@@ -354,7 +354,7 @@ class EditorDocument(Gtk.Box):
             )
             self.monitor.connect("changed", self._on_file_changed)
         except GLib.Error as error:
-            self._show_notice(f"Monitor file non disponibile: {error}", Gtk.MessageType.WARNING)
+            self._show_notice(f"File monitor unavailable: {error}", Gtk.MessageType.WARNING)
 
     def relocate(self, relative_path: str) -> None:
         """Retarget this buffer after its file or an ancestor was renamed."""
@@ -415,20 +415,20 @@ class EditorDocument(Gtk.Box):
                 self.deleted_conflict = True
                 self.attention = True
                 self._show_conflict(
-                    "Il file è stato eliminato sul disco.",
-                    (("Ricrea dal mio buffer", self.RESPONSE_RECREATE), ("Scarta", self.RESPONSE_DISCARD)),
+                    "The file was deleted on disk.",
+                    (("Recreate from my buffer", self.RESPONSE_RECREATE), ("Discard", self.RESPONSE_DISCARD)),
                 )
                 self.on_state(self)
             else:
-                self.on_removed(self, f"File eliminato: {self.relative_path}")
+                self.on_removed(self, f"File deleted: {self.relative_path}")
             return GLib.SOURCE_REMOVE
         if self.dirty:
             self.external_conflict = True
             self.deleted_conflict = False
             self.attention = True
             self._show_conflict(
-                "Il file è cambiato sul disco mentre contiene modifiche locali.",
-                (("Usa versione su disco", self.RESPONSE_DISK), ("Mantieni la mia versione", self.RESPONSE_MINE)),
+                "The file changed on disk while it contains local changes.",
+                (("Use version on disk", self.RESPONSE_DISK), ("Keep my version", self.RESPONSE_MINE)),
             )
             self.on_state(self)
         else:
@@ -488,7 +488,7 @@ class EditorDocument(Gtk.Box):
             self.on_state(self)
             return
         if response == self.RESPONSE_DISCARD:
-            self.on_removed(self, f"Scheda chiusa: {self.relative_path}")
+            self.on_removed(self, f"Tab closed: {self.relative_path}")
             return
         if not self.external_conflict:
             self._hide_notice()
@@ -508,7 +508,7 @@ class EditorDocument(Gtk.Box):
             return
         if self.external_conflict and not self.force_next_save:
             self._show_notice(
-                "Risolvi prima il conflitto con la versione sul disco.",
+                "Resolve the conflict with the version on disk first.",
                 Gtk.MessageType.WARNING,
             )
             self._finish_save(False)
@@ -518,7 +518,7 @@ class EditorDocument(Gtk.Box):
         )
         data = text.encode("utf-8")
         if len(data) > self.MAX_TEXT_BYTES:
-            self._show_notice("Il buffer supera 5 MiB e non è stato salvato.", Gtk.MessageType.ERROR)
+            self._show_notice("The buffer exceeds 5 MiB and was not saved.", Gtk.MessageType.ERROR)
             self._finish_save(False)
             return
         self.saving = True
@@ -552,12 +552,12 @@ class EditorDocument(Gtk.Box):
                 self.external_conflict = True
                 self.attention = True
                 self._show_conflict(
-                    "Il file è cambiato prima del salvataggio.",
-                    (("Usa versione su disco", self.RESPONSE_DISK), ("Mantieni la mia versione", self.RESPONSE_MINE)),
+                    "The file changed before it could be saved.",
+                    (("Use version on disk", self.RESPONSE_DISK), ("Keep my version", self.RESPONSE_MINE)),
                 )
                 self.on_state(self)
             else:
-                self._show_notice(f"Salvataggio fallito: {error}", Gtk.MessageType.ERROR)
+                self._show_notice(f"Save failed: {error}", Gtk.MessageType.ERROR)
             self._finish_save(False)
             return
         self.saving = False
@@ -640,12 +640,12 @@ class EditorDocument(Gtk.Box):
         """Ask for a one-based line number and move the insertion cursor."""
 
         dialog = Gtk.Dialog(
-            title="Vai alla riga",
+            title="Go to line",
             transient_for=self.get_toplevel(),
             modal=True,
             destroy_with_parent=True,
         )
-        dialog.add_buttons("Annulla", Gtk.ResponseType.CANCEL, "Vai", Gtk.ResponseType.OK)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Go", Gtk.ResponseType.OK)
         entry = Gtk.Entry()
         entry.set_input_purpose(Gtk.InputPurpose.DIGITS)
         entry.set_activates_default(True)
@@ -953,12 +953,12 @@ class EditorWorkspace(Gtk.Stack):
             modal=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.NONE,
-            text=f"Salvare le modifiche a {Path(editor.relative_path).name}?",
+            text=f"Save changes to {Path(editor.relative_path).name}?",
         )
         dialog.format_secondary_text(f"{editor.project_name} / {editor.relative_path}")
-        cancel = dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Scarta", Gtk.ResponseType.REJECT)
-        dialog.add_button("Salva", Gtk.ResponseType.ACCEPT)
+        cancel = dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Discard", Gtk.ResponseType.REJECT)
+        dialog.add_button("Save", Gtk.ResponseType.ACCEPT)
         dialog.set_default_response(Gtk.ResponseType.CANCEL)
         dialog.set_focus(cancel)
         response = dialog.run()
@@ -1012,12 +1012,12 @@ class EditorWorkspace(Gtk.Stack):
             modal=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.NONE,
-            text=f"{len(dirty)} file con modifiche non salvate",
+            text=f"{len(dirty)} files with unsaved changes",
         )
         dialog.format_secondary_text("\n".join(f"• {editor.project_name} / {editor.relative_path}" for editor in dirty))
-        cancel = dialog.add_button("Annulla", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Scarta tutte", Gtk.ResponseType.REJECT)
-        dialog.add_button("Salva tutte", Gtk.ResponseType.ACCEPT)
+        cancel = dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Discard all", Gtk.ResponseType.REJECT)
+        dialog.add_button("Save all", Gtk.ResponseType.ACCEPT)
         dialog.set_default_response(Gtk.ResponseType.CANCEL)
         dialog.set_focus(cancel)
         response = dialog.run()

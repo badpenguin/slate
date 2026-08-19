@@ -31,11 +31,11 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
 
         super().__init__(
             parent,
-            "Aggiorna repository",
+            "Update repository",
             scm,
             watcher,
             on_closed,
-            cancellation_title="Aggiornamento annullato",
+            cancellation_title="Update cancelled",
             allow_idle_close=False,
         )
         self.current_node = ""
@@ -50,16 +50,16 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
             self._run_command(
                 self.scm.update_merge_state_argv(),
                 self._on_hg_merge_state,
-                "Verifico lo stato Mercurial…",
+                "Checking Mercurial status…",
             )
         elif isinstance(self.scm, GitSCM):
             self._run_command(
                 self.scm.update_merge_state_argv(),
                 self._on_git_merge_state,
-                "Verifico lo stato Git…",
+                "Checking Git status…",
             )
         else:
-            self._finish("Repository non supportato", "Aggiorna supporta HG e Git.")
+            self._finish("Unsupported repository", "Update supports HG and Git.")
 
     def _on_hg_merge_state(self, result: CommandResult) -> None:
         """Reject an existing Mercurial merge before inspecting local changes."""
@@ -67,17 +67,17 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Verifica del merge Mercurial fallita", result)
+            self._finish_error("Mercurial merge check failed", result)
         elif result.stdout.strip():
             self._finish(
-                "Merge già in corso",
-                "Concludi o annulla il merge corrente prima di aggiornare.",
+                "Merge already in progress",
+                "Complete or abort the current merge before updating.",
             )
         else:
             self._run_command(
                 self.scm.update_tracked_status_argv(),
                 self._on_hg_status,
-                "Controllo le modifiche locali…",
+                "Checking local changes…",
             )
 
     def _on_hg_status(self, result: CommandResult) -> None:
@@ -86,23 +86,23 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura dello stato Mercurial fallita", result)
+            self._finish_error("Failed to read Mercurial status", result)
             return
         try:
             dirty = bool(self.scm.parse_status(result.stdout))
         except (KeyError, TypeError, ValueError) as error:
-            self._finish("Stato Mercurial non valido", str(error))
+            self._finish("Invalid Mercurial status", str(error))
             return
         if dirty:
             self._finish(
-                "Modifiche locali presenti",
-                "Commit, ripristina o metti al sicuro le modifiche tracciate prima di aggiornare.",
+                "Local changes present",
+                "Commit, revert, or otherwise preserve tracked changes before updating.",
             )
             return
         self._run_command(
             self.scm.update_remote_argv(),
             self._on_hg_remote,
-            "Cerco il repository remoto Mercurial…",
+            "Finding the remote Mercurial repository…",
         )
 
     def _on_hg_remote(self, result: CommandResult) -> None:
@@ -114,17 +114,17 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         # pull failure; identifying it before pull gives the user an actionable result.
         if result.returncode == 1 or (result.ok and not result.stdout.strip()):
             self._finish(
-                "Nessuna sorgente remota",
-                "Il repository non ha un percorso “default”: non c'è nulla da aggiornare.",
+                "No remote source",
+                "The repository has no default path: there is nothing to update.",
             )
             return
         if not result.ok:
-            self._finish_error("Verifica del repository remoto fallita", result)
+            self._finish_error("Remote repository check failed", result)
             return
         self._run_command(
             self.scm.update_current_node_argv(),
             self._on_hg_current_node,
-            "Memorizzo la revisione corrente…",
+            "Recording the current revision…",
         )
 
     def _on_hg_current_node(self, result: CommandResult) -> None:
@@ -134,12 +134,12 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
             return
         self.current_node = result.stdout.strip()
         if not result.ok or not self.current_node:
-            self._finish_error("Lettura della revisione Mercurial fallita", result)
+            self._finish_error("Failed to read the Mercurial revision", result)
             return
         self._run_command(
             self.scm.pull_argv(),
             self._on_hg_pull,
-            "Scarico le modifiche Mercurial…",
+            "Downloading Mercurial changes…",
             cancellable=True,
         )
 
@@ -149,12 +149,12 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Pull Mercurial fallito", result)
+            self._finish_error("Mercurial pull failed", result)
             return
         self._run_command(
             self.scm.update_heads_argv(),
             self._on_hg_heads,
-            "Controllo la storia scaricata…",
+            "Checking downloaded history…",
         )
 
     def _on_hg_heads(self, result: CommandResult) -> None:
@@ -163,25 +163,25 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura delle head Mercurial fallita", result)
+            self._finish_error("Failed to read Mercurial heads", result)
             return
         try:
             heads = self.scm.parse_update_heads(result.stdout)
         except (KeyError, TypeError, ValueError) as error:
-            self._finish("Elenco head Mercurial non valido", str(error))
+            self._finish("Invalid Mercurial head list", str(error))
             return
         if len(heads) != 1:
             self._finish(
-                "Storia divergente",
-                "Il branch corrente ha più head: la working copy non è stata aggiornata. Serve un merge esplicito.",
+                "Divergent history",
+                "The current branch has multiple heads: the working copy was not updated. An explicit merge is required.",
             )
         elif heads[0] == self.current_node:
-            self._finish("Repository già aggiornato", "Non ci sono nuove revisioni.")
+            self._finish("Repository already up to date", "There are no new revisions.")
         else:
             self._run_command(
                 self.scm.update_to_argv(heads[0]),
                 self._on_hg_update,
-                "Aggiorno la working copy…",
+                "Updating the working copy…",
             )
 
     def _on_hg_update(self, result: CommandResult) -> None:
@@ -190,9 +190,9 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if result.ok:
-            self._finish("Repository aggiornato", "La working copy è sulla nuova head.")
+            self._finish("Repository updated", "The working copy is now on the new head.")
         else:
-            self._finish_error("Update Mercurial fallito", result)
+            self._finish_error("Mercurial update failed", result)
 
     def _on_git_merge_state(self, result: CommandResult) -> None:
         """Distinguish absent MERGE_HEAD from an active or failed Git query."""
@@ -201,16 +201,16 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
             return
         if result.ok:
             self._finish(
-                "Merge già in corso",
-                "Concludi o annulla il merge corrente prima di aggiornare.",
+                "Merge already in progress",
+                "Complete or abort the current merge before updating.",
             )
         elif result.error is not None or result.returncode not in (1,):
-            self._finish_error("Verifica del merge Git fallita", result)
+            self._finish_error("Git merge check failed", result)
         else:
             self._run_command(
                 self.scm.update_tracked_status_argv(),
                 self._on_git_status,
-                "Controllo le modifiche locali…",
+                "Checking local changes…",
             )
 
     def _on_git_status(self, result: CommandResult) -> None:
@@ -219,23 +219,23 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura dello stato Git fallita", result)
+            self._finish_error("Failed to read Git status", result)
             return
         try:
             dirty = bool(self.scm.parse_status(result.stdout))
         except (IndexError, TypeError, ValueError) as error:
-            self._finish("Stato Git non valido", str(error))
+            self._finish("Invalid Git status", str(error))
             return
         if dirty:
             self._finish(
-                "Modifiche locali presenti",
-                "Commit, ripristina o metti al sicuro le modifiche tracciate prima di aggiornare.",
+                "Local changes present",
+                "Commit, revert, or otherwise preserve tracked changes before updating.",
             )
             return
         self._run_command(
             self.scm.update_current_branch_argv(),
             self._on_git_branch,
-            "Controllo il branch corrente…",
+            "Checking the current branch…",
         )
 
     def _on_git_branch(self, result: CommandResult) -> None:
@@ -245,14 +245,14 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
             return
         if not result.ok or not result.stdout.strip():
             self._finish(
-                "HEAD scollegata",
-                "Aggiorna richiede un branch Git locale attivo.",
+                "Detached HEAD",
+                "Update requires an active local Git branch.",
             )
             return
         self._run_command(
             self.scm.remotes_argv(),
             self._on_git_remotes,
-            "Cerco il repository remoto Git…",
+            "Finding the remote Git repository…",
         )
 
     def _on_git_remotes(self, result: CommandResult) -> None:
@@ -261,18 +261,18 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Lettura dei remote Git fallita", result)
+            self._finish_error("Failed to read Git remotes", result)
             return
         if not result.stdout.split():
             self._finish(
-                "Nessuna sorgente remota",
-                "Il repository è locale: non c'è nulla da aggiornare.",
+                "No remote source",
+                "This is a local repository: there is nothing to update.",
             )
             return
         self._run_command(
             self.scm.update_upstream_argv(),
             self._on_git_upstream,
-            "Cerco il repository remoto del branch…",
+            "Finding the branch remote…",
         )
 
     def _on_git_upstream(self, result: CommandResult) -> None:
@@ -283,8 +283,8 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         self.upstream = result.stdout.strip()
         if not result.ok or not self.upstream:
             self._finish(
-                "Upstream non configurato",
-                "Il branch Git corrente non indica ancora da quale branch remoto aggiornarsi.",
+                "Upstream not configured",
+                "The current Git branch does not specify a remote branch to update from.",
             )
             return
         environment = dict(self.scm.environment)
@@ -292,7 +292,7 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         self._run_command(
             self.scm.fetch_argv(),
             self._on_git_fetch,
-            "Scarico le modifiche Git…",
+            "Downloading Git changes…",
             cancellable=True,
             environment=environment,
         )
@@ -303,12 +303,12 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Fetch Git fallito", result)
+            self._finish_error("Git fetch failed", result)
             return
         self._run_command(
             self.scm.update_comparison_argv(self.upstream),
             self._on_git_comparison,
-            "Confronto la storia locale e remota…",
+            "Comparing local and remote history…",
         )
 
     def _on_git_comparison(self, result: CommandResult) -> None:
@@ -317,32 +317,32 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if not result.ok:
-            self._finish_error("Confronto Git fallito", result)
+            self._finish_error("Git comparison failed", result)
             return
         try:
             local_ahead, remote_ahead = self.scm.parse_update_comparison(
                 result.stdout
             )
         except ValueError as error:
-            self._finish("Confronto Git non valido", str(error))
+            self._finish("Invalid Git comparison", str(error))
             return
         if not local_ahead and not remote_ahead:
-            self._finish("Repository già aggiornato", "Non ci sono nuovi commit.")
+            self._finish("Repository already up to date", "There are no new commits.")
         elif local_ahead and not remote_ahead:
             self._finish(
-                "Commit locali non pubblicati",
-                "Il branch locale è già più avanti del suo upstream; la working copy non è stata modificata.",
+                "Unpublished local commits",
+                "The local branch is already ahead of its upstream; the working copy was not changed.",
             )
         elif local_ahead and remote_ahead:
             self._finish(
-                "Storia divergente",
-                "Locale e upstream contengono commit diversi: la working copy non è stata modificata. Serve un merge esplicito.",
+                "Divergent history",
+                "Local and upstream contain different commits: the working copy was not changed. An explicit merge is required.",
             )
         else:
             self._run_command(
                 self.scm.fast_forward_argv(self.upstream),
                 self._on_git_fast_forward,
-                "Aggiorno la working copy…",
+                "Updating the working copy…",
             )
 
     def _on_git_fast_forward(self, result: CommandResult) -> None:
@@ -351,6 +351,6 @@ class RepositoryUpdateDialog(RepositoryOperationDialog):
         if not self._prepare_result():
             return
         if result.ok:
-            self._finish("Repository aggiornato", "Il branch locale è ora allineato all'upstream.")
+            self._finish("Repository updated", "The local branch is now aligned with its upstream.")
         else:
-            self._finish_error("Fast-forward Git fallito", result)
+            self._finish_error("Git fast-forward failed", result)

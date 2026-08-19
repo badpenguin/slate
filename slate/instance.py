@@ -16,7 +16,7 @@ class AlreadyRunningError(RuntimeError):
 
         self.pid = pid
         detail = f" (PID {pid})" if pid is not None else ""
-        super().__init__(f"SLATE è già in esecuzione{detail}")
+        super().__init__(f"SLATE is already running{detail}")
 
 
 class InstanceLock:
@@ -41,7 +41,7 @@ class InstanceLock:
         try:
             information = os.fstat(descriptor)
             if information.st_uid != os.getuid():
-                raise PermissionError("il lock appartiene a un altro utente")
+                raise PermissionError("the lock belongs to another user")
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:

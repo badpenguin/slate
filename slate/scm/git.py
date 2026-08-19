@@ -258,7 +258,7 @@ class GitSCM(SCM):
 
         fields = output.split()
         if len(fields) != 2:
-            raise ValueError("conteggio Git locale/remoto non valido")
+            raise ValueError("Invalid Git local/remote count")
         return int(fields[0]), int(fields[1])
 
     @staticmethod

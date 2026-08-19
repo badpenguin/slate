@@ -26,7 +26,7 @@ class SettingsDialog(Gtk.Dialog):
         """Build the categorized global presentation preferences."""
 
         super().__init__(
-            title="Impostazioni",
+            title="Settings",
             transient_for=parent,
             modal=True,
             destroy_with_parent=True,
@@ -35,7 +35,7 @@ class SettingsDialog(Gtk.Dialog):
         self.on_status_bar_change = on_status_bar_change
         self.font_spins: dict[str, Gtk.SpinButton] = {}
         self.set_default_size(520, 300)
-        self.add_button("Chiudi", Gtk.ResponseType.CLOSE)
+        self.add_button("Close", Gtk.ResponseType.CLOSE)
 
         # 2026-08-16: StackSidebar lascia spazio a nuove categorie future senza
         # dover cambiare struttura al dialogo quando le preferenze aumenteranno.
@@ -47,12 +47,12 @@ class SettingsDialog(Gtk.Dialog):
                 "revisions", int(values["revisions"]["font_size"])
             ),
             "revisions",
-            "Revisioni",
+            "Changes",
         )
         stack.add_titled(
             self._build_font_page("files", int(values["files"]["font_size"])),
             "files",
-            "File",
+            "Files",
         )
         stack.add_titled(
             self._build_font_page("editor", int(values["editor"]["font_size"])),
@@ -62,7 +62,7 @@ class SettingsDialog(Gtk.Dialog):
         stack.add_titled(
             self._build_terminal_page(bool(values["terminal"]["status_bar"])),
             "terminal",
-            "Terminale",
+            "Terminal",
         )
         # 2026-08-17: un catalogo fisso e non modificabile non è una
         # preferenza; la modalità Responsive conserva il proprio preset senza
@@ -83,16 +83,16 @@ class SettingsDialog(Gtk.Dialog):
 
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         page.get_style_context().add_class("settings-page")
-        title = Gtk.Label(label="Dimensione font")
+        title = Gtk.Label(label="Font size")
         title.set_xalign(0)
         title.get_style_context().add_class("settings-page-title")
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        label = Gtk.Label(label="Dimensione font dell’elenco")
+        label = Gtk.Label(label="List font size")
         label.set_xalign(0)
         spin = Gtk.SpinButton.new_with_range(self.FONT_MIN, self.FONT_MAX, 1)
         spin.set_value(font_size)
         spin.set_numeric(True)
-        spin.set_tooltip_text("Dimensione in punti")
+        spin.set_tooltip_text("Size in points")
         spin.connect("value-changed", self._on_font_size_changed, section)
         self.font_spins[section] = spin
         row.pack_start(label, True, True, 0)
@@ -114,7 +114,7 @@ class SettingsDialog(Gtk.Dialog):
         label.set_xalign(0)
         self.status_bar_switch = Gtk.Switch()
         self.status_bar_switch.set_active(status_bar)
-        self.status_bar_switch.set_tooltip_text("Mostra la status bar di tmux")
+        self.status_bar_switch.set_tooltip_text("Show the tmux status bar")
         self.status_bar_switch.connect(
             "notify::active", self._on_status_bar_changed
         )

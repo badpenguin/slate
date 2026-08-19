@@ -126,6 +126,13 @@ class GitSCMTest(unittest.TestCase):
             ["git", "merge", "--ff-only", "origin/main"],
         )
 
+    def test_remote_comparison_parser_returns_exact_counts(self) -> None:
+        """Explicit verification reuses the stable Git comparison parser."""
+
+        self.assertEqual(self.scm.parse_update_comparison("4\t7\n"), (4, 7))
+        with self.assertRaises(ValueError):
+            self.scm.parse_update_comparison("invalid")
+
     def test_repository_actions_remain_local_and_never_force(self) -> None:
         """Branch, merge, publish and tag commands use only the simple path."""
 

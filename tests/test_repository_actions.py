@@ -35,8 +35,8 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self._complete(1, returncode=1)
         self._complete(2, returncode=1)
         self.assertEqual(len(self.calls), 3)
-        self.assertEqual(dialog.phase_label.get_text(), "Nessuna destinazione remota")
-        self.assertIn("repository è locale", dialog.detail_label.get_text())
+        self.assertEqual(dialog.phase_label.get_text(), "No remote destination")
+        self.assertIn("local repository", dialog.detail_label.get_text())
 
     def test_git_new_branch_uses_only_the_entered_local_name(self) -> None:
         """New branch does not infer tracking or alternate names."""
@@ -52,7 +52,7 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
             ["git", "switch", "--no-track", "-c", "topic"],
         )
         self._complete(1)
-        self.assertEqual(dialog.phase_label.get_text(), "Branch creato")
+        self.assertEqual(dialog.phase_label.get_text(), "Branch created")
 
     def test_idle_action_cancellation_releases_the_shared_watcher_once(self) -> None:
         """Closing a ready action resumes exactly one coherent repository refresh."""
@@ -114,7 +114,7 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self._complete(2, "v3\0\nv2\0\nv1\0\n")
         self.assertEqual(
             dialog.recent_tags_label.get_text(),
-            "Ultimi tag: v3  ·  v2  ·  v1",
+            "Recent tags: v3  ·  v2  ·  v1",
         )
         dialog.name_entry.set_text("v1")
         dialog._submit()
@@ -132,7 +132,7 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self._complete(2, stderr="lettura fallita", returncode=1)
         self.assertEqual(
             dialog.recent_tags_label.get_text(),
-            "Ultimi tag: non disponibili",
+            "Recent tags: unavailable",
         )
         dialog.name_entry.set_text("v1")
         self.assertTrue(dialog.action_button.get_sensitive())
@@ -153,7 +153,7 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         )
         dialog._submit()
         self._complete(4, '[{"node":"bbb"},{"node":"ccc"}]')
-        self.assertEqual(dialog.phase_label.get_text(), "Branch ambiguo")
+        self.assertEqual(dialog.phase_label.get_text(), "Ambiguous branch")
         self.assertEqual(len(self.calls), 5)
 
     def test_git_merge_conflict_offers_meld_without_commit_or_abort(self) -> None:
@@ -173,7 +173,7 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         )
         self._complete(4, stderr="merge conflict", returncode=1)
         self._complete(5, "conflict.py\0")
-        self.assertEqual(dialog.phase_label.get_text(), "Conflitti nel merge")
+        self.assertEqual(dialog.phase_label.get_text(), "Merge conflicts")
         dialog._on_response(dialog, Gtk.ResponseType.APPLY)
         self.assertEqual(
             self.calls[6][0],

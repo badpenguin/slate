@@ -161,6 +161,19 @@ class MercurialSCMTest(unittest.TestCase):
             ["hg", "--noninteractive", "update", "--check", "--rev", "abc"],
         )
 
+    def test_verification_compares_one_branch_against_default(self) -> None:
+        """Incoming and outgoing verification use one explicit remote identity."""
+
+        incoming = self.scm.verify_incoming_argv("feature")
+        outgoing = self.scm.verify_outgoing_argv("feature")
+        self.assertEqual(incoming[:4], ["hg", "--noninteractive", "incoming", "--quiet"])
+        self.assertEqual(outgoing[:4], ["hg", "--noninteractive", "outgoing", "--quiet"])
+        self.assertEqual(incoming[-1], "default")
+        self.assertEqual(outgoing[-1], "default")
+        self.assertEqual(self.scm.parse_verify_count(f"{'a' * 40}\n{'b' * 40}\n"), 2)
+        with self.assertRaises(ValueError):
+            self.scm.parse_verify_count("not-a-node\n")
+
     def test_repository_actions_remain_unambiguous_and_never_force(self) -> None:
         """HG actions target exact local names and use only normal push/tag modes."""
 

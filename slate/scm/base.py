@@ -18,6 +18,17 @@ class RepositoryRef:
 
 
 @dataclass(frozen=True)
+class RepositorySyncStatus:
+    """Describe the last explicit comparison with a configured remote."""
+
+    # 2026-08-19: remote verification is deliberately explicit and ephemeral;
+    # a small normalized value lets Git and Mercurial share one stable UI label.
+    state: str = "unverified"
+    ahead: int = 0
+    behind: int = 0
+
+
+@dataclass(frozen=True)
 class FileStatus:
     """Represent one normalized path state independently from its SCM."""
 

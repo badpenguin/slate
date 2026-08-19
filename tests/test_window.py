@@ -9,8 +9,9 @@ from unittest.mock import MagicMock, call, patch
 import gi
 
 gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, Gtk
+from gi.repository import Gdk, GdkPixbuf, Gtk
 
 from slate.processes import CommandResult
 from slate.scm.base import FileStatus, RepositoryRef
@@ -376,11 +377,11 @@ class WindowActionTest(unittest.TestCase):
     def test_revision_count_is_rendered_on_the_native_tab_label(self) -> None:
         """The File page can still expose the active project's visible changes."""
 
-        owner = SimpleNamespace(changes_tab=Gtk.Label(label="Revisioni"))
+        owner = SimpleNamespace(changes_tab=Gtk.Label(label="Changes"))
         SlateWindow._set_revision_count(owner, 7)
-        self.assertEqual(owner.changes_tab.get_text(), "Revisioni (7)")
+        self.assertEqual(owner.changes_tab.get_text(), "Changes (7)")
         SlateWindow._set_revision_count(owner, 0)
-        self.assertEqual(owner.changes_tab.get_text(), "Revisioni")
+        self.assertEqual(owner.changes_tab.get_text(), "Changes")
 
     def test_revision_tab_count_is_mirrored_on_active_project_row(self) -> None:
         """The sidebar reuses the received tab count without changing identity."""
@@ -937,7 +938,7 @@ class WindowActionTest(unittest.TestCase):
                         ["tracked.py"],
                     )
                 ],
-                "Registrazione rimozione",
+                "Record removal",
             )
             owner.file_manager.refresh.assert_called_once_with()
 
@@ -997,7 +998,7 @@ class WindowActionTest(unittest.TestCase):
                     ["first", "second"],
                 )
             ],
-            "Aggiunta",
+            "Add",
         )
 
     def test_forget_returns_only_added_files_to_new(self) -> None:
@@ -1024,7 +1025,7 @@ class WindowActionTest(unittest.TestCase):
                     ["added"],
                 )
             ],
-            "Rimozione dal tracking",
+            "Untrack",
         )
 
     def test_same_repository_path_keeps_git_and_hg_actions_separate(self) -> None:
@@ -1068,7 +1069,7 @@ class WindowActionTest(unittest.TestCase):
                     ["added.py"],
                 )
             ],
-            "Ripristino",
+            "Revert",
             full_refresh=True,
         )
 
@@ -1094,7 +1095,7 @@ class WindowActionTest(unittest.TestCase):
                     ["modified"],
                 )
             ],
-            "Ripristino",
+            "Revert",
             full_refresh=True,
         )
 
@@ -1127,7 +1128,7 @@ class WindowActionTest(unittest.TestCase):
                     ["new.py", "old.py"],
                 )
             ],
-            "Ripristino",
+            "Revert",
             full_refresh=True,
         )
 
@@ -1223,7 +1224,7 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._on_add_command(owner, MagicMock())
 
         error_label.set_text.assert_called_once_with(
-            "Il quoting del comando non è valido."
+            "The command quoting is invalid."
         )
         owner._create_terminal.assert_not_called()
 
@@ -1383,13 +1384,28 @@ class WindowActionTest(unittest.TestCase):
             project_iter,
             ["main", "terminal", "repo", "main", False, "main", False],
         )
+        private_browser_iter = store.append(
+            project_iter,
+            ["Private", "browser", "repo", "browser-1", False, "Private", False],
+        )
         background = Gdk.RGBA()
         background.parse("#e8e8e8")
+        incognito_icon = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            str(Path(__file__).parents[1] / "slate" / "incognito.svg"),
+            16,
+            16,
+            True,
+        )
         owner = SimpleNamespace(
             COL_TEXT=SlateWindow.COL_TEXT,
             COL_KIND=SlateWindow.COL_KIND,
+            COL_PROJECT=SlateWindow.COL_PROJECT,
             COL_ITEM=SlateWindow.COL_ITEM,
             project_row_background=background,
+            browser_manager=SimpleNamespace(
+                pages={("repo", "browser-1"): SimpleNamespace(private=True)}
+            ),
+            incognito_icon=incognito_icon,
         )
         owner._set_project_row_background = (
             SlateWindow._set_project_row_background.__get__(owner)
@@ -1403,6 +1419,11 @@ class WindowActionTest(unittest.TestCase):
         self.assertEqual(renderer.get_property("icon-name"), "utilities-terminal")
         self.assertTrue(renderer.get_property("visible"))
         self.assertFalse(renderer.get_property("cell-background-set"))
+        SlateWindow._render_tree_icon(
+            owner, MagicMock(), renderer, store, private_browser_iter
+        )
+        self.assertIsNone(renderer.get_property("icon-name"))
+        self.assertEqual(renderer.get_property("pixbuf"), incognito_icon)
 
     def test_project_expander_cell_toggles_at_button_icon_size(self) -> None:
         """The shaded custom indicator remains readable and owns project toggling."""
@@ -1469,7 +1490,7 @@ class WindowActionTest(unittest.TestCase):
         with patch("slate.window.Gtk.MessageDialog", return_value=dialog):
             SlateWindow._show_remove_project_dialog(owner, project, [])
         labels = [call_args.args[0] for call_args in dialog.add_button.call_args_list]
-        self.assertEqual(labels, ["Annulla", "Rimuovi"])
+        self.assertEqual(labels, ["Cancel", "Remove"])
         owner.terminals.forget.assert_has_calls(
             [call("repo", "main"), call("repo", "test")]
         )

@@ -29,8 +29,8 @@ BROWSER_VIEWPORT_PRESETS: dict[str, BrowserViewportPreset] = {
     "samsung-mid-range": BrowserViewportPreset("Samsung mid-range — 384 × 832", 384, 832),
     "redmi-note": BrowserViewportPreset("Xiaomi Redmi Note — 393 × 873", 393, 873),
     "iphone-xr": BrowserViewportPreset("iPhone XR/11/11 Pro Max — 414 × 896", 414, 896),
-    "ipad-classic": BrowserViewportPreset("iPad mini/classico — 768 × 1024", 768, 1024),
-    "ipad-10": BrowserViewportPreset("iPad 10ª gen — 820 × 1180", 820, 1180),
+    "ipad-classic": BrowserViewportPreset("iPad mini/classic — 768 × 1024", 768, 1024),
+    "ipad-10": BrowserViewportPreset("iPad 10th gen — 820 × 1180", 820, 1180),
     "desktop-xga": BrowserViewportPreset("Desktop XGA — 1024 × 768", 1024, 768),
     "laptop-hd": BrowserViewportPreset("Laptop HD — 1366 × 768", 1366, 768),
     "laptop": BrowserViewportPreset("Laptop — 1440 × 900", 1440, 900),
@@ -138,18 +138,18 @@ class ConfigStore:
         except (OSError, ValueError, TypeError) as error:
             # 2026-08-16: retain corrupt input untouched so a user can recover
             # it; saving occurs only after a later explicit UI mutation.
-            self.error = f"Configurazione non leggibile: {error}"
+            self.error = f"Unreadable configuration: {error}"
             return copy.deepcopy(DEFAULT_CONFIG)
 
     def _normalize(self, raw: Any) -> dict[str, Any]:
         """Return a safe complete config while preserving supported values."""
 
         if not isinstance(raw, dict):
-            raise TypeError("la radice JSON deve essere un oggetto")
+            raise TypeError("the JSON root must be an object")
         data = copy.deepcopy(DEFAULT_CONFIG)
         projects = raw.get("projects", [])
         if not isinstance(projects, list):
-            raise TypeError("projects deve essere una lista")
+            raise TypeError("projects must be a list")
         data["projects"] = [
             self._normalize_project(item) for item in projects if isinstance(item, dict)
         ]
@@ -428,7 +428,7 @@ class ConfigStore:
                 or path in paths
                 or project_slug in project_slugs
             ):
-                raise ValueError("progetto non valido, duplicato o con slug ambiguo")
+                raise ValueError("invalid or duplicate project, or ambiguous slug")
             names.add(name)
             paths.add(path)
             project_slugs.add(project_slug)
@@ -442,7 +442,7 @@ class ConfigStore:
                     or terminal_name in terminal_names
                     or terminal_slug in terminal_slugs
                 ):
-                    raise ValueError("terminale non valido, duplicato o con slug ambiguo")
+                    raise ValueError("invalid or duplicate terminal, or ambiguous slug")
                 terminal_names.add(terminal_name)
                 terminal_slugs.add(terminal_slug)
 

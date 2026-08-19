@@ -228,7 +228,7 @@ class TerminalManager:
         if not result.ok and not missing:
             # Un errore non riconosciuto non autorizza l'invio automatico di un
             # comando dentro una sessione il cui stato non è stato accertato.
-            self.on_error(self._error("Verifica sessione tmux", result))
+            self.on_error(self._error("Checking tmux session", result))
         self._spawn_terminal(
             terminal,
             key,
@@ -357,7 +357,7 @@ class TerminalManager:
         try:
             Gio.AppInfo.launch_default_for_uri_finish(result)
         except GLib.Error as error:
-            self.on_error(f"Impossibile aprire {uri}: {error}")
+            self.on_error(f"Unable to open {uri}: {error}")
 
     def _on_terminal_popup_menu(self, terminal: Vte.Terminal) -> bool:
         """Open terminal clipboard actions from Menu or Shift+F10."""
@@ -372,13 +372,13 @@ class TerminalManager:
 
         menu = Gtk.Menu()
         copy_item = self._terminal_menu_item(
-            "Copia",
+            "Copy",
             "edit-copy",
             Gdk.KEY_c,
             Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK,
         )
         paste_item = self._terminal_menu_item(
-            "Incolla",
+            "Paste",
             "edit-paste",
             Gdk.KEY_v,
             Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK,
@@ -473,7 +473,7 @@ class TerminalManager:
             terminal = self.terminals.get(old_key)
             missing = self._server_absent(result) or "can't find session" in result.stderr.lower()
             if not result.ok and not (missing and terminal is None):
-                self.on_error(self._error("Rinomina terminale", result))
+                self.on_error(self._error("Rename terminal", result))
                 callback(False)
                 return
             if terminal is not None:
@@ -518,7 +518,7 @@ class TerminalManager:
                 and "no server running" not in result.stderr.lower()
             ):
                 self.closing_keys.discard(key)
-                self.on_error(self._error("Chiusura terminale", result))
+                self.on_error(self._error("Closing terminal", result))
                 callback(False)
                 return
             terminal = self.terminals.pop(key, None)
@@ -571,7 +571,7 @@ class TerminalManager:
                     self.server_configuration_dirty = False
                     callback([])
                 else:
-                    self.on_error(self._error("Lettura sessioni tmux", result))
+                    self.on_error(self._error("Reading tmux sessions", result))
                     callback([])
                 return
             panes: list[PaneInfo] = []
@@ -706,7 +706,7 @@ class TerminalManager:
         self.spawn_cancellables.pop(key, None)
         initial_command = self.initial_commands.pop(key, None)
         if error or pid == -1:
-            self.on_error(f"Avvio terminale {key}: {error or 'spawn fallito'}")
+            self.on_error(f"Starting terminal {key}: {error or 'spawn failed'}")
             return
         self._configure_server()
         tmux_session = self.sessions.get(key)
@@ -808,7 +808,7 @@ class TerminalManager:
         self.server_configuration_dirty = False
         self.server_configured = result.ok and not rerun
         if not result.ok:
-            self.on_error(self._error("Configurazione tmux", result))
+            self.on_error(self._error("tmux configuration", result))
         if rerun:
             self._configure_server()
 
@@ -877,7 +877,7 @@ class TerminalManager:
         """Report metadata failures without tearing down a working terminal."""
 
         if not result.ok:
-            self.on_error(self._error("Salvataggio metadati tmux", result))
+            self.on_error(self._error("Saving tmux metadata", result))
 
     @staticmethod
     def _status_label(value: str) -> str:
@@ -1035,7 +1035,7 @@ class TerminalManager:
         """Format a concise tmux/process error for the GUI."""
 
         detail = str(result.error) if result.error else result.stderr.strip()
-        return f"{context}: {detail or f'codice {result.returncode}'}"
+        return f"{context}: {detail or f'exit code {result.returncode}'}"
 
     @staticmethod
     def _encode_metadata(value: str) -> str:

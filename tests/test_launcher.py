@@ -63,7 +63,7 @@ class DetachedLauncherTest(unittest.TestCase):
                     result = launcher.main(["slate", "--sconosciuta"])
         self.assertEqual(result, 2)
         self.assertEqual(
-            error_stream.getvalue(), "Opzione non supportata: '--sconosciuta'\n"
+            error_stream.getvalue(), "Unsupported option: '--sconosciuta'\n"
         )
         run.assert_not_called()
         detach.assert_not_called()

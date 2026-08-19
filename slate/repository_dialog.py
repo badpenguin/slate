@@ -55,13 +55,13 @@ class RepositoryOperationDialog(Gtk.Dialog):
         self.ready_to_submit = False
         self.form_widgets: list[Gtk.Widget] = []
 
-        self.cancel_button = self.add_button("Annulla", Gtk.ResponseType.CANCEL)
+        self.cancel_button = self.add_button("Cancel", Gtk.ResponseType.CANCEL)
         self.action_button = (
             self.add_button(action_label, Gtk.ResponseType.OK)
             if action_label is not None
             else None
         )
-        self.close_button = self.add_button("Chiudi", Gtk.ResponseType.CLOSE)
+        self.close_button = self.add_button("Close", Gtk.ResponseType.CLOSE)
         self.cancel_button.set_sensitive(allow_idle_close)
         if self.action_button is not None:
             self.action_button.set_sensitive(False)
@@ -94,7 +94,7 @@ class RepositoryOperationDialog(Gtk.Dialog):
         """Acquire the watcher boundary before inspecting repository state."""
 
         self.spinner.start()
-        self._set_progress("Attendo il controllo locale…")
+        self._set_progress("Waiting for the local check…")
         self.watcher.pause_after_current(self._on_watcher_paused)
 
     def _on_watcher_paused(self) -> None:
@@ -141,7 +141,7 @@ class RepositoryOperationDialog(Gtk.Dialog):
             return True
         self._finish(
             self.cancellation_title,
-            "Il comando remoto è stato interrotto.",
+            "The remote command was interrupted.",
         )
         return False
 
@@ -176,7 +176,7 @@ class RepositoryOperationDialog(Gtk.Dialog):
         detail = result.stderr.strip()
         if not detail and result.error is not None:
             detail = str(result.error)
-        self._finish(title, self._redact_credentials(detail or "Comando non riuscito."))
+        self._finish(title, self._redact_credentials(detail or "Command failed."))
 
     @staticmethod
     def _redact_credentials(message: str) -> str:
@@ -193,7 +193,7 @@ class RepositoryOperationDialog(Gtk.Dialog):
             if self.command is not None and self.command_cancellable:
                 self.cancel_requested = True
                 self.cancel_button.set_sensitive(False)
-                self.phase_label.set_text("Annullamento in corso…")
+                self.phase_label.set_text("Cancelling…")
                 self.command.cancel()
             elif self.command is None and self.allow_idle_close:
                 self._close()

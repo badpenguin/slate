@@ -96,6 +96,49 @@ class MercurialSCM(SCM):
         return ["hg", "--noninteractive", "pull"]
 
     @staticmethod
+    def verify_incoming_argv(branch: str) -> list[str]:
+        """Return a quiet remote comparison for incoming branch changesets."""
+
+        return [
+            "hg",
+            "--noninteractive",
+            "incoming",
+            "--quiet",
+            "--branch",
+            branch,
+            "--template",
+            "{node}\n",
+            "default",
+        ]
+
+    @staticmethod
+    def verify_outgoing_argv(branch: str) -> list[str]:
+        """Return a quiet remote comparison for outgoing branch changesets."""
+
+        # 2026-08-19: both directions target default explicitly so a separate
+        # default-push cannot make the two counts describe different servers.
+        return [
+            "hg",
+            "--noninteractive",
+            "outgoing",
+            "--quiet",
+            "--branch",
+            branch,
+            "--template",
+            "{node}\n",
+            "default",
+        ]
+
+    @staticmethod
+    def parse_verify_count(output: str) -> int:
+        """Count machine-formatted Mercurial changeset nodes."""
+
+        nodes = [line for line in output.splitlines() if line]
+        if any(len(node) != 40 for node in nodes):
+            raise ValueError("Invalid Mercurial remote changeset list")
+        return len(nodes)
+
+    @staticmethod
     def remote_path_argv(name: str) -> list[str]:
         """Return one configured Mercurial path without interpreting its URL."""
 

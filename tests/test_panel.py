@@ -10,7 +10,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk, Pango
 
 from slate.panel import SCMPanel
-from slate.scm.base import FileStatus, RepositoryRef
+from slate.scm.base import FileStatus, RepositoryRef, RepositorySyncStatus
 
 
 class SCMPanelTest(unittest.TestCase):
@@ -191,7 +191,7 @@ class SCMPanelTest(unittest.TestCase):
                 self.panel.filtered_store.get_value(tree_iter, self.panel.COL_TEXT)
             )
             tree_iter = self.panel.filtered_store.iter_next(tree_iter)
-        self.assertEqual(labels, ["Modificati:  1", "Nuovi:  1"])
+        self.assertEqual(labels, ["Modified:  1", "New:  1"])
         self.assertFalse(hasattr(self.panel, "count_label"))
         self.assertEqual(self.panel.state_stack.get_visible_child_name(), "changes")
 
@@ -221,7 +221,7 @@ class SCMPanelTest(unittest.TestCase):
                 moved_iter = self.panel.filtered_store.iter_children(group_iter)
             group_iter = self.panel.filtered_store.iter_next(group_iter)
         self.assertEqual(
-            labels, ["Modificati:  1", "Spostati:  1", "Aggiunti:  1"]
+            labels, ["Modified:  1", "Moved:  1", "Added:  1"]
         )
         self.assertIsNotNone(moved_iter)
         self.assertEqual(
@@ -298,7 +298,7 @@ class SCMPanelTest(unittest.TestCase):
         label = self.panel.store.get_value(
             self.panel.repository_iters[root], self.panel.COL_TEXT
         )
-        self.assertEqual(label, "[root] — default")
+        self.assertEqual(label, "[root] — default — remote: not verified")
 
     def test_multi_repository_labels_are_complete_and_have_no_counts(self) -> None:
         """Multi-repository labels distinguish root and full nested paths."""
@@ -316,8 +316,12 @@ class SCMPanelTest(unittest.TestCase):
         nested_label = self.panel.store.get_value(
             self.panel.repository_iters[nested_repository], self.panel.COL_TEXT
         )
-        self.assertEqual(root_label, "[root] — default")
-        self.assertEqual(nested_label, f"{nested} — stable")
+        self.assertEqual(
+            root_label, "[root] — default — remote: not verified"
+        )
+        self.assertEqual(
+            nested_label, f"{nested} — stable — remote: not verified"
+        )
         self.assertNotIn("(", root_label)
         self.assertNotIn("(", nested_label)
 
@@ -386,18 +390,56 @@ class SCMPanelTest(unittest.TestCase):
         self.assertEqual(
             labels,
             [
-                "Apri in Meld",
-                "Apri in TortoiseHg",
+                "Open in Meld",
+                "Open in TortoiseHg",
+                "Verify…",
                 "|",
-                "Aggiorna…",
-                "Pubblica…",
-                "Nuovo branch…",
-                "Passa a branch…",
+                "Update…",
+                "Publish…",
+                "New branch…",
+                "Switch branch…",
                 "Merge branch…",
-                "Assegna tag…",
+                "Assign tag…",
                 "|",
-                "Escludi repository",
+                "Exclude repository",
             ],
+        )
+
+    def test_remote_status_updates_only_the_repository_label(self) -> None:
+        """Explicit verification changes one stable row without rebuilding it."""
+
+        repository = RepositoryRef(".", "git")
+        self.panel.set_repositories([repository])
+        self.panel.update_status([], "main", repository)
+        tree_iter = self.panel.repository_iters[repository]
+        self.panel.set_remote_status(
+            repository, RepositorySyncStatus("diverged", 2, 3)
+        )
+        self.assertEqual(
+            self.panel.store.get_value(tree_iter, self.panel.COL_TEXT),
+            "[root] — main — remote: diverged · ahead 2, behind 3",
+        )
+        self.assertIs(self.panel.repository_iters[repository], tree_iter)
+
+    def test_inactive_history_change_invalidates_cached_remote_status(self) -> None:
+        """An inactive project cannot retain a stale verified relationship."""
+
+        repository = RepositoryRef(".", "git")
+        self.panel.bind_project("first", True)
+        self.panel.set_repositories([repository])
+        self.panel.update_status([], "main", repository)
+        self.panel.set_remote_status(repository, RepositorySyncStatus("synced"))
+        self.panel.bind_project("second", True)
+        self.panel.set_project_remote_status(
+            "first", repository, RepositorySyncStatus()
+        )
+        self.panel.bind_project("first", True)
+        self.panel.set_repositories([repository])
+        self.assertEqual(
+            self.panel.store.get_value(
+                self.panel.repository_iters[repository], self.panel.COL_TEXT
+            ),
+            "[root] — main — remote: not verified",
         )
 
     def test_clean_repository_root_is_not_bold(self) -> None:
@@ -597,15 +639,15 @@ class SCMPanelTest(unittest.TestCase):
                 self.panel.commit_button,
             ],
         )
-        self.assertEqual(self.panel.commit_shortcut_label.get_text(), "Ctrl+Invio")
+        self.assertEqual(self.panel.commit_shortcut_label.get_text(), "Ctrl+Enter")
         self.assertIn(
             "commit-shortcut",
             self.panel.commit_shortcut_label.get_style_context().list_classes(),
         )
-        self.assertEqual(self.panel.commit_select_all_check.get_label(), "Tutti i file")
+        self.assertEqual(self.panel.commit_select_all_check.get_label(), "Select all")
         self.assertEqual(
             self.panel.button_labels[self.panel.add_new_button].get_text(),
-            "Aggiungi nuovi",
+            "Add new",
         )
         icon_name, _size = self.panel.button_icons[
             self.panel.add_new_button
@@ -821,13 +863,13 @@ class SCMPanelTest(unittest.TestCase):
             for child in menu.get_children()
             if isinstance(child.get_child(), Gtk.Box)
         ]
-        self.assertEqual(labels, ["Spunta (2)"])
+        self.assertEqual(labels, ["Check (2)"])
         checkbox_item = next(
             child
             for child in menu.get_children()
             if isinstance(child.get_child(), Gtk.Box)
             and child.get_child().get_children()[1].get_label()
-            == "Spunta (2)"
+            == "Check (2)"
         )
         checkbox_item.activate()
 
@@ -892,7 +934,7 @@ class SCMPanelTest(unittest.TestCase):
             index
             for index, child in enumerate(children)
             if isinstance(child.get_child(), Gtk.Box)
-            and child.get_child().get_children()[1].get_text() == "Aggiungi"
+            and child.get_child().get_children()[1].get_text() == "Add"
         )
         self.assertIsInstance(children[add_index - 1], Gtk.SeparatorMenuItem)
 

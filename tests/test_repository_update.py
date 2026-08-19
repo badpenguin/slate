@@ -33,7 +33,7 @@ class RepositoryUpdateDialogTest(RepositoryDialogFixture, unittest.TestCase):
             ["hg", "--noninteractive", "update", "--check", "--rev", "new-node"],
         )
         self._complete(6)
-        self.assertEqual(dialog.phase_label.get_text(), "Repository aggiornato")
+        self.assertEqual(dialog.phase_label.get_text(), "Repository updated")
         self.watcher.resume_with_full_refresh.assert_not_called()
         dialog._close()
         self.watcher.resume_with_full_refresh.assert_called_once_with(
@@ -53,9 +53,9 @@ class RepositoryUpdateDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self._complete(2, stderr="abort: repository default not found", returncode=1)
         self.assertEqual(len(self.calls), 3)
         self.assertEqual(
-            dialog.phase_label.get_text(), "Nessuna sorgente remota"
+            dialog.phase_label.get_text(), "No remote source"
         )
-        self.assertIn("nulla da aggiornare", dialog.detail_label.get_text())
+        self.assertIn("nothing to update", dialog.detail_label.get_text())
 
     def test_git_divergence_never_starts_merge(self) -> None:
         """A Git history advanced on both sides stops after comparison."""
@@ -69,8 +69,8 @@ class RepositoryUpdateDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self._complete(5)
         self._complete(6, "2\t3\n")
         self.assertEqual(len(self.calls), 7)
-        self.assertEqual(dialog.phase_label.get_text(), "Storia divergente")
-        self.assertIn("non è stata modificata", dialog.detail_label.get_text())
+        self.assertEqual(dialog.phase_label.get_text(), "Divergent history")
+        self.assertIn("was not changed", dialog.detail_label.get_text())
 
     def test_remote_cancellation_uses_the_shared_dialog_lifecycle(self) -> None:
         """A cancellable fetch becomes one terminal result before watcher release."""
@@ -85,7 +85,7 @@ class RepositoryUpdateDialogTest(RepositoryDialogFixture, unittest.TestCase):
         dialog._on_response(dialog, Gtk.ResponseType.CANCEL)
         self.command.cancel.assert_called_once_with()
         self._complete(5, returncode=1)
-        self.assertEqual(dialog.phase_label.get_text(), "Aggiornamento annullato")
+        self.assertEqual(dialog.phase_label.get_text(), "Update cancelled")
         self.watcher.resume_with_full_refresh.assert_not_called()
         dialog._close()
         self.watcher.resume_with_full_refresh.assert_called_once_with(
@@ -102,8 +102,8 @@ class RepositoryUpdateDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self._complete(2, "main\n")
         self._complete(3)
         self.assertEqual(len(self.calls), 4)
-        self.assertEqual(dialog.phase_label.get_text(), "Nessuna sorgente remota")
-        self.assertIn("repository è locale", dialog.detail_label.get_text())
+        self.assertEqual(dialog.phase_label.get_text(), "No remote source")
+        self.assertIn("local repository", dialog.detail_label.get_text())
 
     def test_error_text_redacts_embedded_http_password(self) -> None:
         """Credential-bearing remote failures never expose their password."""

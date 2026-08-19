@@ -40,7 +40,7 @@ def _preflight_application() -> bool:
     missing.extend(name for name in ("tmux",) if shutil.which(name) is None)
     if not missing:
         return True
-    print("Dipendenze mancanti: " + ", ".join(missing), file=sys.stderr)
+    print("Missing dependencies: " + ", ".join(missing), file=sys.stderr)
     return False
 
 
@@ -70,7 +70,7 @@ def _detach(argv: list[str]) -> int:
     try:
         first_pid = os.fork()
     except OSError as error:
-        print(f"Impossibile separare SLATE dal terminale: {error}", file=sys.stderr)
+        print(f"Unable to detach SLATE from the terminal: {error}", file=sys.stderr)
         return 1
     if first_pid > 0:
         # 2026-08-16: il launcher raccoglie il figlio intermedio per non lasciare
@@ -108,10 +108,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if unsupported:
         # 2026-08-18: validate the current CLI before detach so every unknown
         # option gets the same visible error without historical aliases.
-        print(f"Opzione non supportata: {unsupported[0]!r}", file=sys.stderr)
+        print(f"Unsupported option: {unsupported[0]!r}", file=sys.stderr)
         return 2
     if supported_options.issubset(arguments):
-        print("Le opzioni --debug e --agent-debug sono incompatibili.", file=sys.stderr)
+        print("The --debug and --agent-debug options are incompatible.", file=sys.stderr)
         return 2
     if "--agent-debug" in arguments:
         return _run_application(arguments)

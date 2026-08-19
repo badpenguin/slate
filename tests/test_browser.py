@@ -377,7 +377,7 @@ class BrowserTest(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(
             stderr.getvalue(),
-            "WebKit: navigazione bloccata (pagina; schema: javascript; "
+            "WebKit: blocked navigation (page; scheme: javascript; "
             "URL: 'javascript:secretToken()').\n",
         )
         self.assertIn("secretToken", stderr.getvalue())

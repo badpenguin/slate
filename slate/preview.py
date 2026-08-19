@@ -45,8 +45,8 @@ class FilePreview(Gtk.Box):
         close_button.set_image(
             Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON)
         )
-        close_button.set_tooltip_text("Chiudi anteprima (Esc)")
-        close_button.get_accessible().set_name("Chiudi anteprima")
+        close_button.set_tooltip_text("Close preview (Esc)")
+        close_button.get_accessible().set_name("Close preview")
         close_button.connect("clicked", self._on_close_clicked)
         header.pack_start(self.title, True, True, 0)
         header.pack_end(close_button, False, False, 0)
@@ -77,7 +77,7 @@ class FilePreview(Gtk.Box):
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.view)
         self.pack_start(scroller, True, True, 0)
-        self._set_plain_text("Seleziona un file per visualizzarne l’anteprima.")
+        self._set_plain_text("Select a file to preview it.")
 
     def show_status(
         self, root: str, scm: SCM, status: FileStatus
@@ -94,7 +94,7 @@ class FilePreview(Gtk.Box):
         )
         self.title.set_text(title)
         self.title.set_tooltip_text(title)
-        self._set_plain_text("Caricamento anteprima…")
+        self._set_plain_text("Loading preview…")
         if status.state == "moved" and status.source_path:
             # 2026-08-17: rename-aware output is required because a normal patch
             # can render a move as unrelated add/remove blocks.
@@ -131,7 +131,7 @@ class FilePreview(Gtk.Box):
         self.current_path = relative_path
         self.title.set_text(relative_path)
         self.title.set_tooltip_text(relative_path)
-        self._set_plain_text("Caricamento anteprima…")
+        self._set_plain_text("Loading preview…")
         # 2026-08-16: la vista File usa lo stesso lettore sicuro e gli stessi
         # limiti della preview SCM, senza creare un secondo renderer di sorgenti.
         self._load_working_file(root, relative_path, request_serial)
@@ -159,16 +159,16 @@ class FilePreview(Gtk.Box):
         try:
             candidate.relative_to(root_path)
         except ValueError:
-            self._set_plain_text("Anteprima rifiutata: il path esce dal progetto.")
+            self._set_plain_text("Preview rejected: the path leaves the project.")
             return
         try:
             size = candidate.stat().st_size
         except OSError as error:
-            self._set_plain_text(f"Impossibile leggere il file:\n{error}")
+            self._set_plain_text(f"Unable to read the file:\n{error}")
             return
         if size > self.MAX_TEXT_BYTES:
             self._set_plain_text(
-                f"File troppo grande per l’anteprima ({size / 1024 / 1024:.1f} MiB)."
+                f"File too large to preview ({size / 1024 / 1024:.1f} MiB)."
             )
             return
         self.file_cancellable = Gio.Cancellable()
@@ -194,16 +194,16 @@ class FilePreview(Gtk.Box):
             _success, contents, _etag = source.load_contents_finish(result)
         except GLib.Error as error:
             if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
-                self._set_plain_text(f"Impossibile leggere il file:\n{error}")
+                self._set_plain_text(f"Unable to read the file:\n{error}")
             return
         data = bytes(contents)
         if len(data) > self.MAX_TEXT_BYTES:
             self._set_plain_text(
-                f"File troppo grande per l’anteprima ({len(data) / 1024 / 1024:.1f} MiB)."
+                f"File too large to preview ({len(data) / 1024 / 1024:.1f} MiB)."
             )
             return
         if b"\0" in data:
-            self._set_plain_text("File binario: anteprima testuale non disponibile.")
+            self._set_plain_text("Binary file: text preview is unavailable.")
             return
         self._set_source_text(data.decode("utf-8", "replace"), relative_path)
 
@@ -217,15 +217,15 @@ class FilePreview(Gtk.Box):
         self.command = None
         if not result.ok:
             self._set_plain_text(
-                result.stderr.strip() or "Impossibile leggere la revisione base."
+                result.stderr.strip() or "Unable to read the base revision."
             )
             return
         encoded = result.stdout.encode("utf-8", "replace")
         if len(encoded) > self.MAX_TEXT_BYTES:
-            self._set_plain_text("File base troppo grande per l’anteprima interna.")
+            self._set_plain_text("Base file too large for the internal preview.")
             return
         if "\0" in result.stdout:
-            self._set_plain_text("File binario: anteprima testuale non disponibile.")
+            self._set_plain_text("Binary file: text preview is unavailable.")
             return
         self._set_source_text(result.stdout, relative_path)
 
@@ -239,13 +239,13 @@ class FilePreview(Gtk.Box):
         self.command = None
         if not result.ok:
             self._set_plain_text(
-                result.stderr.strip() or "Impossibile generare il diff."
+                result.stderr.strip() or "Unable to generate the diff."
             )
             return
         if len(result.stdout.encode("utf-8", "replace")) > self.MAX_TEXT_BYTES:
-            self._set_plain_text("Diff troppo grande per l’anteprima interna.")
+            self._set_plain_text("Diff too large for the internal preview.")
             return
-        self._set_diff_text(result.stdout or "Nessuna differenza testuale disponibile.\n")
+        self._set_diff_text(result.stdout or "No textual differences available.\n")
 
     def _set_source_text(self, text: str, path: str) -> None:
         """Display an entire text file with language-aware highlighting."""

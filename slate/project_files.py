@@ -275,10 +275,10 @@ class ProjectFileOperations:
         """Reject subdirectories or begin deleting collected non-directory children."""
 
         if error is not None or inspection is None:
-            callback(error or "Impossibile ispezionare la directory.")
+            callback(error or "Unable to inspect the directory.")
             return
         if inspection.contains_directory:
-            callback("La directory contiene altre directory e non può essere eliminata.")
+            callback("The directory contains other directories and cannot be deleted.")
             return
         parent = Gio.File.new_for_path(path)
         self._delete_next_child(parent, list(inspection.child_names), callback)

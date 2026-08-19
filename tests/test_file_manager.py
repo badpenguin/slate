@@ -434,12 +434,12 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.assertEqual(self.manager.new_file_button.get_accessible().get_name(), "+ File")
         self.assertEqual(
             self.manager.new_directory_button.get_accessible().get_name(),
-            "+ Directory",
+            "+ Folder",
         )
         expand_content = self.manager.expand_button.get_child()
         self.assertEqual(expand_content.get_spacing(), 4)
         self.assertIs(expand_content.get_children()[0], self.manager.expand_icon)
-        self.assertEqual(self.manager.expand_label.get_text(), "Espandi")
+        self.assertEqual(self.manager.expand_label.get_text(), "Expand")
         width_request, _height_request = self.manager.expand_button.get_size_request()
         self.assertGreaterEqual(width_request, 100)
         self.assertTrue(self.manager.expand_label.get_visible())
@@ -534,7 +534,7 @@ class ProjectFileManagerTest(unittest.TestCase):
             if name == "node_modules"
         )
         self.assertFalse(self.manager.tree.row_expanded(self.manager.store.get_path(node_iter)))
-        self.assertEqual(self.manager.expand_label.get_text(), "Comprimi")
+        self.assertEqual(self.manager.expand_label.get_text(), "Collapse")
 
 
 if __name__ == "__main__":

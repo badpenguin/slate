@@ -171,14 +171,14 @@ class ProjectFileManager(Gtk.Box):
             "+ File", "document-new", self._on_new_file_clicked
         )
         self.new_directory_button = self._toolbar_button(
-            "+ Directory", "folder-new", self._on_new_directory_clicked
+            "+ Folder", "folder-new", self._on_new_directory_clicked
         )
         self.expand_button = Gtk.Button()
         expand_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.expand_icon = Gtk.Image.new_from_icon_name(
             "go-down", Gtk.IconSize.BUTTON
         )
-        self.expand_label = Gtk.Label(label="Espandi")
+        self.expand_label = Gtk.Label(label="Expand")
         expand_content.pack_start(self.expand_icon, False, False, 0)
         expand_content.pack_start(self.expand_label, False, False, 0)
         self.expand_button.add(expand_content)
@@ -186,11 +186,11 @@ class ProjectFileManager(Gtk.Box):
         self.expand_button.set_size_request(100, -1)
         self._set_expand_action(False)
         self.expand_button.connect("clicked", self._on_expand_all_clicked)
-        self.hidden_check = Gtk.CheckButton(label="Nascosti")
-        self.hidden_check.set_tooltip_text("Mostra file e directory nascosti dal sistema")
+        self.hidden_check = Gtk.CheckButton(label="Hidden")
+        self.hidden_check.set_tooltip_text("Show files and folders hidden by the system")
         self.hidden_check.connect("toggled", self._on_filter_toggled)
-        self.excluded_check = Gtk.CheckButton(label="Esclusi")
-        self.excluded_check.set_tooltip_text("Mostra file ignorati e directory pesanti")
+        self.excluded_check = Gtk.CheckButton(label="Excluded")
+        self.excluded_check.set_tooltip_text("Show ignored files and large folders")
         self.excluded_check.connect("toggled", self._on_filter_toggled)
         # 2026-08-16: creazione e visibilità condividono la singola riga
         # concordata, senza spostare i controlli esistenti su una seconda riga.
@@ -206,11 +206,11 @@ class ProjectFileManager(Gtk.Box):
 
         # 2026-08-16: frecce verticali descrivono espansione e compressione
         # dell'albero senza ricorrere agli ambigui simboli più e meno.
-        label = "Comprimi" if expanded else "Espandi"
+        label = "Collapse" if expanded else "Expand"
         icon_name = "go-up" if expanded else "go-down"
         self.expand_label.set_text(label)
         self.expand_icon.set_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
-        self.expand_button.set_tooltip_text(f"{label} tutte le directory")
+        self.expand_button.set_tooltip_text(f"{label} all folders")
         self.expand_button.get_accessible().set_name(label)
 
     def _toolbar_button(
@@ -276,7 +276,7 @@ class ProjectFileManager(Gtk.Box):
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.tree)
         self.content_stack = Gtk.Stack()
-        self.empty_label = Gtk.Label(label="Nessun progetto attivo")
+        self.empty_label = Gtk.Label(label="No active project")
         self.content_stack.add_named(self.empty_label, "empty")
         self.content_stack.add_named(scroller, "tree")
         self.pack_start(self.content_stack, True, True, 0)
@@ -668,7 +668,7 @@ class ProjectFileManager(Gtk.Box):
             self.store.append(
                 parent,
                 [
-                    f"Impossibile leggere: {error}",
+                    f"Unable to read: {error}",
                     "",
                     False,
                     False,
@@ -815,7 +815,7 @@ class ProjectFileManager(Gtk.Box):
             self.store.append(
                 tree_iter,
                 [
-                    "Caricamento…",
+                    "Loading…",
                     "",
                     False,
                     False,
@@ -1024,21 +1024,21 @@ class ProjectFileManager(Gtk.Box):
         menu = Gtk.Menu()
         if self.context_relative is not None and self.context_directory:
             terminal_item = self._menu_item(
-                "Apri terminale qui", "utilities-terminal", Gdk.KEY_t
+                "Open terminal here", "utilities-terminal", Gdk.KEY_t
             )
             terminal_item.connect("activate", self._on_context_open_terminal)
             menu.append(terminal_item)
             menu.append(Gtk.SeparatorMenuItem())
         if self.context_relative is not None and not self.context_directory:
             for label, icon, keyval, callback in (
-                ("Visualizza", "document-open", Gdk.KEY_v, self._on_context_view),
+                ("View", "document-open", Gdk.KEY_v, self._on_context_view),
                 (
-                    "Modifica in SLATE",
+                    "Edit in SLATE",
                     "accessories-text-editor",
                     Gdk.KEY_m,
                     self._on_context_edit_internal,
                 ),
-                ("Modifica in gVim", "gvim", Gdk.KEY_e, self._on_context_edit_external),
+                ("Edit in gVim", "gvim", Gdk.KEY_e, self._on_context_edit_external),
             ):
                 item = self._menu_item(label, icon, keyval)
                 item.connect("activate", callback)
@@ -1046,17 +1046,17 @@ class ProjectFileManager(Gtk.Box):
             menu.append(Gtk.SeparatorMenuItem())
         for label, icon, callback in (
             ("+ File", "document-new", self._on_context_new_file),
-            ("+ Directory", "folder-new", self._on_context_new_directory),
+            ("+ Folder", "folder-new", self._on_context_new_directory),
         ):
             item = self._menu_item(label, icon, None)
             item.connect("activate", callback)
             menu.append(item)
         if self.context_relative is not None:
             menu.append(Gtk.SeparatorMenuItem())
-            rename_item = self._menu_item("Rinomina", "edit-rename", Gdk.KEY_r)
+            rename_item = self._menu_item("Rename", "edit-rename", Gdk.KEY_r)
             rename_item.connect("activate", self._on_context_rename)
             menu.append(rename_item)
-            item = self._menu_item("Elimina", "edit-delete", Gdk.KEY_Delete)
+            item = self._menu_item("Delete", "edit-delete", Gdk.KEY_Delete)
             item.connect("activate", self._on_context_delete)
             menu.append(item)
         menu.show_all()
