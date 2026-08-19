@@ -1,0 +1,26 @@
+name: Crea release dal tag
+
+on:
+  push:
+    tags:
+      - "*"
+
+# 2026-08-19: il workflow usa il token effimero fornito da GitHub con il solo
+# permesso necessario per trasformare ogni nuovo tag in una GitHub Release.
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Crea GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      # 2026-08-19: --verify-tag impedisce di creare una release per un
+      # riferimento diverso dal tag che ha attivato il workflow.
+      - name: Crea la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
