@@ -132,7 +132,7 @@ The window is divided into three columns:
 3. **Revisions/Files**: repository changes or the file tree.
 
 ```text
-New Project | New Terminal | Execute | Codex | Open URL | Incognito
+New Project | New Terminal | Execute ▾ | Codex | Open URL | Incognito
 ┌────────────────────────┬──────────────────────────────────────────┬────────────────────────────┐
 │ PROJECTS               │ WORKSPACE                                │ CHANGES | FILES            │
 ├────────────────────────┼──────────────────────────────────────────┼────────────────────────────┤
@@ -160,6 +160,14 @@ adjusted in **Settings**.
 **New Terminal** creates a persistent shell. **Execute** accepts a command line and
 automatically assigns a name such as `ssh-1` or `npm-1`. **Codex** creates a
 `codex-N` terminal and starts `codex resume`.
+
+The **Commands** section in **Settings** defines reusable global launchers. Each
+launcher has a label, a shell command, and an icon selected from the icons
+available in the current GTK theme. When at least one launcher exists, the small
+arrow beside **Execute** opens them as buttons in the configured order. Choosing
+one creates a new persistent terminal in the active project; with no configured
+launchers, the arrow is not shown. Existing terminals retain their chosen icon
+if a launcher is later edited or removed.
 
 SLATE also remembers the command associated with each terminal. If the tmux
 session is still active, it simply reconnects to it; if the session no longer

@@ -135,7 +135,7 @@ La finestra è divisa in tre colonne:
 3. **Revisions/Files**: modifiche dei repository oppure albero dei file.
 
 ```text
-New Project | New Terminal | Execute | Codex | Open URL | Incognito
+New Project | New Terminal | Execute ▾ | Codex | Open URL | Incognito
 ┌────────────────────────┬──────────────────────────────────────────┬────────────────────────────┐
 │ PROJECTS               │ WORKSPACE                                │ CHANGES | FILES            │
 ├────────────────────────┼──────────────────────────────────────────┼────────────────────────────┤
@@ -163,6 +163,14 @@ da **Settings**.
 **New Terminal** crea una shell persistente. **Execute** accetta una riga di
 comando e assegna automaticamente un nome come `ssh-1` o `npm-1`. **Codex** crea
 un terminale `codex-N` e avvia `codex resume`.
+
+La sezione **Commands** di **Settings** definisce launcher globali riutilizzabili.
+Ogni launcher ha una label, un comando shell e un'icona scelta fra quelle
+disponibili nel tema GTK corrente. Se esiste almeno un launcher, la piccola
+freccia accanto a **Execute** li apre come pulsanti nell'ordine configurato. La
+scelta crea un nuovo terminale persistente nel progetto attivo; senza launcher
+configurati, la freccia non viene mostrata. I terminali esistenti mantengono
+l'icona scelta anche se il launcher viene poi modificato o rimosso.
 
 SLATE ricorda anche il comando associato al terminale. Se la sessione tmux è
 ancora attiva, si limita a riagganciarla; se non esiste più, la ricrea alla

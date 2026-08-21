@@ -151,6 +151,9 @@ class BrowserTest(unittest.TestCase):
         self.assertTrue(second.private)
         self.assertTrue(first.page.web_view.is_ephemeral())
         self.assertTrue(second.page.web_view.is_ephemeral())
+        self.assertFalse(
+            first.page.web_view.get_settings().get_enable_smooth_scrolling()
+        )
         self.assertIsNot(first.context, second.context)
         self.assertEqual(
             manager.serialized_project("repo"),
@@ -202,6 +205,21 @@ class BrowserTest(unittest.TestCase):
             entry.page.web_view.get_uri(), "https://example.com/private"
         )
         self.assertIsNone(manager.context)
+        manager.shutdown()
+
+    def test_reselecting_visible_private_page_is_a_complete_noop(self) -> None:
+        """Clicking the current Incognito row neither remaps nor republishes it."""
+
+        stack = _BrowserStack()
+        state_changed = MagicMock()
+        manager = BrowserManager(stack, MagicMock(), state_changed, MagicMock())
+        entry = manager.open_page("repo", private=True)
+        state_changed.reset_mock()
+        with patch.object(stack, "set_visible_child", wraps=stack.set_visible_child) as show:
+            self.assertTrue(manager.show_page("repo", entry.identifier))
+
+        show.assert_not_called()
+        state_changed.assert_not_called()
         manager.shutdown()
 
     def test_viewport_container_forces_preview_but_fills_desktop(self) -> None:
@@ -593,6 +611,11 @@ class BrowserTest(unittest.TestCase):
         page.inspector.show.assert_called_once_with()
         page.inspector_button.set_active(False)
         page.inspector.close.assert_called_once_with()
+        page._on_inspector_opened(page.inspector)
+        self.assertTrue(page.inspector_button.get_active())
+        page.inspector.show.assert_called_once_with()
+        page._on_inspector_closed(page.inspector)
+        self.assertFalse(page.inspector_button.get_active())
         manager.shutdown()
 
     def test_close_returns_to_terminal_and_forgets_runtime_page(self) -> None:

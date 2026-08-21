@@ -219,6 +219,7 @@ class BrowserPage(Gtk.Box):
         self.on_error = on_error
         self.failed_loading = False
         self.inspector_open = False
+        self._syncing_inspector = False
         self.closed = False
         self.external_popup_bridges: set[object] = set()
         self.site_data_cancellable: Gio.Cancellable | None = None
@@ -351,8 +352,16 @@ class BrowserPage(Gtk.Box):
         self.web_view = web_view or WebKit2.WebView.new_with_context(context)
         settings = self.web_view.get_settings()
         settings.set_enable_developer_extras(True)
+        if entry.private:
+            # 2026-08-21: WebKit anima molto lentamente gli scatti della rotella
+            # in alcuni profili effimeri su Cinnamon; lo scroll discreto rende
+            # Incognito immediato senza cambiare le WebView normali.
+            settings.set_enable_smooth_scrolling(False)
         self.inspector = self.web_view.get_inspector()
         self.inspector.connect("closed", self._on_inspector_closed)
+        self.inspector.connect("attach", self._on_inspector_opened)
+        self.inspector.connect("bring-to-front", self._on_inspector_opened)
+        self.inspector.connect("open-window", self._on_inspector_opened)
         self.web_view.connect("notify::title", self._on_page_identity_changed)
         self.web_view.connect("notify::uri", self._on_page_identity_changed)
         self.web_view.connect("load-changed", self._on_load_changed)
@@ -659,6 +668,8 @@ class BrowserPage(Gtk.Box):
     def _on_inspector_toggled(self, button: Gtk.ToggleButton) -> None:
         """Open or close developer tools to match the toolbar toggle state."""
 
+        if self._syncing_inspector:
+            return
         if button.get_active():
             self.inspector_open = True
             self.inspector.show()
@@ -667,12 +678,24 @@ class BrowserPage(Gtk.Box):
             self.inspector_open = False
             self.inspector.close()
 
+    def _on_inspector_opened(self, _inspector: object) -> bool:
+        """Synchronize the toolbar when WebKit opens or presents its Inspector."""
+
+        self.inspector_open = True
+        if not self.inspector_button.get_active():
+            self._syncing_inspector = True
+            self.inspector_button.set_active(True)
+            self._syncing_inspector = False
+        return False
+
     def _on_inspector_closed(self, _inspector: object) -> None:
         """Synchronize the toolbar when Inspector closes from its own UI."""
 
         self.inspector_open = False
         if self.inspector_button.get_active():
+            self._syncing_inspector = True
             self.inspector_button.set_active(False)
+            self._syncing_inspector = False
 
     def _on_exit_responsive_clicked(self, _button: Gtk.Button) -> None:
         """Leave responsive preview from its deliberate canvas control."""
@@ -1094,6 +1117,11 @@ class BrowserManager:
         page = self._materialize(entry)
         if page is None:
             return False
+        if self.workspace.get_visible_child() is page:
+            # 2026-08-21: un secondo click sulla riga già visibile non rimappa la
+            # WebView: alcuni profili effimeri interpretano il ciclo GTK come
+            # una nuova attivazione e il sito può ricaricare il documento.
+            return True
         self.workspace.set_visible_child(page)
         self.on_state_changed(page)
         return True

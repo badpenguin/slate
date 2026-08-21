@@ -8,6 +8,7 @@ from pathlib import Path
 from slate.config import (
     BROWSER_VIEWPORT_PRESETS,
     ConfigStore,
+    DEFAULT_EXTRA_COMMAND_ICON,
     DEFAULT_CONFIG,
     new_project_config,
 )
@@ -23,6 +24,7 @@ class ConfigStoreTest(unittest.TestCase):
         adopted = new_project_config("repo", "/tmp/repo")
         self.assertEqual(manual["terminals"], ["main"])
         self.assertEqual(manual["last_terminal"], "main")
+        self.assertEqual(manual["terminal_icons"], {})
         self.assertEqual(
             manual["item_order"],
             [{"kind": "terminal", "value": "main"}],
@@ -117,6 +119,7 @@ class ConfigStoreTest(unittest.TestCase):
             project = store.data["projects"][0]
             self.assertEqual(project["terminals"], ["main", "logs"])
             self.assertEqual(project["terminal_commands"], {})
+            self.assertEqual(project["terminal_icons"], {})
             self.assertEqual(project["last_terminal"], "main")
             self.assertEqual(
                 project["item_order"],
@@ -156,6 +159,69 @@ class ConfigStoreTest(unittest.TestCase):
 
             self.assertEqual(
                 project["terminal_commands"], {"codex-1": "codex resume"}
+            )
+
+    def test_extra_commands_and_terminal_icons_are_normalized(self) -> None:
+        """Global launchers and per-terminal icons retain only safe catalog data."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "settings": {
+                            "commands": {
+                                "items": [
+                                    {
+                                        "label": " Logs ",
+                                        "command": "  journalctl -f  ",
+                                        "icon": "text-x-script",
+                                    },
+                                    {
+                                        "label": "logs",
+                                        "command": "duplicate",
+                                        "icon": DEFAULT_EXTRA_COMMAND_ICON,
+                                    },
+                                    {
+                                        "label": "Broken",
+                                        "command": "printf '",
+                                        "icon": "system-run",
+                                    },
+                                ]
+                            }
+                        },
+                        "projects": [
+                            {
+                                "name": "p",
+                                "path": "/tmp/p",
+                                "terminals": ["logs", "main"],
+                                "terminal_icons": {
+                                    "logs": "text-x-script",
+                                    "main": "../../unknown-icon",
+                                    "missing": "system-run",
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            data = ConfigStore(path).data
+
+            self.assertEqual(
+                data["settings"]["commands"]["items"],
+                [
+                    {
+                        "label": "Logs",
+                        "command": "journalctl -f",
+                        "icon": "text-x-script",
+                    }
+                ],
+            )
+            self.assertEqual(
+                data["projects"][0]["terminal_icons"],
+                {"logs": "text-x-script"},
             )
 
     def test_file_manager_preferences_are_safe_and_backward_compatible(self) -> None:

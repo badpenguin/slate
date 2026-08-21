@@ -17,7 +17,12 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 from .browser import BrowserManager, BrowserPage
-from .config import ConfigStore, new_project_config
+from .config import (
+    DEFAULT_EXTRA_COMMAND_ICON,
+    ConfigStore,
+    is_extra_command_icon,
+    new_project_config,
+)
 from .editor import EditorDocument, EditorWorkspace
 from .file_manager import ProjectFileManager
 from .panel import SCMPanel
@@ -342,6 +347,22 @@ class SlateWindow(Gtk.ApplicationWindow):
         add_command = self._header_action_button(
             "Execute", "system-run", self._on_add_command
         )
+        command_menu = Gtk.MenuButton()
+        command_menu.set_image(
+            Gtk.Image.new_from_icon_name(
+                "pan-down-symbolic",
+                Gtk.IconSize.MENU,
+            )
+        )
+        command_menu.get_image().set_pixel_size(12)
+        command_menu.get_style_context().add_class("execute-command-arrow")
+        command_menu.set_tooltip_text("Additional commands")
+        command_menu.get_accessible().set_name("Additional commands")
+        command_menu.set_no_show_all(True)
+        execute_group = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        execute_group.get_style_context().add_class("linked")
+        execute_group.pack_start(add_command, False, False, 0)
+        execute_group.pack_start(command_menu, False, False, 0)
         resume_codex = self._header_action_button(
             "Codex",
             "system-run",
@@ -373,6 +394,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             )
         self.add_terminal_button = add_terminal
         self.add_command_button = add_command
+        self.extra_commands_button = command_menu
         self.resume_codex_button = resume_codex
         self.add_browser_button = add_browser
         self.add_private_browser_button = add_private_browser
@@ -382,7 +404,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         # the user without adding another toolbar container or changing behavior.
         header.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         header.pack_start(add_terminal)
-        header.pack_start(add_command)
+        header.pack_start(execute_group)
         header.pack_start(resume_codex)
         header.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         header.pack_start(add_browser)
@@ -406,7 +428,69 @@ class SlateWindow(Gtk.ApplicationWindow):
         overflow.set_popup(menu)
         header.pack_end(overflow)
         header.pack_end(search)
+        self._set_extra_commands(
+            self.config.data["settings"]["commands"]["items"]
+        )
         return header
+
+    def _set_extra_commands(self, commands: list[dict[str, str]]) -> None:
+        """Rebuild and show the compact HeaderBar command popover when useful."""
+
+        popover = Gtk.Popover.new(self.extra_commands_button)
+        choices = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        choices.set_border_width(8)
+        # 2026-08-21: veri pulsanti mantengono l'interazione del prototipo
+        # approvato, mentre l'ordine deriva direttamente dalla configurazione.
+        for item in commands:
+            button = Gtk.Button()
+            content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            content.pack_start(
+                Gtk.Image.new_from_icon_name(item["icon"], Gtk.IconSize.BUTTON),
+                False,
+                False,
+                0,
+            )
+            label = Gtk.Label(label=item["label"])
+            label.set_xalign(0)
+            content.pack_start(label, True, True, 0)
+            button.add(content)
+            button.set_hexpand(True)
+            button.connect(
+                "clicked",
+                self._on_extra_command,
+                item["command"],
+                item["label"],
+                item["icon"],
+                popover,
+            )
+            choices.pack_start(button, False, False, 0)
+        popover.add(choices)
+        self.extra_commands_button.set_popover(popover)
+        choices.show_all()
+        execute_button = getattr(self, "add_command_button", None)
+        if execute_button is not None:
+            execute_style = execute_button.get_style_context()
+            if commands:
+                execute_style.add_class("execute-command-main")
+            else:
+                execute_style.remove_class("execute-command-main")
+        if commands:
+            self.extra_commands_button.show()
+        else:
+            self.extra_commands_button.hide()
+
+    def _on_extra_command(
+        self,
+        _button: Gtk.Button,
+        command: str,
+        label: str,
+        icon_name: str,
+        popover: Gtk.Popover,
+    ) -> None:
+        """Create a persistent terminal from one configured popover button."""
+
+        popover.popdown()
+        self._create_terminal(command, name_prefix=label, icon_name=icon_name)
 
     def _on_settings(self, _item: Gtk.MenuItem) -> None:
         """Open the modal settings dialog over the current SLATE window."""
@@ -417,6 +501,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._update_font_setting,
             self._update_tmux_status_setting,
             self._update_external_editor_setting,
+            self._update_extra_commands_setting,
         )
         dialog.show_all()
 
@@ -470,6 +555,45 @@ class SlateWindow(Gtk.ApplicationWindow):
             command
         )
         self.config.save()
+
+    def _update_extra_commands_setting(
+        self, commands: list[dict[str, str]]
+    ) -> None:
+        """Persist validated extra commands and rebuild their HeaderBar buttons."""
+
+        if not isinstance(commands, list) or len(commands) > 32:
+            return
+        labels: set[str] = set()
+        for item in commands:
+            if not isinstance(item, dict):
+                return
+            label = item.get("label")
+            command = item.get("command")
+            icon = item.get("icon")
+            if (
+                not isinstance(label, str)
+                or not 1 <= len(label) <= 80
+                or label.casefold() in labels
+                or not isinstance(command, str)
+                or not 1 <= len(command) <= 4096
+                or any(char in label or char in command for char in "\r\n\0")
+                or not is_extra_command_icon(icon)
+            ):
+                return
+            try:
+                if not shlex.split(command, posix=True):
+                    return
+            except ValueError:
+                return
+            labels.add(label.casefold())
+        snapshot = [dict(item) for item in commands]
+        if self.config.data["settings"]["commands"]["items"] == snapshot:
+            return
+        # 2026-08-21: salvataggio e ricostruzione immediata fanno sì che il
+        # menu rispecchi sempre la pagina impostazioni senza riavviare SLATE.
+        self.config.data["settings"]["commands"]["items"] = snapshot
+        self.config.save()
+        self._set_extra_commands(snapshot)
 
     def _persist_editor_state(
         self,
@@ -1586,6 +1710,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.editor_workspace.show_inactive()
         self.add_terminal_button.set_sensitive(False)
         self.add_command_button.set_sensitive(False)
+        extra_commands_button = getattr(self, "extra_commands_button", None)
+        if extra_commands_button is not None:
+            extra_commands_button.set_sensitive(False)
         self.resume_codex_button.set_sensitive(False)
         add_browser_button = getattr(self, "add_browser_button", None)
         if add_browser_button is not None:
@@ -1691,11 +1818,27 @@ class SlateWindow(Gtk.ApplicationWindow):
             else:
                 renderer.set_property("icon-name", "web-browser")
             return
-        icon_names = {
-            "terminal": "utilities-terminal",
-        }
+        icon_name = None
+        if kind == "terminal":
+            icon_name = DEFAULT_EXTRA_COMMAND_ICON
+            config = getattr(self, "config", None)
+            project = (
+                config.find_project(model.get_value(tree_iter, self.COL_PROJECT))
+                if config is not None
+                else None
+            )
+            if project is not None:
+                configured_icon = project.get("terminal_icons", {}).get(
+                    model.get_value(tree_iter, self.COL_ITEM),
+                    DEFAULT_EXTRA_COMMAND_ICON,
+                )
+                theme = Gtk.IconTheme.get_default()
+                if is_extra_command_icon(configured_icon) and theme.has_icon(
+                    configured_icon
+                ):
+                    icon_name = configured_icon
         renderer.set_property("gicon", None)
-        renderer.set_property("icon-name", icon_names.get(kind))
+        renderer.set_property("icon-name", icon_name)
 
     def _render_expander_cell(
         self,
@@ -1855,6 +1998,9 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.active_editor_ref = None
         self.add_terminal_button.set_sensitive(True)
         self.add_command_button.set_sensitive(True)
+        extra_commands_button = getattr(self, "extra_commands_button", None)
+        if extra_commands_button is not None:
+            extra_commands_button.set_sensitive(True)
         self.resume_codex_button.set_sensitive(True)
         add_browser_button = getattr(self, "add_browser_button", None)
         if add_browser_button is not None:
@@ -2472,6 +2618,9 @@ class SlateWindow(Gtk.ApplicationWindow):
                 # 2026-08-18: il launcher appartiene al terminale persistente,
                 # quindi una rinomina deve conservarne il comportamento.
                 terminal_commands[clean_name] = terminal_commands.pop(old_name)
+            terminal_icons = project.setdefault("terminal_icons", {})
+            if old_name in terminal_icons:
+                terminal_icons[clean_name] = terminal_icons.pop(old_name)
             for item in project.setdefault("item_order", []):
                 if item.get("kind") == "terminal" and item.get("value") == old_name:
                     item["value"] = clean_name
@@ -2723,6 +2872,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         working_directory: str | None = None,
         *,
         name_prefix: str | None = None,
+        icon_name: str | None = None,
     ) -> None:
         """Create one configured terminal with an optional first shell command."""
 
@@ -2756,6 +2906,11 @@ class SlateWindow(Gtk.ApplicationWindow):
         project["terminals"].append(name)
         if initial_command:
             project.setdefault("terminal_commands", {})[name] = initial_command
+        if is_extra_command_icon(icon_name):
+            # 2026-08-21: l'icona appartiene al terminale materializzato, non
+            # al launcher modificabile che lo ha creato, e sopravvive quindi
+            # alle successive revisioni delle impostazioni globali.
+            project.setdefault("terminal_icons", {})[name] = icon_name
         self._append_project_item(project, "terminal", name)
         project["last_terminal"] = name
         self.config.data["active_terminal"] = terminal_key(project["name"], name)
@@ -2852,6 +3007,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         active_key = self.config.data.get("active_terminal")
         project["terminals"].remove(terminal_name_value)
         project.setdefault("terminal_commands", {}).pop(terminal_name_value, None)
+        project.setdefault("terminal_icons", {}).pop(terminal_name_value, None)
         project["item_order"] = [
             item
             for item in project.setdefault("item_order", [])

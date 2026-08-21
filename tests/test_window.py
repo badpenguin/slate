@@ -22,6 +22,53 @@ from slate.window import SlateWindow, _CODEX_RESUME_COMMAND, _moved_sequence
 class WindowActionTest(unittest.TestCase):
     """Verify high-level SCM actions independently from GTK window startup."""
 
+    def test_extra_command_closes_popover_and_creates_named_terminal(self) -> None:
+        """Configured command buttons preserve their shell line, label and icon."""
+
+        popover = MagicMock()
+        owner = SimpleNamespace(_create_terminal=MagicMock())
+        SlateWindow._on_extra_command(
+            owner,
+            MagicMock(),
+            "journalctl -f",
+            "Logs",
+            "text-x-script",
+            popover,
+        )
+        popover.popdown.assert_called_once_with()
+        owner._create_terminal.assert_called_once_with(
+            "journalctl -f",
+            name_prefix="Logs",
+            icon_name="text-x-script",
+        )
+
+    def test_extra_command_arrow_is_hidden_for_zero_and_closed_for_one(self) -> None:
+        """The optional HeaderBar control appears only when it has a launcher."""
+
+        menu_button = Gtk.MenuButton()
+        owner = SimpleNamespace(extra_commands_button=menu_button)
+        owner._on_extra_command = SlateWindow._on_extra_command.__get__(owner)
+
+        SlateWindow._set_extra_commands(owner, [])
+        self.assertFalse(menu_button.get_visible())
+        SlateWindow._set_extra_commands(
+            owner,
+            [
+                {
+                    "label": "Logs",
+                    "command": "journalctl -f",
+                    "icon": "text-x-script",
+                }
+            ],
+        )
+
+        self.assertTrue(menu_button.get_visible())
+        self.assertFalse(menu_button.get_popover().get_visible())
+        self.assertEqual(
+            len(menu_button.get_popover().get_child().get_children()),
+            1,
+        )
+
     def test_ctrl_shift_f_precedes_contextual_editor_shortcuts(self) -> None:
         """Global project search consumes its accelerator before child managers."""
 
@@ -1378,6 +1425,74 @@ class WindowActionTest(unittest.TestCase):
         idle_add.assert_not_called()
         self.assertEqual(config.save.call_count, 2)
 
+    def test_extra_command_icon_is_persisted_on_created_terminal(self) -> None:
+        """A launcher icon becomes terminal state independent from the launcher."""
+
+        project = {
+            "name": "repo",
+            "path": "/tmp/repo",
+            "terminals": [],
+            "terminal_commands": {},
+            "terminal_icons": {},
+            "last_terminal": None,
+        }
+        owner = SimpleNamespace(
+            config=SimpleNamespace(data={"active_terminal": None}, save=MagicMock()),
+            terminals=MagicMock(),
+            _selected_project=MagicMock(return_value=project),
+            _append_project_item=SlateWindow._append_project_item,
+            _populate_projects=MagicMock(),
+            _select_tree_row=MagicMock(),
+        )
+
+        SlateWindow._create_terminal(
+            owner,
+            "journalctl -f",
+            name_prefix="Logs",
+            icon_name="text-x-script",
+        )
+
+        self.assertEqual(project["terminal_icons"], {"logs-1": "text-x-script"})
+
+    def test_terminal_rename_transfers_persisted_icon(self) -> None:
+        """Renaming a session preserves the icon attached to its old identity."""
+
+        project = {
+            "name": "repo",
+            "terminals": ["logs-1"],
+            "terminal_commands": {"logs-1": "journalctl -f"},
+            "terminal_icons": {"logs-1": "text-x-script"},
+            "item_order": [{"kind": "terminal", "value": "logs-1"}],
+            "last_terminal": "logs-1",
+        }
+        dialog = MagicMock()
+        dialog.run.return_value = Gtk.ResponseType.OK
+        entry = MagicMock()
+        entry.get_text.return_value = "system-logs"
+        terminals = MagicMock()
+        owner = SimpleNamespace(
+            _selected_terminal=MagicMock(return_value=(project, "logs-1")),
+            _validate_terminal_name=MagicMock(return_value=None),
+            _show_error=MagicMock(),
+            terminals=terminals,
+            config=SimpleNamespace(data={"active_terminal": None}, save=MagicMock()),
+            _populate_projects=MagicMock(),
+            _select_tree_row=MagicMock(),
+        )
+        with patch("slate.window.Gtk.Dialog", return_value=dialog), patch(
+            "slate.window.Gtk.Entry", return_value=entry
+        ):
+            SlateWindow._prompt_terminal_rename(owner)
+        renamed = terminals.rename.call_args.args[3]
+
+        renamed(True)
+
+        self.assertEqual(project["terminal_icons"], {"system-logs": "text-x-script"})
+        self.assertEqual(
+            project["terminal_commands"],
+            {"system-logs": "journalctl -f"},
+        )
+
     def test_resume_codex_uses_native_bell_per_invocation(self) -> None:
         """The standard launcher isolates native BEL settings to its terminal."""
 
@@ -1624,6 +1739,11 @@ class WindowActionTest(unittest.TestCase):
                 pages={("repo", "browser-1"): SimpleNamespace(private=True)}
             ),
             incognito_icon=incognito_icon,
+            config=SimpleNamespace(
+                find_project=MagicMock(
+                    return_value={"terminal_icons": {"main": "text-x-script"}}
+                )
+            ),
         )
         owner._set_project_row_background = (
             SlateWindow._set_project_row_background.__get__(owner)
@@ -1633,10 +1753,20 @@ class WindowActionTest(unittest.TestCase):
         self.assertIsNone(renderer.get_property("icon-name"))
         self.assertFalse(renderer.get_property("visible"))
         self.assertTrue(renderer.get_property("cell-background-set"))
-        SlateWindow._render_tree_icon(owner, MagicMock(), renderer, store, terminal_iter)
-        self.assertEqual(renderer.get_property("icon-name"), "utilities-terminal")
+        with patch("slate.window.Gtk.IconTheme.get_default") as get_theme:
+            get_theme.return_value.has_icon.return_value = True
+            SlateWindow._render_tree_icon(
+                owner, MagicMock(), renderer, store, terminal_iter
+            )
+        self.assertEqual(renderer.get_property("icon-name"), "text-x-script")
         self.assertTrue(renderer.get_property("visible"))
         self.assertFalse(renderer.get_property("cell-background-set"))
+        with patch("slate.window.Gtk.IconTheme.get_default") as get_theme:
+            get_theme.return_value.has_icon.return_value = False
+            SlateWindow._render_tree_icon(
+                owner, MagicMock(), renderer, store, terminal_iter
+            )
+        self.assertEqual(renderer.get_property("icon-name"), "utilities-terminal")
         SlateWindow._render_tree_icon(
             owner, MagicMock(), renderer, store, private_browser_iter
         )
@@ -1676,6 +1806,7 @@ class WindowActionTest(unittest.TestCase):
             "name": "repo",
             "terminals": ["main", "test"],
             "terminal_commands": {"main": "codex resume"},
+            "terminal_icons": {"main": "system-run"},
             "last_terminal": "main",
         }
         config = SimpleNamespace(
@@ -1690,6 +1821,7 @@ class WindowActionTest(unittest.TestCase):
         SlateWindow._remove_terminal_configuration(owner, project, "main")
         self.assertEqual(project["terminals"], ["test"])
         self.assertEqual(project["terminal_commands"], {})
+        self.assertEqual(project["terminal_icons"], {})
         self.assertEqual(project["last_terminal"], "test")
         self.assertEqual(config.data["active_terminal"], "repo/test")
         config.save.assert_called_once_with()

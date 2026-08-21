@@ -6,6 +6,7 @@ import copy
 import json
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,17 @@ BROWSER_VIEWPORT_PRESETS: dict[str, BrowserViewportPreset] = {
 }
 
 
+DEFAULT_EXTRA_COMMAND_ICON = "utilities-terminal"
+
+
+def is_extra_command_icon(value: Any) -> bool:
+    """Accept one bounded freedesktop icon name without paths or resources."""
+
+    return isinstance(value, str) and re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", value
+    ) is not None
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "projects": [],
     "active_terminal": None,
@@ -52,6 +64,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "editor": {"font_size": 10},
         "external_apps": {"editor_command": ["gvim", "-f"]},
         "terminal": {"status_bar": False},
+        "commands": {"items": []},
     },
     "editor": {"tabs": [], "active_tab": None},
 }
@@ -72,6 +85,7 @@ def new_project_config(
         "path": path,
         "terminals": terminal_names,
         "terminal_commands": {},
+        "terminal_icons": {},
         "last_terminal": terminal_names[0] if terminal_names else None,
         "browsers": [],
         "item_order": [
@@ -110,6 +124,49 @@ def _normalize_external_command(value: Any, fallback: list[str]) -> list[str]:
     ):
         return list(fallback)
     return list(value)
+
+
+def _normalize_extra_commands(value: Any) -> list[dict[str, str]]:
+    """Return at most 32 unique, valid shell launchers in configured order."""
+
+    if not isinstance(value, list):
+        return []
+    commands: list[dict[str, str]] = []
+    labels: set[str] = set()
+    # 2026-08-21: config modificata a mano viene filtrata con le stesse regole
+    # della UI; il primo nome valido conserva la posizione scelta dall'utente.
+    for item in value:
+        if not isinstance(item, dict) or len(commands) >= 32:
+            continue
+        raw_label = item.get("label")
+        label = raw_label.strip() if isinstance(raw_label, str) else ""
+        command = item.get("command")
+        icon = item.get("icon", DEFAULT_EXTRA_COMMAND_ICON)
+        if (
+            not label
+            or len(label) > 80
+            or "\n" in label
+            or "\r" in label
+            or "\0" in label
+            or label.casefold() in labels
+            or not isinstance(command, str)
+            or not command.strip()
+            or len(command) > 4096
+            or "\n" in command
+            or "\r" in command
+            or "\0" in command
+            or not is_extra_command_icon(icon)
+        ):
+            continue
+        try:
+            words = shlex.split(command, posix=True)
+        except ValueError:
+            continue
+        if not words:
+            continue
+        labels.add(label.casefold())
+        commands.append({"label": label, "command": command.strip(), "icon": icon})
+    return commands
 
 
 def _tmux_slug(value: str, maximum: int) -> str:
@@ -226,6 +283,11 @@ class ConfigStore:
                 data["settings"]["terminal"]["status_bar"] = raw_terminal[
                     "status_bar"
                 ]
+            raw_commands = raw_settings.get("commands", {})
+            if isinstance(raw_commands, dict):
+                data["settings"]["commands"]["items"] = _normalize_extra_commands(
+                    raw_commands.get("items")
+                )
         raw_editor = raw.get("editor", {})
         if isinstance(raw_editor, dict):
             known_projects = {project["name"] for project in data["projects"]}
@@ -289,6 +351,15 @@ class ConfigStore:
                     and "\0" not in command
                 ):
                     terminal_commands[terminal_name] = command.strip()
+        terminal_icons: dict[str, str] = {}
+        raw_terminal_icons = raw.get("terminal_icons", {})
+        if isinstance(raw_terminal_icons, dict):
+            for terminal_name, icon_name in raw_terminal_icons.items():
+                if (
+                    terminal_name in terminal_names
+                    and is_extra_command_icon(icon_name)
+                ):
+                    terminal_icons[terminal_name] = icon_name
         last_terminal = raw.get("last_terminal")
         if last_terminal not in terminal_names:
             last_terminal = terminal_names[0] if terminal_names else None
@@ -416,6 +487,7 @@ class ConfigStore:
             "path": str(raw.get("path", "")).strip(),
             "terminals": terminal_names,
             "terminal_commands": terminal_commands,
+            "terminal_icons": terminal_icons,
             "last_terminal": last_terminal,
             "browsers": browsers,
             "item_order": item_order,
