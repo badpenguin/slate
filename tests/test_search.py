@@ -115,18 +115,23 @@ class ProjectSearchTest(unittest.TestCase):
         """Create an inert search surface with observable action callbacks."""
 
         self.viewed: list[str] = []
-        self.edited: list[str] = []
+        self.edited_internal: list[str] = []
+        self.edited_external: list[str] = []
         self.melded: list[str] = []
+        self.close_count = 0
         self.search = ProjectSearch(
             self._ignore_close,
             self.viewed.append,
-            self.edited.append,
+            self.edited_internal.append,
+            self.edited_external.append,
             self._can_meld,
             self.melded.append,
         )
 
     def _ignore_close(self) -> None:
-        """Accept close dispatches irrelevant to component tests."""
+        """Record search dismissal without changing widget visibility."""
+
+        self.close_count += 1
 
     @staticmethod
     def _can_meld(path: str) -> bool:
@@ -174,7 +179,7 @@ class ProjectSearchTest(unittest.TestCase):
         self.assertEqual(self.search.entry.get_text(), "typed manually")
 
     def test_result_shortcuts_dispatch_view_editor_and_meld(self) -> None:
-        """V, E and D act on the focused row and D checks patch availability."""
+        """V, E, M and D act on the focused row with the shared editor mapping."""
 
         result = SearchResult("src/app.py", 4, "needle", ((0, 6),))
         tree_iter = self.search.store.append(
@@ -191,10 +196,13 @@ class ProjectSearchTest(unittest.TestCase):
         with patch.object(self.search, "_load_preview"):
             self.assertTrue(press(Gdk.KEY_v))
             self.assertTrue(press(Gdk.KEY_e))
+            self.assertTrue(press(Gdk.KEY_m))
             self.assertTrue(press(Gdk.KEY_d))
         self.assertEqual(self.viewed, ["src/app.py"])
-        self.assertEqual(self.edited, ["src/app.py"])
+        self.assertEqual(self.edited_internal, ["src/app.py"])
+        self.assertEqual(self.edited_external, ["src/app.py"])
         self.assertEqual(self.melded, ["src/app.py"])
+        self.assertEqual(self.close_count, 1)
 
     def test_result_columns_show_match_left_and_file_location_right(self) -> None:
         """The result hierarchy keeps source text before the compact file location."""

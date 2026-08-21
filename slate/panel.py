@@ -202,7 +202,7 @@ class SCMPanel(Gtk.Box):
         self._attach_status_model(self._new_status_model())
         self.tree = Gtk.TreeView(model=self.filtered_store)
         self.tree.set_headers_visible(False)
-        # 2026-08-16: le azioni V/M/E/A/Spazio appartengono al pannello; anche
+        # 2026-08-16: le azioni V/E/M/A/Spazio appartengono al pannello; anche
         # gli altri caratteri non devono attivare la ricerca incrementale GTK.
         self.tree.set_enable_search(False)
         self.tree.set_tooltip_column(self.COL_TEXT)
@@ -1321,8 +1321,8 @@ class SCMPanel(Gtk.Box):
         switch_branch_item = self._menu_item("Switch branch…", "go-jump", None)
         merge_branch_item = self._menu_item("Merge branch…", "insert-link", None)
         tag_item = self._menu_item("Assign tag…", "bookmark-new", None)
-        # 2026-08-20: D indica Diff ed è l'unico tasto libero comune alle
-        # azioni Meld; M resta riservato all'editor interno e Delete è distinto.
+        # 2026-08-21: D indica Diff e resta distinto da M, ora assegnato
+        # uniformemente all'editor esterno configurato in tutte le viste file.
         meld_item = self._menu_item("Open in Meld", "document-open", Gdk.KEY_d)
         exclude_item = self._menu_item(
             "Exclude repository", "list-remove", None
@@ -1414,10 +1414,10 @@ class SCMPanel(Gtk.Box):
         if not multiple:
             view_item = self._menu_item("View", "document-open", Gdk.KEY_v)
             internal_item = self._menu_item(
-                "Edit in SLATE", "accessories-text-editor", Gdk.KEY_m
+                "Edit in SLATE", "accessories-text-editor", Gdk.KEY_e
             )
             external_item = self._menu_item(
-                "Edit in gVim", "gvim", Gdk.KEY_e
+                "Edit in gVim", "gvim", Gdk.KEY_m
             )
             view_item.connect("activate", self._on_context_view)
             internal_item.connect("activate", self._on_context_edit_internal)
@@ -1581,12 +1581,12 @@ class SCMPanel(Gtk.Box):
                 return True
             self.on_view(status)
             return True
-        if keyval == Gdk.KEY_m:
+        if keyval == Gdk.KEY_e:
             if multiple:
                 return True
             self.on_edit_internal(status)
             return True
-        if keyval == Gdk.KEY_e:
+        if keyval == Gdk.KEY_m:
             if multiple:
                 return True
             self.on_edit_external(status)

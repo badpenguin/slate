@@ -16,7 +16,7 @@ from gi.repository import Gdk, GdkPixbuf, Gtk
 from slate.processes import CommandResult
 from slate.scm.base import FileStatus, RepositoryRef, RepositorySyncStatus
 from slate.scm.git import GitSCM
-from slate.window import SlateWindow, _moved_sequence
+from slate.window import SlateWindow, _CODEX_RESUME_COMMAND, _moved_sequence
 
 
 class WindowActionTest(unittest.TestCase):
@@ -1377,6 +1377,23 @@ class WindowActionTest(unittest.TestCase):
         )
         idle_add.assert_not_called()
         self.assertEqual(config.save.call_count, 2)
+
+    def test_resume_codex_uses_native_bell_per_invocation(self) -> None:
+        """The standard launcher isolates native BEL settings to its terminal."""
+
+        owner = SimpleNamespace(_create_terminal=MagicMock())
+        SlateWindow._on_resume_codex(owner, MagicMock())
+        owner._create_terminal.assert_called_once_with(
+            _CODEX_RESUME_COMMAND,
+            name_prefix="codex",
+        )
+        self.assertTrue(_CODEX_RESUME_COMMAND.startswith("codex resume "))
+        self.assertIn("-c 'notify=[]'", _CODEX_RESUME_COMMAND)
+        self.assertIn("tui.notification_method=\"bel\"", _CODEX_RESUME_COMMAND)
+        self.assertIn(
+            "tui.notification_condition=\"always\"",
+            _CODEX_RESUME_COMMAND,
+        )
 
     def test_custom_command_uses_executable_name_and_preserves_quoting(self) -> None:
         """The command dialog derives ssh-N without rewriting the entered shell line."""

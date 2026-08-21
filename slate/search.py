@@ -315,6 +315,7 @@ class ProjectSearch(Gtk.Box):
         self,
         on_close: Callable[[], None],
         on_view: Callable[[str], None],
+        on_edit_internal: Callable[[str], None],
         on_edit_external: Callable[[str], None],
         can_open_meld: Callable[[str], bool],
         on_open_meld: Callable[[str], None],
@@ -324,6 +325,7 @@ class ProjectSearch(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.on_close = on_close
         self.on_view = on_view
+        self.on_edit_internal = on_edit_internal
         self.on_edit_external = on_edit_external
         self.can_open_meld = can_open_meld
         self.on_open_meld = on_open_meld
@@ -807,18 +809,26 @@ class ProjectSearch(Gtk.Box):
         return self._show_result_menu(None)
 
     def _show_result_menu(self, event: Gdk.EventButton | None) -> bool:
-        """Present View, external editor and path-limited Meld actions."""
+        """Present View, editor and path-limited Meld actions."""
 
         if self.context_result is None:
             return False
         menu = Gtk.Menu()
+        # 2026-08-21: E identifica l'editor integrato in tutte le viste file,
+        # mentre M mantiene uniforme l'accesso all'editor esterno configurato.
         for label, icon, keyval, callback in (
             ("View", "document-open", Gdk.KEY_v, self._on_context_view),
             (
-                "Edit in external editor",
+                "Edit in SLATE",
                 "accessories-text-editor",
                 Gdk.KEY_e,
-                self._on_context_edit,
+                self._on_context_edit_internal,
+            ),
+            (
+                "Edit in external editor",
+                "accessories-text-editor",
+                Gdk.KEY_m,
+                self._on_context_edit_external,
             ),
             ("Open in Meld", "document-open", Gdk.KEY_d, self._on_context_meld),
         ):
@@ -855,7 +865,7 @@ class ProjectSearch(Gtk.Box):
     def _on_tree_key_press(
         self, _tree: Gtk.TreeView, event: Gdk.EventKey
     ) -> bool:
-        """Dispatch V, E and D only for the explicitly focused result."""
+        """Dispatch V, E, M and D only for the explicitly focused result."""
 
         if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
             return False
@@ -867,6 +877,12 @@ class ProjectSearch(Gtk.Box):
             self.on_view(result.path)
             return True
         if keyval == Gdk.KEY_e:
+            self.on_edit_internal(result.path)
+            # 2026-08-21: l'editor integrato vive sotto l'overlay opaco della
+            # ricerca, che va chiuso per rendere visibile il documento aperto.
+            self.on_close()
+            return True
+        if keyval == Gdk.KEY_m:
             self.on_edit_external(result.path)
             return True
         if keyval == Gdk.KEY_d:
@@ -881,7 +897,14 @@ class ProjectSearch(Gtk.Box):
         if self.context_result is not None:
             self.on_view(self.context_result.path)
 
-    def _on_context_edit(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_edit_internal(self, _item: Gtk.MenuItem) -> None:
+        """Open the contextual result in SLATE and dismiss the opaque search."""
+
+        if self.context_result is not None:
+            self.on_edit_internal(self.context_result.path)
+            self.on_close()
+
+    def _on_context_edit_external(self, _item: Gtk.MenuItem) -> None:
         """Open the contextual result with the configured external editor."""
 
         if self.context_result is not None:

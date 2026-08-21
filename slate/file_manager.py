@@ -1055,10 +1055,12 @@ class ProjectFileManager(Gtk.Box):
         if keyval == Gdk.KEY_v and not directory:
             self.on_view(relative)
             return True
-        if keyval == Gdk.KEY_m and not directory:
+        # 2026-08-21: E identifica SLATE e M l'editor esterno in tutte le
+        # superfici file, evitando associazioni diverse fra albero e revisioni.
+        if keyval == Gdk.KEY_e and not directory:
             self.on_edit_internal(relative)
             return True
-        if keyval == Gdk.KEY_e and not directory:
+        if keyval == Gdk.KEY_m and not directory:
             self.on_edit_external(relative)
             return True
         if keyval == Gdk.KEY_r:
@@ -1139,10 +1141,15 @@ class ProjectFileManager(Gtk.Box):
                 (
                     "Edit in SLATE",
                     "accessories-text-editor",
-                    Gdk.KEY_m,
+                    Gdk.KEY_e,
                     self._on_context_edit_internal,
                 ),
-                ("Edit in gVim", "gvim", Gdk.KEY_e, self._on_context_edit_external),
+                (
+                    "Edit in gVim",
+                    "gvim",
+                    Gdk.KEY_m,
+                    self._on_context_edit_external,
+                ),
             ):
                 item = self._menu_item(label, icon, keyval)
                 item.connect("activate", callback)

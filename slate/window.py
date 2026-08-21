@@ -53,6 +53,16 @@ from .watcher import RepoWatcher
 
 _SidebarIdentity = tuple[str, str, str]
 
+# 2026-08-21: il launcher Codex applica le notifiche native alla sola sessione,
+# così SLATE riceve anche le richieste di input senza modifiche globali.
+_CODEX_RESUME_COMMAND = (
+    "codex resume"
+    " -c 'notify=[]'"
+    " -c 'tui.notifications=true'"
+    " -c 'tui.notification_method=\"bel\"'"
+    " -c 'tui.notification_condition=\"always\"'"
+)
+
 
 def _moved_sequence(
     values: Sequence[object], source: object, target: object, before: bool
@@ -268,6 +278,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.project_search = ProjectSearch(
             self._close_project_search,
             self._view_project_file,
+            self._edit_project_file_internal,
             self._edit_project_file_external,
             self._can_open_search_result_meld,
             self._open_search_result_meld,
@@ -2699,9 +2710,12 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.browser_manager.open_page(project["name"], private=True)
 
     def _on_resume_codex(self, _button: Gtk.Widget) -> None:
-        """Create a terminal and immediately open the Codex resume selector."""
+        """Open the Codex resume selector with native BEL notifications."""
 
-        self._create_terminal("codex resume", name_prefix="codex")
+        self._create_terminal(
+            _CODEX_RESUME_COMMAND,
+            name_prefix="codex",
+        )
 
     def _create_terminal(
         self,

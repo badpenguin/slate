@@ -737,12 +737,21 @@ class TerminalManager:
         self._configure_server()
         tmux_session = self.sessions.get(key)
         if tmux_session:
+            # 2026-08-21: gli override nativi seguono `codex resume`; il
+            # prefisso conserva quindi il marcatore Codex nel launcher standard.
+            is_codex_launcher = bool(
+                initial_command
+                and (
+                    initial_command == "codex resume"
+                    or initial_command.startswith("codex resume ")
+                )
+            )
             self._set_metadata(
                 tmux_session,
                 project_name,
                 project_path,
                 terminal_name_value,
-                "Codex" if initial_command == "codex resume" else None,
+                "Codex" if is_codex_launcher else None,
             )
         if initial_command:
             self._feed_initial_command(terminal, initial_command)

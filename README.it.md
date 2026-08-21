@@ -243,8 +243,8 @@ Git worktree e submodule con `.git` in forma di file non sono supportati.
 | Azione                                      | Scorciatoia |
 |---------------------------------------------|-------------|
 | Visualizza con l'applicazione predefinita   | `V`         |
-| Modifica nell'editor interno                | `M`         |
-| Modifica con gVim                           | `E`         |
+| Modifica nell'editor interno                | `E`         |
+| Modifica con gVim                           | `M`         |
 | Aggiungi un file nuovo                      | `A`         |
 | Elimina con conferma                        | `Delete`    |
 | Uniforma le checkbox dei file evidenziati   | `Space`     |
@@ -283,10 +283,10 @@ escluse e limite testuale di 5 MiB.
 
 La lista mostra a sinistra il testo corrispondente e a destra il percorso con
 numero di riga; spostando la selezione, l'anteprima read-only centra la riga nel relativo contesto. Sono
-mostrati al massimo 100 risultati. Dal menu contestuale o con `V`, `E` e `D` è
-possibile rispettivamente aprire il file, modificarlo con l'editor esterno
-configurato o visualizzarne la patch disponibile in Meld. `Esc` chiude la
-ricerca.
+mostrati al massimo 100 risultati. Dal menu contestuale o con `V`, `E`, `M` e
+`D` è possibile rispettivamente aprire il file, modificarlo nell'editor interno
+di SLATE, modificarlo con l'editor esterno configurato o visualizzarne la patch
+disponibile in Meld. `Esc` chiude la ricerca.
 
 Se `rg` non è installato, SLATE continua ad avviarsi normalmente e disabilita
 soltanto questa funzione.

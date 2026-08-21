@@ -240,8 +240,8 @@ Git worktrees and submodules where `.git` is a file are not supported.
 | Action                                 | Shortcut |
 |----------------------------------------|----------|
 | View with the default application      | `V`      |
-| Edit in the built-in editor            | `M`      |
-| Edit with gVim                         | `E`      |
+| Edit in the built-in editor            | `E`      |
+| Edit with gVim                         | `M`      |
 | Add a new file                         | `A`      |
 | Delete with confirmation               | `Delete` |
 | Match checkboxes for highlighted files | `Space`  |
@@ -280,9 +280,9 @@ smart-case matching, and respects ignored files, excluded directories, and the
 
 Results show the matching source line on the left and its relative path and
 line number on the right. Moving the selection centers that line in a read-only contextual preview. At most 100
-results are shown. The context menu and `V`, `E`, and `D` respectively open the
-file, edit it with the configured external editor, or open an available patch
-in Meld. `Esc` closes search.
+results are shown. The context menu and `V`, `E`, `M`, and `D` respectively
+open the file, edit it in SLATE, edit it with the configured external editor,
+or open an available patch in Meld. `Esc` closes search.
 
 When `rg` is unavailable, SLATE still starts normally and disables only this
 feature.

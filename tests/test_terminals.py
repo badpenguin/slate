@@ -205,6 +205,37 @@ class TerminalHelpersTest(unittest.TestCase):
         TerminalManager._feed_initial_command(terminal, "codex resume")
         terminal.feed_child.assert_called_once_with(b"codex resume\n")
 
+    def test_codex_resume_overrides_keep_agent_metadata(self) -> None:
+        """The configured Codex launcher remains labelled after VTE attachment."""
+
+        command = "codex resume -c 'tui.notification_method=\"bel\"'"
+        terminal = MagicMock()
+        owner = SimpleNamespace(
+            spawn_cancellables={"repo/codex-1": object()},
+            initial_commands={"repo/codex-1": command},
+            sessions={"repo/codex-1": "repo--codex-1"},
+            _configure_server=MagicMock(),
+            _set_metadata=MagicMock(),
+            _feed_initial_command=MagicMock(),
+            request_activity_refresh=MagicMock(),
+            on_error=MagicMock(),
+        )
+        TerminalManager._on_spawned(
+            owner,
+            terminal,
+            123,
+            None,
+            ("repo/codex-1", "repo", "/tmp/repo", "codex-1"),
+        )
+        owner._set_metadata.assert_called_once_with(
+            "repo--codex-1",
+            "repo",
+            "/tmp/repo",
+            "codex-1",
+            "Codex",
+        )
+        owner._feed_initial_command.assert_called_once_with(terminal, command)
+
     def test_existing_tmux_session_does_not_receive_persisted_command(self) -> None:
         """A live tmux session is attached without typing its launcher again."""
 

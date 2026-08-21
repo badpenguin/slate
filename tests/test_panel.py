@@ -782,9 +782,9 @@ class SCMPanelTest(unittest.TestCase):
         self.assertEqual(self.panel.checked_statuses(), [tracked])
         self.assertTrue(press(Gdk.KEY_v))
         self.assertEqual(self.viewed, tracked)
-        self.assertTrue(press(Gdk.KEY_m))
-        self.assertEqual(self.edited_internal, tracked)
         self.assertTrue(press(Gdk.KEY_e))
+        self.assertEqual(self.edited_internal, tracked)
+        self.assertTrue(press(Gdk.KEY_m))
         self.assertEqual(self.edited_external, tracked)
         self.assertTrue(press(Gdk.KEY_d))
         self.assertEqual(self.diffed_repository, RepositoryRef(".", "hg"))
@@ -959,8 +959,8 @@ class SCMPanelTest(unittest.TestCase):
 
         for label, icon, keyval in (
             ("Visualizza", "document-open", Gdk.KEY_v),
-            ("Modifica in SLATE", "accessories-text-editor", Gdk.KEY_m),
-            ("Modifica in gVim", "gvim", Gdk.KEY_e),
+            ("Modifica in SLATE", "accessories-text-editor", Gdk.KEY_e),
+            ("Modifica in gVim", "gvim", Gdk.KEY_m),
             ("Aggiungi", "list-add", Gdk.KEY_a),
             ("Annulla aggiunta", "list-remove", None),
             ("Elimina", "edit-delete", Gdk.KEY_Delete),

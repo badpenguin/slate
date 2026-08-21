@@ -272,7 +272,7 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.assertEqual(broken_icon.get_names()[0], "dialog-error")
 
     def test_shortcuts_dispatch_file_actions_and_directory_mutations(self) -> None:
-        """V/M/E stay file-only while R/T/Delete target their valid entries."""
+        """V/E/M stay file-only while R/T/Delete target their valid entries."""
 
         file_iter = next(
             tree_iter
@@ -282,14 +282,15 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.manager.tree.set_cursor(self.manager.store.get_path(file_iter))
         self.assertEqual(self.previewed, "normal.txt")
         self.assertTrue(self._press(Gdk.KEY_v))
-        self.assertTrue(self._press(Gdk.KEY_m))
         self.assertTrue(self._press(Gdk.KEY_e))
+        self.assertEqual(self.edited_internal, "normal.txt")
+        self.assertIsNone(self.edited_external)
+        self.assertTrue(self._press(Gdk.KEY_m))
+        self.assertEqual(self.edited_external, "normal.txt")
         self.assertTrue(self._press(Gdk.KEY_r))
         self.assertFalse(self._press(Gdk.KEY_t))
         self.assertTrue(self._press(Gdk.KEY_Delete))
         self.assertEqual(self.viewed, "normal.txt")
-        self.assertEqual(self.edited_internal, "normal.txt")
-        self.assertEqual(self.edited_external, "normal.txt")
         self.assertEqual(self.renamed, "normal.txt")
         self.assertEqual(self.deleted, "normal.txt")
 
