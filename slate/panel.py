@@ -227,7 +227,7 @@ class SCMPanel(Gtk.Box):
         self.text_renderer = Gtk.CellRendererText()
         self.text_renderer.set_property("xpad", 2)
         self.text_renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
-        column = Gtk.TreeViewColumn("Changes")
+        column = Gtk.TreeViewColumn("Revisions")
         # 2026-08-16: la checkbox resta nella colonna gerarchica originale; si
         # riduce soltanto l'expander via CSS per non alterare allineamento e hitbox.
         column.pack_start(self.toggle_renderer, False)
@@ -606,6 +606,7 @@ class SCMPanel(Gtk.Box):
         self.commit_button = self._action_button(
             "Commit", "document-save-symbolic", self._on_commit_clicked
         )
+        self.commit_button.set_tooltip_text("Commit selected files (Ctrl+Enter)")
         self.commit_button.set_no_show_all(True)
         self.commit_shortcut_label = Gtk.Label(label="Ctrl+Enter")
         self.commit_shortcut_label.get_style_context().add_class("commit-shortcut")
@@ -1320,7 +1321,9 @@ class SCMPanel(Gtk.Box):
         switch_branch_item = self._menu_item("Switch branch…", "go-jump", None)
         merge_branch_item = self._menu_item("Merge branch…", "insert-link", None)
         tag_item = self._menu_item("Assign tag…", "bookmark-new", None)
-        meld_item = self._menu_item("Open in Meld", "document-open", None)
+        # 2026-08-20: D indica Diff ed è l'unico tasto libero comune alle
+        # azioni Meld; M resta riservato all'editor interno e Delete è distinto.
+        meld_item = self._menu_item("Open in Meld", "document-open", Gdk.KEY_d)
         exclude_item = self._menu_item(
             "Exclude repository", "list-remove", None
         )
@@ -1422,6 +1425,18 @@ class SCMPanel(Gtk.Box):
             menu.append(view_item)
             menu.append(internal_item)
             menu.append(external_item)
+            # 2026-08-20: il menu del file espone lo stesso percorso Meld già
+            # usato dal doppio clic, soltanto quando esiste una patch tracciata.
+            if (
+                self.context_status is not None
+                and self.context_status.state
+                not in {"untracked", "added", "removed"}
+            ):
+                meld_item = self._menu_item(
+                    "Open in Meld", "document-open", Gdk.KEY_d
+                )
+                meld_item.connect("activate", self._on_context_file_meld)
+                menu.append(meld_item)
         # 2026-08-16: le operazioni SCM formano un gruppo distinto dalle
         # azioni generiche sul file condivise con il File manager.
         if (
@@ -1530,11 +1545,23 @@ class SCMPanel(Gtk.Box):
 
         if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
             return False
+        keyval = Gdk.keyval_to_lower(event.keyval)
+        tree_path, _column = self.tree.get_cursor()
+        # 2026-08-20: D è contestuale: sulla radice confronta il repository,
+        # sulla riga file limita Meld ai path della singola patch tracciata.
+        if tree_path is not None and keyval == Gdk.KEY_d:
+            tree_iter = self.filtered_store.get_iter(tree_path)
+            kind = self.filtered_store.get_value(tree_iter, self.COL_KIND)
+            repository = self.filtered_store.get_value(
+                tree_iter, self.COL_REPOSITORY
+            )
+            if kind == "repository":
+                self.on_diff(repository, ())
+                return True
         status = self._focused_file_status()
         if status is None:
             return False
         multiple = len(self.selected_statuses()) > 1
-        keyval = Gdk.keyval_to_lower(event.keyval)
         if keyval == Gdk.KEY_space and status.state != "untracked":
             focused_key = self._status_key(status)
             checked = focused_key not in self.checked_paths
@@ -1563,6 +1590,15 @@ class SCMPanel(Gtk.Box):
             if multiple:
                 return True
             self.on_edit_external(status)
+            return True
+        if keyval == Gdk.KEY_d:
+            if multiple:
+                return True
+            if status.state not in {"untracked", "added", "removed"}:
+                self.on_diff(
+                    RepositoryRef(status.repository, status.scm_type),
+                    status.operation_paths(),
+                )
             return True
         if keyval == Gdk.KEY_a:
             selected_new = self.selected_untracked_statuses()
@@ -1644,6 +1680,19 @@ class SCMPanel(Gtk.Box):
 
         if self.context_repository is not None:
             self.on_diff(self.context_repository, ())
+
+    def _on_context_file_meld(self, _item: Gtk.MenuItem) -> None:
+        """Launch Meld for the explicitly targeted tracked file patch."""
+
+        if (
+            self.context_status is not None
+            and self.context_status.state not in {"untracked", "added", "removed"}
+        ):
+            status = self.context_status
+            self.on_diff(
+                RepositoryRef(status.repository, status.scm_type),
+                status.operation_paths(),
+            )
 
     def _on_context_external(self, _item: Gtk.MenuItem) -> None:
         """Launch TortoiseHg rooted at the explicitly clicked repository."""

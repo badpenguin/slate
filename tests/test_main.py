@@ -22,8 +22,8 @@ class AgentDebugBootstrapTest(unittest.TestCase):
         self.assertEqual(clean, arguments)
         self.assertIsNone(directory)
 
-    def test_preflight_requires_tmux_but_not_every_optional_scm(self) -> None:
-        """A Git-only or HG-only setup may start while tmux remains mandatory."""
+    def test_preflight_requires_tmux_but_not_optional_feature_tools(self) -> None:
+        """Git, HG and ripgrep stay optional while tmux remains mandatory."""
 
         def executable(name: str) -> str | None:
             """Expose only tmux to the dependency validator."""

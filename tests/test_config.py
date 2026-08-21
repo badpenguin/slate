@@ -215,7 +215,51 @@ class ConfigStoreTest(unittest.TestCase):
             self.assertEqual(settings["revisions"]["font_size"], 17)
             self.assertEqual(settings["files"]["font_size"], 10)
             self.assertEqual(settings["editor"]["font_size"], 10)
+            self.assertEqual(
+                settings["external_apps"]["editor_command"], ["gvim", "-f"]
+            )
             self.assertTrue(settings["terminal"]["status_bar"])
+
+    def test_external_editor_command_is_normalized_as_an_argument_vector(self) -> None:
+        """Only a non-empty bounded argv list replaces the gVim default."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "settings": {
+                            "external_apps": {
+                                "editor_command": ["code", "--wait"],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                ConfigStore(path).data["settings"]["external_apps"][
+                    "editor_command"
+                ],
+                ["code", "--wait"],
+            )
+
+            path.write_text(
+                json.dumps(
+                    {
+                        "settings": {
+                            "external_apps": {"editor_command": "code --wait"}
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                ConfigStore(path).data["settings"]["external_apps"][
+                    "editor_command"
+                ],
+                ["gvim", "-f"],
+            )
 
     def test_revision_expansion_is_not_loaded_from_disk(self) -> None:
         """Revision branches always start expanded instead of reading config state."""

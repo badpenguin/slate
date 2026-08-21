@@ -26,6 +26,7 @@ class SettingsDialogTest(unittest.TestCase):
 
         self.changes: list[tuple[str, int]] = []
         self.status_changes: list[bool] = []
+        self.external_editor_changes: list[list[str]] = []
         self.parent = Gtk.Window()
         self.dialog = SettingsDialog(
             self.parent,
@@ -33,10 +34,12 @@ class SettingsDialogTest(unittest.TestCase):
                 "revisions": {"font_size": 11},
                 "files": {"font_size": 13},
                 "editor": {"font_size": 15},
+                "external_apps": {"editor_command": ["gvim", "-f"]},
                 "terminal": {"status_bar": False},
             },
             self._record_change,
             self._record_status_change,
+            self._record_external_editor_change,
         )
 
     def tearDown(self) -> None:
@@ -55,6 +58,11 @@ class SettingsDialogTest(unittest.TestCase):
 
         self.status_changes.append(enabled)
 
+    def _record_external_editor_change(self, command: list[str]) -> None:
+        """Record validated external-editor command changes."""
+
+        self.external_editor_changes.append(command)
+
     def test_sections_restore_and_publish_independent_values(self) -> None:
         """Revisioni, File and Editor retain distinct values and callbacks."""
 
@@ -68,6 +76,18 @@ class SettingsDialogTest(unittest.TestCase):
         self.assertFalse(self.dialog.status_bar_switch.get_active())
         self.dialog.status_bar_switch.set_active(True)
         self.assertEqual(self.status_changes, [True])
+        self.assertEqual(self.dialog.external_editor_entry.get_text(), "gvim -f")
+        self.dialog.external_editor_entry.set_text("code --wait")
+        self.dialog.external_editor_entry.emit("activate")
+        self.assertEqual(self.external_editor_changes, [["code", "--wait"]])
+
+    def test_invalid_external_editor_command_restores_previous_value(self) -> None:
+        """An incomplete quoted command never reaches persistent settings."""
+
+        self.dialog.external_editor_entry.set_text("editor '")
+        self.dialog.external_editor_entry.emit("activate")
+        self.assertEqual(self.dialog.external_editor_entry.get_text(), "gvim -f")
+        self.assertEqual(self.external_editor_changes, [])
 
     def test_fixed_browser_viewports_are_not_exposed_as_settings(self) -> None:
         """The settings sidebar omits the non-editable browser catalog."""
@@ -79,6 +99,7 @@ class SettingsDialogTest(unittest.TestCase):
             for child in content.get_children()
             if isinstance(child, Gtk.Stack)
         )
+        self.assertIsNotNone(stack.get_child_by_name("external-apps"))
         self.assertIsNone(stack.get_child_by_name("browser"))
 
 

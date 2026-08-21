@@ -231,9 +231,11 @@ class BrowserPage(Gtk.Box):
 
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         toolbar.get_style_context().add_class("browser-toolbar")
-        self.back_button = self._icon_button("go-previous", "Back")
-        self.forward_button = self._icon_button("go-next", "Forward")
-        self.reload_button = self._icon_button("view-refresh", "Reload")
+        self.back_button = self._icon_button("go-previous", "Back (Alt+Left)")
+        self.forward_button = self._icon_button("go-next", "Forward (Alt+Right)")
+        self.reload_button = self._icon_button(
+            "view-refresh", "Reload (F5 / Ctrl+R)"
+        )
         self.back_button.connect("clicked", self._on_back_clicked)
         self.forward_button.connect("clicked", self._on_forward_clicked)
         self.reload_button.connect("clicked", self._on_reload_clicked)
@@ -245,6 +247,9 @@ class BrowserPage(Gtk.Box):
         self.development_menu = Gtk.Menu()
         self.hard_reload_item = Gtk.MenuItem(
             label="Reload without cache"
+        )
+        self.hard_reload_item.set_tooltip_text(
+            "Reload without cache (Ctrl+Shift+R)"
         )
         self.clear_site_data_item = Gtk.MenuItem(
             label="Clear site data (excluding cookies)…"
@@ -278,6 +283,7 @@ class BrowserPage(Gtk.Box):
 
         self.uri_entry = Gtk.Entry()
         self.uri_entry.set_placeholder_text("Enter URL")
+        self.uri_entry.set_tooltip_text("Location (Ctrl+L)")
         self.uri_entry.set_activates_default(False)
         self.uri_entry.connect("activate", self._on_uri_activated)
         toolbar.pack_start(self.uri_entry, True, True, 0)
@@ -322,7 +328,9 @@ class BrowserPage(Gtk.Box):
                 str(Path(__file__).with_name("developer-tools.svg"))
             )
         )
-        self.inspector_button.set_tooltip_text("Developer tools")
+        self.inspector_button.set_tooltip_text(
+            "Developer tools (F12 / Ctrl+Shift+I)"
+        )
         self.inspector_button.get_accessible().set_name(
             "Developer tools"
         )
@@ -354,6 +362,9 @@ class BrowserPage(Gtk.Box):
         )
         self.web_view.connect("decide-policy", self._on_decide_policy)
         self.web_view.connect("create", self._on_create)
+        self.web_view.connect(
+            "context-menu-dismissed", self._on_context_menu_dismissed
+        )
         # 2026-08-17: il contenitore dedicato forza la misura solo nella preview;
         # in Desktop lascia invece alla WebView l'intera allocazione disponibile.
         self.viewport_stage = _ResponsiveViewport()
@@ -372,7 +383,7 @@ class BrowserPage(Gtk.Box):
         self.exit_responsive_button.set_margin_end(12)
         self.exit_responsive_button.set_no_show_all(True)
         self.exit_responsive_button.set_tooltip_text(
-            "Exit Responsive mode"
+            "Exit Responsive mode (Esc)"
         )
         self.exit_responsive_button.get_style_context().add_class(
             "browser-responsive-exit"
@@ -401,6 +412,24 @@ class BrowserPage(Gtk.Box):
         button.set_tooltip_text(tooltip)
         button.get_accessible().set_name(tooltip)
         return button
+
+    def _on_context_menu_dismissed(self, _web_view: object) -> None:
+        """Persist a possible native context-menu copy outside WebKit."""
+
+        if not self.entry.private:
+            return
+        # 2026-08-21: il profilo effimero può perdere il proprietario X11 degli
+        # appunti quando la WebView viene nascosta; Gtk chiede al clipboard
+        # manager di conservare tutti i formati senza trasformarli in solo testo.
+        GLib.idle_add(self._store_clipboard)
+
+    def _store_clipboard(self) -> bool:
+        """Ask the desktop clipboard manager to retain WebKit's current data."""
+
+        clipboard = self.web_view.get_clipboard(Gdk.SELECTION_CLIPBOARD)
+        if clipboard is not None:
+            clipboard.store()
+        return GLib.SOURCE_REMOVE
 
     @property
     def reference(self) -> BrowserRef:
@@ -837,12 +866,12 @@ class BrowserPage(Gtk.Box):
             self.spinner.show()
             self.spinner.start()
             icon_name = "process-stop"
-            tooltip = "Stop loading"
+            tooltip = "Stop loading (Esc)"
         else:
             self.spinner.stop()
             self.spinner.hide()
             icon_name = "view-refresh"
-            tooltip = "Reload"
+            tooltip = "Reload (F5 / Ctrl+R)"
         image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
         image.show()
         self.reload_button.set_image(image)
@@ -1205,6 +1234,18 @@ class BrowserManager:
                 return False
         elif control and keyval == Gdk.KEY_w:
             self.close_page(page.reference)
+        elif page.entry.private and (
+            (control and keyval == Gdk.KEY_c)
+            or (
+                control
+                and event.keyval in (Gdk.KEY_Insert, Gdk.KEY_KP_Insert)
+            )
+        ):
+            # 2026-08-21: il salvataggio avviene nell'idle successivo, dopo che
+            # WebKit ha eseguito la copia nativa; l'evento deve proseguire fino
+            # alla WebView affinché Ctrl+C conservi la sua semantica normale.
+            GLib.idle_add(page._store_clipboard)
+            return False
         else:
             return False
         return True

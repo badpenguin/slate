@@ -22,42 +22,88 @@ from slate.window import SlateWindow, _moved_sequence
 class WindowActionTest(unittest.TestCase):
     """Verify high-level SCM actions independently from GTK window startup."""
 
-    def test_browser_title_is_escaped_for_the_markup_tooltip_column(self) -> None:
-        """The complete title remains safe when the sidebar text is ellipsized."""
+    def test_ctrl_shift_f_precedes_contextual_editor_shortcuts(self) -> None:
+        """Global project search consumes its accelerator before child managers."""
 
-        tree_iter = object()
-        project = {"browsers": []}
-        config = SimpleNamespace(
-            find_project=MagicMock(return_value=project),
-            save=MagicMock(),
+        owner = SimpleNamespace(_show_project_search=MagicMock())
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_f,
+            state=(
+                Gdk.ModifierType.CONTROL_MASK
+                | Gdk.ModifierType.SHIFT_MASK
+            ),
+        )
+        self.assertTrue(SlateWindow._on_key_press(owner, None, event))
+        owner._show_project_search.assert_called_once_with()
+
+    def test_missing_ripgrep_blocks_only_project_search(self) -> None:
+        """An unavailable optional search tool reports locally without startup impact."""
+
+        owner = SimpleNamespace(
+            search_available=False,
+            _show_error=MagicMock(),
+        )
+        SlateWindow._show_project_search(owner)
+        owner._show_error.assert_called_once_with(
+            "Project search is unavailable: install ripgrep (rg) to enable it."
+        )
+
+    def test_search_result_uses_most_specific_repository_snapshot(self) -> None:
+        """A nested result cannot accidentally resolve to its ancestor status."""
+
+        root_repository = RepositoryRef(".", "git")
+        nested_repository = RepositoryRef("nested", "hg")
+        root_status = FileStatus(
+            "nested/file.py", "modified", repository=".", scm_type="git"
+        )
+        nested_status = FileStatus(
+            "file.py", "modified", repository="nested", scm_type="hg"
         )
         owner = SimpleNamespace(
-            COL_TEXT=SlateWindow.COL_TEXT,
-            COL_TOOLTIP=SlateWindow.COL_TOOLTIP,
-            project_store=MagicMock(),
-            browser_manager=SimpleNamespace(
-                serialized_project=MagicMock(return_value=[]),
-            ),
-            config=config,
-            _find_sidebar_iter=MagicMock(return_value=tree_iter),
+            active_project_name="workspace",
+            repositories_by_project={
+                "workspace": {root_repository, nested_repository}
+            },
+            snapshots={
+                ("workspace", root_repository): ([root_status], "main"),
+                ("workspace", nested_repository): ([nested_status], "default"),
+            },
+            _repository_path_length=SlateWindow._repository_path_length,
         )
-        page = SimpleNamespace(
-            project_name="repo",
-            identifier="browser-1",
-            entry=SimpleNamespace(display_title="Articoli & Pagine"),
-            uri="https://example.test/post.php?post=10087&action=edit",
+        self.assertEqual(
+            SlateWindow._search_result_status(owner, "nested/file.py"),
+            (nested_repository, nested_status),
         )
 
-        SlateWindow._on_browser_state_changed(owner, page)
+    def test_search_meld_dispatches_only_eligible_tracked_status(self) -> None:
+        """Search launches Meld with move endpoints but rejects added files."""
 
-        owner.project_store.set.assert_called_once_with(
-            tree_iter,
-            SlateWindow.COL_TEXT,
-            "Articoli & Pagine",
-            SlateWindow.COL_TOOLTIP,
-            "Articoli &amp; Pagine",
+        repository = RepositoryRef(".", "git")
+        moved = FileStatus(
+            "new.py",
+            "moved",
+            repository=".",
+            source_path="old.py",
+            scm_type="git",
         )
-        config.save.assert_not_called()
+        owner = SimpleNamespace(
+            _search_result_status=MagicMock(return_value=(repository, moved)),
+            _repository_scm=MagicMock(return_value=object()),
+            _open_diff=MagicMock(),
+        )
+        self.assertTrue(
+            SlateWindow._can_open_search_result_meld(owner, "new.py")
+        )
+        SlateWindow._open_search_result_meld(owner, "new.py")
+        owner._open_diff.assert_called_once_with(repository, ("old.py", "new.py"))
+
+        added = FileStatus("new.py", "added", repository=".", scm_type="git")
+        owner._search_result_status.return_value = (repository, added)
+        self.assertFalse(
+            SlateWindow._can_open_search_result_meld(owner, "new.py")
+        )
+        SlateWindow._open_search_result_meld(owner, "new.py")
+        owner._open_diff.assert_called_once_with(repository, ("old.py", "new.py"))
 
     def test_sequence_move_rejects_invalid_and_unchanged_positions(self) -> None:
         """The shared reorder primitive returns only effective stable moves."""
@@ -244,6 +290,38 @@ class WindowActionTest(unittest.TestCase):
         self.assertEqual(owner.project_drag_candidate[0], ("project", "repo", ""))
         tree.get_selection().select_path.assert_not_called()
 
+    def test_editor_row_double_click_reveals_it_in_files(self) -> None:
+        """Double-clicking a sidebar editor switches to Files and locates it."""
+
+        store = Gtk.TreeStore(str, str, str, str, bool, str, bool)
+        tree_iter = store.append(
+            None,
+            ["app.py", "editor", "project", "src/app.py", False, "", False],
+        )
+        path = store.get_path(tree_iter)
+        tree = MagicMock()
+        tree.get_path_at_pos.return_value = (path, object(), 0, 0)
+        owner = SimpleNamespace(
+            project_drag_candidate=None,
+            project_store=store,
+            project_expander_column=object(),
+            right_notebook=MagicMock(),
+            file_manager=MagicMock(),
+            COL_KIND=SlateWindow.COL_KIND,
+            COL_ITEM=SlateWindow.COL_ITEM,
+        )
+        event = SimpleNamespace(
+            button=1,
+            state=Gdk.ModifierType(0),
+            type=Gdk.EventType.DOUBLE_BUTTON_PRESS,
+            x=24,
+            y=12,
+        )
+
+        self.assertTrue(SlateWindow._on_tree_button(owner, tree, event))
+        owner.right_notebook.set_current_page.assert_called_once_with(1)
+        owner.file_manager.reveal_path.assert_called_once_with("src/app.py")
+
     def test_ctrl_drag_uses_gtk_copy_protocol_for_a_real_reorder_target(self) -> None:
         """GTK's Ctrl action remains acceptable while SLATE shows the drop marker."""
 
@@ -378,11 +456,11 @@ class WindowActionTest(unittest.TestCase):
     def test_revision_count_is_rendered_on_the_native_tab_label(self) -> None:
         """The File page can still expose the active project's visible changes."""
 
-        owner = SimpleNamespace(changes_tab=Gtk.Label(label="Changes"))
+        owner = SimpleNamespace(changes_tab=Gtk.Label(label="Revisions"))
         SlateWindow._set_revision_count(owner, 7)
-        self.assertEqual(owner.changes_tab.get_text(), "Changes (7)")
+        self.assertEqual(owner.changes_tab.get_text(), "Revisions (7)")
         SlateWindow._set_revision_count(owner, 0)
-        self.assertEqual(owner.changes_tab.get_text(), "Changes")
+        self.assertEqual(owner.changes_tab.get_text(), "Revisions")
 
     def test_revision_tab_count_is_mirrored_on_active_project_row(self) -> None:
         """The sidebar reuses the received tab count without changing identity."""
@@ -759,6 +837,7 @@ class WindowActionTest(unittest.TestCase):
                     "revisions": {"font_size": 10},
                     "files": {"font_size": 10},
                     "editor": {"font_size": 10},
+                    "external_apps": {"editor_command": ["gvim", "-f"]},
                     "terminal": {"status_bar": False},
                 }
             },
@@ -788,6 +867,54 @@ class WindowActionTest(unittest.TestCase):
         self.assertTrue(config.data["settings"]["terminal"]["status_bar"])
         owner.terminals.set_status_bar_enabled.assert_called_once_with(True)
         config.save.assert_called_once_with()
+
+    def test_external_editor_setting_persists_only_valid_changed_argv(self) -> None:
+        """The editor command remains shell-free and avoids redundant saves."""
+
+        config = SimpleNamespace(
+            data={
+                "settings": {
+                    "external_apps": {"editor_command": ["gvim", "-f"]},
+                }
+            },
+            save=MagicMock(),
+        )
+        owner = SimpleNamespace(config=config)
+        SlateWindow._update_external_editor_setting(owner, ["code", "--wait"])
+        self.assertEqual(
+            config.data["settings"]["external_apps"]["editor_command"],
+            ["code", "--wait"],
+        )
+        config.save.assert_called_once_with()
+        config.save.reset_mock()
+        SlateWindow._update_external_editor_setting(owner, ["code", "--wait"])
+        SlateWindow._update_external_editor_setting(owner, [])
+        config.save.assert_not_called()
+
+    def test_external_editor_launch_appends_the_safe_absolute_path(self) -> None:
+        """The configured argv receives the file path without shell interpolation."""
+
+        project = {"name": "repo", "path": "/tmp/repo"}
+        config = SimpleNamespace(
+            data={
+                "settings": {
+                    "external_apps": {"editor_command": ["code", "--wait"]},
+                }
+            },
+            find_project=MagicMock(return_value=project),
+        )
+        owner = SimpleNamespace(
+            active_project_name="repo",
+            config=config,
+            _project_file_path=MagicMock(return_value="/tmp/repo/file name.py"),
+            _show_file_error=MagicMock(),
+        )
+        with patch("slate.window.spawn_detached") as spawn:
+            SlateWindow._edit_project_file_external(owner, "file name.py")
+        spawn.assert_called_once_with(
+            ("code", "--wait", "/tmp/repo/file name.py"),
+            cwd="/tmp/repo",
+        )
 
     def test_editor_state_persists_only_when_it_changes(self) -> None:
         """Editor-row references update config without redundant writes."""

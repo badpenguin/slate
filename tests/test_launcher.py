@@ -12,8 +12,8 @@ from slate import launcher
 class DetachedLauncherTest(unittest.TestCase):
     """Verify foreground selection and terminal descriptor separation."""
 
-    def test_preflight_requires_tmux_but_not_optional_scm_tools(self) -> None:
-        """A setup without SCM executables may pass the detached preflight."""
+    def test_preflight_requires_tmux_but_not_optional_feature_tools(self) -> None:
+        """A setup without SCM or search executables may pass preflight."""
 
         def _find_tmux_only(name: str) -> str | None:
             """Expose only the mandatory tmux executable to the preflight."""

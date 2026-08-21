@@ -168,3 +168,27 @@ notebook tab button {
 .preview-title {
     font-weight: bold;
 }
+
+/* 2026-08-20: una superficie completamente opaca mantiene viva la workbench
+ * sottostante senza confondere i risultati con terminali e pannelli coperti. */
+.project-search {
+    background-color: @theme_base_color;
+}
+
+.project-search-toolbar {
+    padding: 7px 10px;
+    background-color: shade(@theme_base_color, 0.97);
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.16);
+}
+
+.project-search-status {
+    color: alpha(@theme_fg_color, 0.68);
+}
+
+.project-search-preview-title {
+    padding: 7px 10px;
+    font-weight: bold;
+    background-color: shade(@theme_base_color, 0.97);
+    border-top: 1px solid alpha(@theme_fg_color, 0.16);
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.16);
+}

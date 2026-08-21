@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import sys
 from typing import Callable, Sequence
 
@@ -37,6 +38,7 @@ from .scm.base import FileStatus, RepositoryRef, RepositorySyncStatus, SCM
 from .scm.detect import is_normal_repository
 from .scm.git import GitSCM
 from .scm.hg import MercurialSCM
+from .search import ProjectSearch
 from .settings import SettingsDialog
 from .terminals import (
     OrphanSession,
@@ -134,6 +136,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.attention_terminals: set[Gtk.Widget] = set()
         self.browser_bell_timeout_id: int | None = None
         self.browser_bell_project_name: str | None = None
+        # 2026-08-20: ripgrep abilita soltanto la ricerca progetto; la sua
+        # assenza non deve impedire terminali, editor e SCM di avviarsi.
+        self.search_available = shutil.which("rg") is not None
         self.project_file_operations = ProjectFileOperations()
         # 2026-08-16: un asset SLATE dedicato mantiene la campanella colorata e
         # leggibile anche quando il tema offre soltanto icone symbolic monocrome.
@@ -229,7 +234,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.right_notebook = Gtk.Notebook()
         self.right_notebook.set_tab_pos(Gtk.PositionType.TOP)
         self.right_notebook.set_scrollable(False)
-        self.changes_tab = Gtk.Label(label="Changes")
+        self.changes_tab = Gtk.Label(label="Revisions")
         files_tab = Gtk.Label(label="Files")
         # 2026-08-16: margini sulle label aumentano l'area cliccabile verticale
         # conservando bordi, stati e rendering nativi del GtkNotebook.
@@ -258,6 +263,18 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.preview.set_halign(Gtk.Align.START)
         self.preview.set_valign(Gtk.Align.FILL)
         self.content_overlay.add_overlay(self.preview)
+        # 2026-08-20: la ricerca è una superficie opaca sopra tutte e tre le
+        # colonne, così terminali ed editor vivi restano montati ma inaccessibili.
+        self.project_search = ProjectSearch(
+            self._close_project_search,
+            self._view_project_file,
+            self._edit_project_file_external,
+            self._can_open_search_result_meld,
+            self._open_search_result_meld,
+        )
+        self.project_search.set_halign(Gtk.Align.FILL)
+        self.project_search.set_valign(Gtk.Align.FILL)
+        self.content_overlay.add_overlay(self.project_search)
         self.outer_paned.connect("notify::position", self._update_preview_geometry)
         self.inner_paned.connect("notify::position", self._update_preview_geometry)
         self.content_overlay.connect("size-allocate", self._update_preview_geometry)
@@ -269,6 +286,8 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._on_terminal_exited,
             self._update_terminal_attention,
             self._queue_browser_bell_reload,
+            self._show_project_search,
+            self.search_available,
             bool(settings["terminal"]["status_bar"]),
         )
         self.connect("notify::is-active", self._on_window_activity_changed)
@@ -287,6 +306,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         # keep startup selection blocked until those queued events are drained.
         GLib.idle_add(self._finish_inactive_startup)
         self.preview.hide()
+        self.project_search.hide()
         self.empty_label.set_visible(not bool(self.config.data["projects"]))
         if self.config.error:
             GLib.idle_add(self._show_error, self.config.error)
@@ -326,16 +346,26 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._on_add_private_browser,
             icon_path=Path(__file__).with_name("incognito.svg"),
         )
+        search = self._header_action_button(
+            "Project Search", "edit-find", self._on_project_search
+        )
+        search.set_tooltip_text("Project Search (Ctrl+Shift+F)")
         add_terminal.set_sensitive(False)
         add_command.set_sensitive(False)
         resume_codex.set_sensitive(False)
         add_browser.set_sensitive(False)
         add_private_browser.set_sensitive(False)
+        search.set_sensitive(False)
+        if not self.search_available:
+            search.set_tooltip_text(
+                "Project Search (Ctrl+Shift+F) — unavailable: missing ripgrep (rg)"
+            )
         self.add_terminal_button = add_terminal
         self.add_command_button = add_command
         self.resume_codex_button = resume_codex
         self.add_browser_button = add_browser
         self.add_private_browser_button = add_private_browser
+        self.search_button = search
         header.pack_start(add_project)
         # 2026-08-18: the separators expose the three action groups requested by
         # the user without adding another toolbar container or changing behavior.
@@ -364,6 +394,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         menu.show_all()
         overflow.set_popup(menu)
         header.pack_end(overflow)
+        header.pack_end(search)
         return header
 
     def _on_settings(self, _item: Gtk.MenuItem) -> None:
@@ -374,6 +405,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.config.data["settings"],
             self._update_font_setting,
             self._update_tmux_status_setting,
+            self._update_external_editor_setting,
         )
         dialog.show_all()
 
@@ -399,6 +431,33 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         self.config.data["settings"]["terminal"]["status_bar"] = enabled
         self.terminals.set_status_bar_enabled(enabled)
+        self.config.save()
+
+    def _update_external_editor_setting(self, command: list[str]) -> None:
+        """Persist one validated external-editor argument vector."""
+
+        if (
+            not command
+            or len(command) > 32
+            or any(
+                not isinstance(argument, str)
+                or not argument
+                or len(argument) > 4096
+                or "\0" in argument
+                for argument in command
+            )
+        ):
+            return
+        if (
+            self.config.data["settings"]["external_apps"]["editor_command"]
+            == command
+        ):
+            return
+        # 2026-08-20: persistere argv separati mantiene modificabile l'editor
+        # senza interpretare metacaratteri o concatenare il path in una shell.
+        self.config.data["settings"]["external_apps"]["editor_command"] = list(
+            command
+        )
         self.config.save()
 
     def _persist_editor_state(
@@ -1505,6 +1564,8 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _show_inactive_workspace(self) -> None:
         """Leave central content blank and disable project-specific controls."""
 
+        if hasattr(self, "project_search"):
+            self._close_project_search()
         self.active_project_name = None
         self.active_terminal_name = None
         self.active_editor_ref = None
@@ -1521,6 +1582,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         add_private_browser_button = getattr(self, "add_private_browser_button", None)
         if add_private_browser_button is not None:
             add_private_browser_button.set_sensitive(False)
+        search_button = getattr(self, "search_button", None)
+        if search_button is not None:
+            search_button.set_sensitive(False)
         self.right_notebook.set_sensitive(False)
         self.file_manager.clear_project()
 
@@ -1761,6 +1825,8 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         self._close_preview()
         project_changed = self.active_project_name != project["name"]
+        if project_changed and hasattr(self, "project_search"):
+            self._close_project_search()
         valid_terminal = (
             terminal_name_value
             if terminal_name_value and terminal_name_value in project["terminals"]
@@ -1785,6 +1851,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         add_private_browser_button = getattr(self, "add_private_browser_button", None)
         if add_private_browser_button is not None:
             add_private_browser_button.set_sensitive(True)
+        search_button = getattr(self, "search_button", None)
+        if search_button is not None:
+            search_button.set_sensitive(bool(getattr(self, "search_available", False)))
         self.right_notebook.set_sensitive(True)
         if valid_terminal:
             if show_terminal:
@@ -1900,6 +1969,19 @@ class SlateWindow(Gtk.ApplicationWindow):
                 # cambiare terminale, editor o progetto attivo.
                 return True
             tree.get_selection().select_path(path)
+            if (
+                event.button == 1
+                and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS
+                and kind == "editor"
+            ):
+                # 2026-08-20: il doppio clic sulla riga editor collega il file
+                # centrale al browser Files senza cambiare filtri o ricrearlo.
+                self.right_notebook.set_current_page(1)
+                relative_path = self.project_store.get_value(
+                    tree_iter, self.COL_ITEM
+                )
+                self.file_manager.reveal_path(relative_path)
+                return True
             if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS and kind == "project":
                 return True
             if event.button == 3:
@@ -2214,6 +2296,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             menu.append(remove_item)
         elif kind == "terminal":
             rename_item = Gtk.MenuItem(label="Rename")
+            rename_item.set_tooltip_text("Rename terminal (F2)")
             close_item = Gtk.MenuItem(label="Close")
             rename_item.connect("activate", self._prompt_terminal_rename)
             close_item.connect("activate", self._on_close_terminal)
@@ -2265,6 +2348,26 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _on_key_press(self, _widget: Gtk.Widget, event: Gdk.EventKey) -> bool:
         """Close previews or handle global shortcuts while preserving tree arrows."""
 
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if (
+            Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_f
+            and modifiers
+            == (
+                Gdk.ModifierType.CONTROL_MASK
+                | Gdk.ModifierType.SHIFT_MASK
+            )
+        ):
+            # 2026-08-20: la ricerca progetto precede l'editor perché il suo
+            # gestore storico considera Ctrl+Shift+F equivalente a Ctrl+F.
+            self._show_project_search()
+            return True
+        if (
+            event.keyval == Gdk.KEY_Escape
+            and hasattr(self, "project_search")
+            and self.project_search.get_visible()
+        ):
+            self._close_project_search()
+            return True
         if self.browser_manager.handle_key(event):
             return True
         if self.editor_workspace.handle_key(event):
@@ -2279,6 +2382,35 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._prompt_terminal_rename()
             return True
         return False
+
+    def _on_project_search(self, _button: Gtk.Widget) -> None:
+        """Open project-content search from the HeaderBar action."""
+
+        self._show_project_search()
+
+    def _show_project_search(self) -> None:
+        """Open or refocus the ephemeral search for the active project."""
+
+        if not self.search_available:
+            self._show_error(
+                "Project search is unavailable: install ripgrep (rg) to enable it."
+            )
+            return
+        project = self.config.find_project(self.active_project_name or "")
+        if project is None:
+            return
+        if self.project_search.get_visible():
+            self.project_search.focus_query()
+            return
+        self._close_preview()
+        self.project_search.open(project["name"], project["path"])
+
+    def _close_project_search(self) -> None:
+        """Cancel project search and reveal the unchanged workbench below it."""
+
+        if not hasattr(self, "project_search"):
+            return
+        self.project_search.dismiss()
 
     def _prompt_terminal_rename(self, *_args: object) -> None:
         """Request a terminal session name in a modal text-entry dialog."""
@@ -2644,7 +2776,7 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _set_revision_count(self, count: int) -> None:
         """Mirror the received active-project count on its tab and sidebar row."""
 
-        self.changes_tab.set_text(f"Changes ({count})" if count else "Changes")
+        self.changes_tab.set_text(f"Revisions ({count})" if count else "Revisions")
         project_name = getattr(self, "active_project_name", None)
         if not project_name:
             return
@@ -3229,19 +3361,22 @@ class SlateWindow(Gtk.ApplicationWindow):
         self._select_tree_row(project["name"], relative_path, "editor")
 
     def _edit_project_file_external(self, relative_path: str) -> None:
-        """Open one safe project file in a new default gVim window."""
+        """Open one safe project file with the configured external editor."""
 
         path = self._project_file_path(relative_path)
         project = self.config.find_project(self.active_project_name or "")
         if path is None or project is None:
             return
         try:
-            # 2026-08-16: -f mantiene il processo associato alla nuova finestra
-            # senza usare il server gVim di un'altra sessione già aperta.
-            spawn_detached(("gvim", "-f", path), cwd=project["path"])
+            command = self.config.data["settings"]["external_apps"][
+                "editor_command"
+            ]
+            # 2026-08-20: il path è sempre l'ultimo argomento separato e non può
+            # modificare il comando configurato tramite interpretazione shell.
+            spawn_detached((*command, path), cwd=project["path"])
         except (GLib.Error, OSError) as error:
             self._show_file_error(
-                f"Unable to open {relative_path} with gVim: {error}"
+                f"Unable to open {relative_path} with the external editor: {error}"
             )
 
     def _delete_status(self, status: FileStatus) -> None:
@@ -3703,6 +3838,59 @@ class SlateWindow(Gtk.ApplicationWindow):
         except GLib.Error as error:
             self.panel.show_error(f"Failed to start Meld: {error}")
 
+    def _search_result_status(
+        self, workspace_path: str
+    ) -> tuple[RepositoryRef, FileStatus] | None:
+        """Resolve a search path to its most specific cached repository status."""
+
+        project_name = self.active_project_name or ""
+        repositories = self.repositories_by_project.get(project_name, set())
+        owners = [
+            repository
+            for repository in repositories
+            if repository.path == "."
+            or workspace_path == repository.path
+            or workspace_path.startswith(f"{repository.path}/")
+        ]
+        if not owners:
+            return None
+        repository = max(owners, key=self._repository_path_length)
+        repository_path = (
+            workspace_path
+            if repository.path == "."
+            else workspace_path[len(repository.path):].strip("/")
+        )
+        snapshot = self.snapshots.get((project_name, repository))
+        if snapshot is None:
+            return None
+        statuses, _branch = snapshot
+        status = next(
+            (item for item in statuses if item.path == repository_path), None
+        )
+        return (repository, status) if status is not None else None
+
+    def _can_open_search_result_meld(self, workspace_path: str) -> bool:
+        """Return whether a search result has a tracked Meld-compatible patch."""
+
+        resolved = self._search_result_status(workspace_path)
+        return bool(
+            resolved is not None
+            and resolved[1].state not in {"untracked", "added", "removed"}
+            and self._repository_scm(resolved[0]) is not None
+        )
+
+    def _open_search_result_meld(self, workspace_path: str) -> None:
+        """Launch path-limited Meld for one eligible search result."""
+
+        resolved = self._search_result_status(workspace_path)
+        if (
+            resolved is None
+            or resolved[1].state in {"untracked", "added", "removed"}
+        ):
+            return
+        repository, status = resolved
+        self._open_diff(repository, status.operation_paths())
+
     def _open_external(self, repository: RepositoryRef) -> None:
         """Launch TortoiseHg using the contextual repository root."""
 
@@ -3947,6 +4135,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Release monitors and timers, then destroy the sole window."""
 
         self._close_preview()
+        self._close_project_search()
         self._stop_unattended_verification()
         if self.browser_bell_timeout_id is not None:
             GLib.source_remove(self.browser_bell_timeout_id)

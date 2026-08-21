@@ -7,7 +7,7 @@ from typing import Callable
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import Gdk, Gtk  # noqa: E402
 
 from .git_credentials import credential_environment
 from .processes import CommandResult
@@ -607,6 +607,26 @@ class RepositoryMergeBranchDialog(_BranchChoiceDialog):
         self.merge_result: CommandResult | None = None
         self.meld_button = self.add_button("Open in Meld", Gtk.ResponseType.APPLY)
         self.meld_button.set_no_show_all(True)
+        # 2026-08-20: D mantiene coerente l'accesso a Meld anche nel solo stato
+        # della modale in cui i conflitti rendono realmente disponibile l'azione.
+        self.meld_button.set_tooltip_text("Open in Meld (D)")
+        self.connect("key-press-event", self._on_meld_key_press)
+
+    def _on_meld_key_press(
+        self, _dialog: Gtk.Dialog, event: Gdk.EventKey
+    ) -> bool:
+        """Dispatch D only while conflict handling visibly offers Meld."""
+
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if (
+            modifiers == Gdk.ModifierType(0)
+            and Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_d
+            and self.meld_button.get_visible()
+            and self.meld_button.get_sensitive()
+        ):
+            self.response(Gtk.ResponseType.APPLY)
+            return True
+        return False
 
     def _begin(self) -> None:
         """Require no merge and clean tracked state before loading sources."""

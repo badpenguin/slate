@@ -1,12 +1,13 @@
 """Workflow tests for simple explicit repository-action dialogs."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk
+from gi.repository import Gdk, Gtk
 
 from slate.repository_actions import (
     RepositoryCreateBranchDialog,
@@ -175,7 +176,12 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self._complete(4, stderr="merge conflict", returncode=1)
         self._complete(5, "conflict.py\0")
         self.assertEqual(dialog.phase_label.get_text(), "Merge conflicts")
-        dialog._on_response(dialog, Gtk.ResponseType.APPLY)
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_d,
+            state=Gdk.ModifierType(0),
+        )
+        self.assertEqual(dialog.meld_button.get_tooltip_text(), "Open in Meld (D)")
+        self.assertTrue(dialog._on_meld_key_press(dialog, event))
         self.assertEqual(
             self.calls[6][0],
             ["git", "mergetool", "--no-prompt", "--tool=meld"],

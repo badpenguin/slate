@@ -506,6 +506,87 @@ class ProjectFileManager(Gtk.Box):
         # invece di farla apparire collassata o perdere il punto di lavoro.
         self._save_preferences()
 
+    def reveal_path(self, relative_path: str) -> bool:
+        """Reveal a safe project path or focus its nearest visible directory."""
+
+        raw_parts = relative_path.split("/")
+        if (
+            self.root is None
+            or not relative_path
+            or os.path.isabs(relative_path)
+            or ".." in raw_parts
+            or "\0" in relative_path
+        ):
+            return False
+        normalized = os.path.normpath(relative_path)
+        if normalized in {"", "."} or ".." in normalized.split("/"):
+            return False
+
+        # 2026-08-20: la navigazione prepara soltanto la catena degli antenati;
+        # l'enumerazione GIO esistente la materializza in modo lazy e asincrono.
+        parts = normalized.split("/")
+        ancestors = {
+            "/".join(parts[:depth]) for depth in range(1, len(parts))
+        }
+        self.expanded_paths.update(ancestors)
+        self.pending_cursor_path = normalized
+        if self.active:
+            if self.dirty:
+                self.refresh()
+            else:
+                self._restore_cached_expansion()
+
+        target_iter = self._tree_iter_for_path(normalized)
+        if target_iter is not None:
+            self._focus_tree_iter(target_iter)
+            self.pending_cursor_path = None
+        else:
+            # Mostrare subito l'antenato già caricato evita una navigazione
+            # apparentemente inerte mentre i livelli successivi vengono letti.
+            loaded_fallback: str | None = None
+            for ancestor in sorted(ancestors, reverse=True):
+                ancestor_iter = self.dir_iters.get(ancestor)
+                if ancestor_iter is not None:
+                    self._focus_tree_iter(ancestor_iter)
+                    if ancestor in self.loaded_paths:
+                        loaded_fallback = ancestor
+                    break
+            if loaded_fallback is None and "" in self.loaded_paths:
+                loaded_fallback = ""
+            if loaded_fallback is not None:
+                self._resolve_pending_reveal(loaded_fallback)
+        self._save_preferences()
+        return True
+
+    def _tree_iter_for_path(self, relative_path: str) -> Gtk.TreeIter | None:
+        """Find one currently loaded real row by its project-relative path."""
+
+        def _walk(parent: Gtk.TreeIter | None) -> Gtk.TreeIter | None:
+            """Depth-first search loaded rows without triggering enumeration."""
+
+            tree_iter = self.store.iter_children(parent)
+            while tree_iter is not None:
+                if (
+                    not self.store.get_value(tree_iter, self.COL_PLACEHOLDER)
+                    and self.store.get_value(tree_iter, self.COL_PATH)
+                    == relative_path
+                ):
+                    return tree_iter
+                found = _walk(tree_iter)
+                if found is not None:
+                    return found
+                tree_iter = self.store.iter_next(tree_iter)
+            return None
+
+        return _walk(None)
+
+    def _focus_tree_iter(self, tree_iter: Gtk.TreeIter) -> None:
+        """Select and scroll to one already loaded File-manager row."""
+
+        row_path = self.store.get_path(tree_iter)
+        self.tree.set_cursor(row_path)
+        self.tree.scroll_to_cell(row_path, None, False, 0.0, 0.0)
+
     def _set_available(self, available: bool) -> None:
         """Enable controls and select the appropriate content page."""
 
@@ -681,6 +762,7 @@ class ProjectFileManager(Gtk.Box):
             )
             if placeholder is not None:
                 self.store.remove(placeholder)
+            self._resolve_pending_reveal(relative)
             self._continue_expand_all()
             return
         visible = [info for info in entries if self._entry_visible(relative, info)]
@@ -691,8 +773,30 @@ class ProjectFileManager(Gtk.Box):
             self._append_entry(parent, relative, info)
         if placeholder is not None:
             self.store.remove(placeholder)
+        self._resolve_pending_reveal(relative)
         self._restore_child_expansion(relative)
         self._continue_expand_all()
+
+    def _resolve_pending_reveal(self, loaded_directory: str) -> None:
+        """Fall back when a requested next path component is filtered or absent."""
+
+        target = self.pending_cursor_path
+        prefix = f"{loaded_directory}/" if loaded_directory else ""
+        if target is None or not target.startswith(prefix):
+            return
+        remainder = target[len(prefix):]
+        if not remainder:
+            return
+        next_path = f"{prefix}{remainder.split('/', 1)[0]}"
+        if self._tree_iter_for_path(next_path) is not None:
+            return
+        if loaded_directory:
+            fallback = self.dir_iters.get(loaded_directory)
+            if fallback is not None:
+                self._focus_tree_iter(fallback)
+        # La root non ha una propria riga: in quel caso la scheda Files già
+        # rappresenta correttamente la directory di fallback del progetto.
+        self.pending_cursor_path = None
 
     def _entry_sort_key(
         self, parent: str, info: Gio.FileInfo

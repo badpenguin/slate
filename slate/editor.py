@@ -152,7 +152,7 @@ class EditorDocument(Gtk.Box):
             "edit-undo", "Undo (Ctrl+Z)", self._on_undo_clicked
         )
         self.redo_button = self._tool_button(
-            "edit-redo", "Redo (Ctrl+Shift+Z)", self._on_redo_clicked
+            "edit-redo", "Redo (Ctrl+Shift+Z / Ctrl+Y)", self._on_redo_clicked
         )
         self.undo_button.set_sensitive(False)
         self.redo_button.set_sensitive(False)
@@ -227,9 +227,9 @@ class EditorDocument(Gtk.Box):
         self.search_entry.connect("key-press-event", self._on_search_key_press)
         search_box.pack_start(self.search_entry, True, True, 0)
         for icon, tooltip, callback in (
-            ("go-up", "Previous result", self._on_search_previous_clicked),
-            ("go-down", "Next result", self._on_search_next_clicked),
-            ("window-close-symbolic", "Close search", self._on_search_close_clicked),
+            ("go-up", "Previous result (Shift+Enter)", self._on_search_previous_clicked),
+            ("go-down", "Next result (Enter)", self._on_search_next_clicked),
+            ("window-close-symbolic", "Close search (Esc)", self._on_search_close_clicked),
         ):
             search_box.pack_start(self._tool_button(icon, tooltip, callback), False, False, 0)
         self.search_revealer.add(search_box)

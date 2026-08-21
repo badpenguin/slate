@@ -37,6 +37,7 @@ class SCMPanelTest(unittest.TestCase):
         self.edited_external: FileStatus | None = None
         self.deleted: FileStatus | None = None
         self.diffed_repository: RepositoryRef | None = None
+        self.diffed_paths: tuple[str, ...] = ()
         self.external_repository: RepositoryRef | None = None
         self.updated_repository: RepositoryRef | None = None
         self.repository_action: tuple[str, RepositoryRef] | None = None
@@ -65,10 +66,11 @@ class SCMPanelTest(unittest.TestCase):
 
         self.committed = (message, statuses)
 
-    def _ignore_diff(self, repository: RepositoryRef, _paths) -> None:
+    def _ignore_diff(self, repository: RepositoryRef, paths) -> None:
         """Record the repository explicitly chosen for Meld."""
 
         self.diffed_repository = repository
+        self.diffed_paths = tuple(paths)
 
     def _ignore_external(self, repository: RepositoryRef) -> None:
         """Record the repository explicitly chosen for TortoiseHg."""
@@ -784,6 +786,9 @@ class SCMPanelTest(unittest.TestCase):
         self.assertEqual(self.edited_internal, tracked)
         self.assertTrue(press(Gdk.KEY_e))
         self.assertEqual(self.edited_external, tracked)
+        self.assertTrue(press(Gdk.KEY_d))
+        self.assertEqual(self.diffed_repository, RepositoryRef(".", "hg"))
+        self.assertEqual(self.diffed_paths, ("tracked.py",))
         self.assertTrue(press(Gdk.KEY_Delete))
         self.assertEqual(self.deleted, tracked)
 
@@ -895,7 +900,13 @@ class SCMPanelTest(unittest.TestCase):
             if status is first:
                 self.panel.tree.set_cursor(filtered_path)
 
-        for keyval in (Gdk.KEY_v, Gdk.KEY_m, Gdk.KEY_e, Gdk.KEY_Delete):
+        for keyval in (
+            Gdk.KEY_v,
+            Gdk.KEY_m,
+            Gdk.KEY_e,
+            Gdk.KEY_d,
+            Gdk.KEY_Delete,
+        ):
             event = SimpleNamespace(keyval=keyval, state=Gdk.ModifierType(0))
             self.assertTrue(self.panel._on_tree_key_press(self.panel.tree, event))
 
@@ -903,6 +914,45 @@ class SCMPanelTest(unittest.TestCase):
         self.assertIsNone(self.edited_internal)
         self.assertIsNone(self.edited_external)
         self.assertIsNone(self.deleted)
+
+    def test_d_opens_meld_for_repository_root(self) -> None:
+        """D on a repository row launches its full directory comparison."""
+
+        repository = RepositoryRef(".", "git")
+        self.panel.set_repositories([repository])
+        source_path = self.panel.store.get_path(
+            self.panel.repository_iters[repository]
+        )
+        filtered_path = self.panel.filtered_store.convert_child_path_to_path(
+            source_path
+        )
+        self.panel.tree.set_cursor(filtered_path)
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_d,
+            state=Gdk.ModifierType(0),
+        )
+
+        self.assertTrue(self.panel._on_tree_key_press(self.panel.tree, event))
+        self.assertEqual(self.diffed_repository, repository)
+        self.assertEqual(self.diffed_paths, ())
+
+    def test_modified_file_menu_exposes_meld_with_d(self) -> None:
+        """The contextual tracked-file action displays the shared D shortcut."""
+
+        status = FileStatus("tracked.py", "modified")
+        self.panel.context_status = status
+        self.panel.context_selected_statuses = [status]
+        menu = self.panel._build_file_menu()
+        meld_item = next(
+            child
+            for child in menu.get_children()
+            if isinstance(child.get_child(), Gtk.Box)
+            and child.get_child().get_children()[1].get_text() == "Open in Meld"
+        )
+        meld_item.activate()
+
+        self.assertEqual(self.diffed_repository, RepositoryRef(".", "hg"))
+        self.assertEqual(self.diffed_paths, ("tracked.py",))
 
     def test_context_menu_items_always_have_icons(self) -> None:
         """Every contextual file action exposes an icon with the required gap."""

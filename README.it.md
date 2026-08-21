@@ -73,19 +73,19 @@ Questi strumenti abilitano funzionalità aggiuntive ma non sono necessari per
 avviare SLATE. Su Debian, Ubuntu e Linux Mint, installarli con:
 
 ```console
-sudo apt install meld mercurial tortoisehg vim-gtk3 xdg-utils
+sudo apt install meld mercurial ripgrep tortoisehg vim-gtk3 xdg-utils
 ```
 
 Su Fedora, installarli con:
 
 ```console
-sudo dnf install meld mercurial tortoisehg vim-X11 xdg-utils
+sudo dnf install meld mercurial ripgrep tortoisehg vim-X11 xdg-utils
 ```
 
 Su Arch Linux, installare quelli disponibili nei repository ufficiali con:
 
 ```console
-sudo pacman -S --needed gvim meld mercurial xdg-utils
+sudo pacman -S --needed gvim meld mercurial ripgrep xdg-utils
 ```
 
 TortoiseHg è disponibile separatamente nell'Arch User Repository (AUR).
@@ -96,6 +96,7 @@ TortoiseHg è disponibile separatamente nell'Arch User Repository (AUR).
 | Mercurial   | Repository Mercurial                              |
 | TortoiseHg  | Interfaccia TortoiseHg per repository Mercurial   |
 | gVim        | Modifica esterna con gVim                         |
+| ripgrep     | Ricerca nel contenuto dei file                    |
 | `xdg-open`  | Apertura con l'applicazione desktop predefinita   |
 
 Il pulsante **Codex** richiede la
@@ -131,7 +132,7 @@ La finestra è divisa in tre colonne:
 
 1. **Projects**: progetti, terminali, editor e pagine Web aperte.
 2. **Workspace**: terminale, editor o browser selezionato.
-3. **Changes/Files**: modifiche dei repository oppure albero dei file.
+3. **Revisions/Files**: modifiche dei repository oppure albero dei file.
 
 ```text
 New Project | New Terminal | Execute | Codex | Open URL | Incognito
@@ -183,7 +184,7 @@ Un terminale può essere rinominato con **Rename** o `F2`.
 
 ## Revisioni Git e Mercurial
 
-La scheda **Changes** rileva i repository Git e Mercurial presenti nella
+La scheda **Revisions** rileva i repository Git e Mercurial presenti nella
 directory del progetto e nelle sue sottodirectory. Lo stato viene aggiornato
 automaticamente quando cambiano file o metadati del repository.
 
@@ -272,6 +273,23 @@ mantenere invece di sovrascriverla automaticamente.
 
 L'editor supporta file testuali UTF-8 e non conserva bozze dei contenuti non
 salvati.
+
+### Ricerca nel progetto
+
+Il pulsante **Project Search** o `Ctrl+Shift+F` apre una ricerca nel contenuto dei file
+del progetto attivo. La ricerca parte automaticamente da quattro caratteri,
+usa un confronto letterale smart-case e rispetta file ignorati, directory
+escluse e limite testuale di 5 MiB.
+
+La lista mostra a sinistra il testo corrispondente e a destra il percorso con
+numero di riga; spostando la selezione, l'anteprima read-only centra la riga nel relativo contesto. Sono
+mostrati al massimo 100 risultati. Dal menu contestuale o con `V`, `E` e `D` è
+possibile rispettivamente aprire il file, modificarlo con l'editor esterno
+configurato o visualizzarne la patch disponibile in Meld. `Esc` chiude la
+ricerca.
+
+Se `rg` non è installato, SLATE continua ad avviarsi normalmente e disabilita
+soltanto questa funzione.
 
 ## Browser
 

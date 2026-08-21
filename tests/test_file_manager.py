@@ -36,6 +36,7 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.outside = Path(self.outside_temporary.name)
         (self.root / "src").mkdir()
         (self.root / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+        (self.root / "src" / ".private.py").write_text("hidden\n", encoding="utf-8")
         (self.root / "normal.txt").write_text("normal\n", encoding="utf-8")
         (self.root / "file-link").symlink_to("normal.txt")
         (self.root / "directory-link").symlink_to("src", target_is_directory=True)
@@ -499,6 +500,45 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.manager.content_stack.set_visible_child_name("empty")
         self.manager.set_active(True)
         self.assertEqual(self.manager.content_stack.get_visible_child_name(), "tree")
+
+    def test_reveal_path_expands_lazy_parents_and_selects_file(self) -> None:
+        """Editor navigation asynchronously expands and focuses an exact file."""
+
+        self.assertTrue(self.manager.reveal_path("src/app.py"))
+        self._wait_for_path("src")
+        deadline = time.monotonic() + 2
+        context = GLib.MainContext.default()
+        while (
+            self.manager.pending_cursor_path is not None
+            and time.monotonic() < deadline
+        ):
+            context.iteration(True)
+
+        self.assertIsNone(self.manager.pending_cursor_path)
+        self.assertEqual(self.manager._focused_entry(), ("src/app.py", False, False))
+        self.assertIn("src", self.manager.expanded_paths)
+
+    def test_reveal_path_keeps_filters_and_falls_back_to_parent(self) -> None:
+        """A hidden target focuses its visible directory without changing filters."""
+
+        self.assertTrue(self.manager.reveal_path("src/.private.py"))
+        self._wait_for_path("src")
+
+        self.assertIsNone(self.manager.pending_cursor_path)
+        self.assertEqual(self.manager._focused_entry(), ("src", True, False))
+        self.assertFalse(self.manager.hidden_check.get_active())
+
+    def test_reveal_path_rejects_unsafe_targets(self) -> None:
+        """Files navigation refuses absolute, traversal and NUL-containing paths."""
+
+        for relative in (
+            "/tmp/outside",
+            "../outside",
+            "src/../normal.txt",
+            "src/../../outside",
+            "a\0b",
+        ):
+            self.assertFalse(self.manager.reveal_path(relative))
 
     def _root_rows(self) -> list[tuple[str, Gtk.TreeIter]]:
         """Return top-level names and iterators for cursor-oriented assertions."""

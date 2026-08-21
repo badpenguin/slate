@@ -538,6 +538,45 @@ class BrowserTest(unittest.TestCase):
         entry.page.toggle_inspector.assert_called_once_with()
         manager.shutdown()
 
+    def test_native_copy_schedules_clipboard_persistence_without_consuming_key(
+        self,
+    ) -> None:
+        """Ctrl+C reaches WebKit before its clipboard formats are persisted."""
+
+        manager = BrowserManager(
+            _BrowserStack(), MagicMock(), MagicMock(), MagicMock()
+        )
+        entry = manager.open_page("repo", private=True)
+        entry.page._store_clipboard = MagicMock()
+        copy_event = SimpleNamespace(
+            keyval=Gdk.KEY_c,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+        with patch("slate.browser.GLib.idle_add") as idle_add:
+            self.assertFalse(manager.handle_key(copy_event))
+        idle_add.assert_called_once_with(entry.page._store_clipboard)
+        manager.shutdown()
+
+    def test_context_menu_copy_persists_all_native_clipboard_formats(self) -> None:
+        """Closing WebKit's context menu stores its clipboard without conversion."""
+
+        clipboard = MagicMock()
+        page = SimpleNamespace(
+            entry=SimpleNamespace(private=True),
+            web_view=SimpleNamespace(
+                get_clipboard=MagicMock(return_value=clipboard)
+            ),
+            _store_clipboard=MagicMock(),
+        )
+        with patch("slate.browser.GLib.idle_add") as idle_add:
+            BrowserPage._on_context_menu_dismissed(page, page.web_view)
+        idle_add.assert_called_once_with(page._store_clipboard)
+        self.assertFalse(BrowserPage._store_clipboard(page))
+        page.web_view.get_clipboard.assert_called_once_with(
+            Gdk.SELECTION_CLIPBOARD
+        )
+        clipboard.store.assert_called_once_with()
+
     def test_inspector_toolbar_button_opens_and_closes_with_a_colored_icon(self) -> None:
         """The DevTools toggle mirrors both actions and uses the bundled asset."""
 

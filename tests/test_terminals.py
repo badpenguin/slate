@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from gi.repository import Gdk, Vte
 
@@ -85,6 +85,49 @@ class TerminalHelpersTest(unittest.TestCase):
         self.assertFalse(
             TerminalManager._on_terminal_key_press(terminal, plain_ctrl_c)
         )
+
+    def test_terminal_menu_exposes_shared_project_search(self) -> None:
+        """The VTE context menu advertises and dispatches Ctrl+Shift+F."""
+
+        manager = object.__new__(TerminalManager)
+        manager.project_search_available = True
+        manager.on_project_search = MagicMock()
+        terminal = MagicMock()
+        terminal.get_has_selection.return_value = True
+        copy_item = MagicMock()
+        paste_item = MagicMock()
+        search_item = MagicMock()
+        menu = MagicMock()
+        separator = object()
+        with patch.object(
+            TerminalManager,
+            "_terminal_menu_item",
+            side_effect=(copy_item, paste_item, search_item),
+        ) as item_factory:
+            with patch("slate.terminals.Gtk.Menu", return_value=menu):
+                with patch(
+                    "slate.terminals.Gtk.SeparatorMenuItem",
+                    return_value=separator,
+                ):
+                    manager._show_terminal_menu(terminal, None)
+
+        self.assertEqual(
+            item_factory.call_args_list[2].args,
+            (
+                "Project Search",
+                "edit-find",
+                Gdk.KEY_f,
+                Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK,
+                "Project Search (Ctrl+Shift+F)",
+            ),
+        )
+        search_item.set_sensitive.assert_called_once_with(True)
+        self.assertEqual(
+            [call.args[0] for call in menu.append.call_args_list],
+            [copy_item, paste_item, separator, search_item],
+        )
+        manager._on_project_search_from_terminal_menu(search_item)
+        manager.on_project_search.assert_called_once_with()
 
     def test_click_opens_terminal_hyperlink_externally(self) -> None:
         """A direct click launches an OSC 8 hyperlink with the default application."""

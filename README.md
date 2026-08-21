@@ -69,20 +69,20 @@ These tools enable additional features but are not required to launch SLATE.
 On Debian, Ubuntu, and Linux Mint, install them with:
 
 ```console
-sudo apt install meld mercurial tortoisehg vim-gtk3 xdg-utils
+sudo apt install meld mercurial ripgrep tortoisehg vim-gtk3 xdg-utils
 ```
 
 On Fedora, install them with:
 
 ```console
-sudo dnf install meld mercurial tortoisehg vim-X11 xdg-utils
+sudo dnf install meld mercurial ripgrep tortoisehg vim-X11 xdg-utils
 ```
 
 On Arch Linux, install the tools available from the official repositories
 with:
 
 ```console
-sudo pacman -S --needed gvim meld mercurial xdg-utils
+sudo pacman -S --needed gvim meld mercurial ripgrep xdg-utils
 ```
 
 TortoiseHg is available separately from the Arch User Repository (AUR).
@@ -93,6 +93,7 @@ TortoiseHg is available separately from the Arch User Repository (AUR).
 | Mercurial    | Mercurial repositories                    |
 | TortoiseHg   | TortoiseHg interface for Mercurial repos  |
 | gVim         | External editing with gVim                |
+| ripgrep      | Project file-content search               |
 | `xdg-open`   | Open with the default desktop application |
 
 The **Codex** button requires the
@@ -128,7 +129,7 @@ The window is divided into three columns:
 
 1. **Projects**: open projects, terminals, editors, and web pages.
 2. **Workspace**: the selected terminal, editor, or browser.
-3. **Changes/Files**: repository changes or the file tree.
+3. **Revisions/Files**: repository changes or the file tree.
 
 ```text
 New Project | New Terminal | Execute | Codex | Open URL | Incognito
@@ -149,7 +150,7 @@ New Project | New Terminal | Execute | Codex | Open URL | Incognito
 ```
 
 The active project keeps its terminals, open files, and web pages separate.
-The text sizes for the terminal, Changes, Files, and Editor views can be
+The text sizes for the terminal, Revisions, Files, and Editor views can be
 adjusted in **Settings**.
 
 ## Terminals
@@ -180,7 +181,7 @@ A terminal can be renamed with **Rename** or `F2`.
 
 ## Git and Mercurial changes
 
-The **Changes** tab detects Git and Mercurial repositories in the
+The **Revisions** tab detects Git and Mercurial repositories in the
 project directory and its subdirectories. Status is updated automatically when
 files or repository metadata change.
 
@@ -269,6 +270,22 @@ overwriting it automatically.
 
 The editor supports UTF-8 text files and does not retain drafts of unsaved
 content.
+
+### Project search
+
+The **Project Search** button or `Ctrl+Shift+F` searches file contents in the active
+project. Search starts automatically from four characters, uses literal
+smart-case matching, and respects ignored files, excluded directories, and the
+5 MiB text limit.
+
+Results show the matching source line on the left and its relative path and
+line number on the right. Moving the selection centers that line in a read-only contextual preview. At most 100
+results are shown. The context menu and `V`, `E`, and `D` respectively open the
+file, edit it with the configured external editor, or open an available patch
+in Meld. `Esc` closes search.
+
+When `rg` is unavailable, SLATE still starts normally and disables only this
+feature.
 
 ## Browser
 

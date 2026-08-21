@@ -86,6 +86,8 @@ class TerminalManager:
         on_exit: Callable[[str, str, int], None],
         on_attention: Callable[[Vte.Terminal, bool], None],
         on_bell: Callable[[str, str], None],
+        on_project_search: Callable[[], None],
+        project_search_available: bool,
         status_bar_enabled: bool,
     ) -> None:
         """Bind terminal lifecycle to a stack without starting background work."""
@@ -103,6 +105,8 @@ class TerminalManager:
         self.on_exit = on_exit
         self.on_attention = on_attention
         self.on_bell = on_bell
+        self.on_project_search = on_project_search
+        self.project_search_available = project_search_available
         self.status_bar_enabled = status_bar_enabled
         self.terminals: dict[str, Vte.Terminal] = {}
         self.sessions: dict[str, str] = {}
@@ -368,7 +372,7 @@ class TerminalManager:
     def _show_terminal_menu(
         self, terminal: Vte.Terminal, event: Gdk.EventButton | None
     ) -> None:
-        """Build an icon menu for copying terminal selection and pasting text."""
+        """Build terminal clipboard and project-search contextual actions."""
 
         menu = Gtk.Menu()
         copy_item = self._terminal_menu_item(
@@ -376,18 +380,33 @@ class TerminalManager:
             "edit-copy",
             Gdk.KEY_c,
             Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK,
+            "Copy (Ctrl+Shift+C / Ctrl+Insert)",
         )
         paste_item = self._terminal_menu_item(
             "Paste",
             "edit-paste",
             Gdk.KEY_v,
             Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK,
+            "Paste (Ctrl+Shift+V / Shift+Insert)",
+        )
+        search_item = self._terminal_menu_item(
+            "Project Search",
+            "edit-find",
+            Gdk.KEY_f,
+            Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK,
+            "Project Search (Ctrl+Shift+F)",
         )
         copy_item.set_sensitive(terminal.get_has_selection())
+        search_item.set_sensitive(self.project_search_available)
         copy_item.connect("activate", self._copy_from_terminal_menu, terminal)
         paste_item.connect("activate", self._paste_from_terminal_menu, terminal)
+        search_item.connect("activate", self._on_project_search_from_terminal_menu)
         menu.append(copy_item)
         menu.append(paste_item)
+        # 2026-08-20: la ricerca del progetto è distinta dalle operazioni sugli
+        # appunti, ma riusa esattamente la stessa azione globale della HeaderBar.
+        menu.append(Gtk.SeparatorMenuItem())
+        menu.append(search_item)
         menu.show_all()
         if event is not None:
             menu.popup_at_pointer(event)
@@ -405,11 +424,12 @@ class TerminalManager:
         icon_name: str,
         keyval: int,
         modifiers: Gdk.ModifierType,
+        tooltip: str,
     ) -> Gtk.MenuItem:
         """Create a terminal context item with icon and shortcut hint."""
 
         item = Gtk.MenuItem()
-        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         icon = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
         accel_label = Gtk.AccelLabel(label=label)
         accel_label.set_xalign(0)
@@ -418,6 +438,7 @@ class TerminalManager:
         content.pack_start(icon, False, False, 0)
         content.pack_start(accel_label, True, True, 0)
         item.add(content)
+        item.set_tooltip_text(tooltip)
         return item
 
     @staticmethod
@@ -435,6 +456,11 @@ class TerminalManager:
         """Paste clipboard text into the selected Vte terminal."""
 
         terminal.paste_clipboard()
+
+    def _on_project_search_from_terminal_menu(self, _item: Gtk.MenuItem) -> None:
+        """Open the shared project search from one terminal context menu."""
+
+        self.on_project_search()
 
     def show(self, project_name: str, terminal_name_value: str) -> bool:
         """Show and focus one existing terminal stack child."""

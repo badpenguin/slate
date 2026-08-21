@@ -56,8 +56,8 @@ class SlateApplication(Gtk.Application):
 def validate_dependencies() -> bool:
     """Revalidate runtime dependencies inside the application process."""
 
-    # 2026-08-17: SCM executables are optional per project; their asynchronous
-    # watcher reports a missing tool locally instead of blocking all of SLATE.
+    # 2026-08-17: SCM and feature-specific executables are optional; their
+    # owning UI reports or disables unavailable operations without blocking SLATE.
     missing = [name for name in ("tmux",) if shutil.which(name) is None]
     if WEBKIT_DEPENDENCY_ERROR is not None:
         missing.append("typelib WebKit2 4.1")
