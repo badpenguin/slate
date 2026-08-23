@@ -663,8 +663,8 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._queue_unattended_project_verification(owner, "repo")
             verifier_type.assert_called_once()
             verifier_type.return_value.start.assert_called_once_with()
-            verified = verifier_type.call_args.args[2]
-            closed = verifier_type.call_args.args[3]
+            verified = verifier_type.call_args.args[1]
+            closed = verifier_type.call_args.args[2]
             verified(RepositorySyncStatus("synced"))
             owner.panel.set_project_remote_status.assert_called_once_with(
                 "repo", repository, RepositorySyncStatus("synced")

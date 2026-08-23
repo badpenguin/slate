@@ -155,6 +155,7 @@ class ProjectSearchTest(unittest.TestCase):
             self.search.request_serial,
             "abcd",
         )
+        self.search.debounce_id = None
 
     def test_primary_selection_seeds_one_current_blank_search(self) -> None:
         """A concise external PRIMARY selection becomes the live project query."""

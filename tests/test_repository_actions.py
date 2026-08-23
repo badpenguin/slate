@@ -69,6 +69,33 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         self.on_closed.assert_called_once_with()
         self.dialog = None
 
+    def test_cancelling_before_watcher_acquisition_invalidates_late_callback(
+        self,
+    ) -> None:
+        """Closing a waiting modal resumes its watcher and cannot touch dead widgets."""
+
+        dialog = RepositoryCreateBranchDialog(
+            None,
+            GitSCM(self.temporary.name),
+            self.watcher,
+            self.on_closed,
+        )
+        self.dialog = dialog
+        dialog.start()
+        paused_callback = self.watcher.pause_after_current.call_args.args[0]
+
+        dialog._on_response(dialog, Gtk.ResponseType.CANCEL)
+
+        self.watcher.resume_with_full_refresh.assert_called_once_with(
+            refresh_branch=True
+        )
+        self.on_closed.assert_called_once_with()
+        paused_callback()
+        self.assertEqual(self.calls, [])
+        dialog._close()
+        self.on_closed.assert_called_once_with()
+        self.dialog = None
+
     def test_git_publish_requires_existing_upstream_and_never_forces(self) -> None:
         """Git publishing keeps a normal push and memory-only credentials."""
 

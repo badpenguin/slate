@@ -155,13 +155,10 @@ class RepositoryVerifyDialogTest(RepositoryDialogFixture, unittest.TestCase):
         with patch("slate.repository_verify.run_async", self._record_command):
             runner = UnattendedRepositoryVerifier(
                 GitSCM(self.temporary.name),
-                self.watcher,
                 verified,
                 closed,
             )
             runner.start()
-            paused_callback = self.watcher.pause_after_current.call_args.args[0]
-            paused_callback()
             self._complete(0, "main\n")
             self._complete(1, "origin\n")
             self._complete(2, "origin/main\n")
@@ -176,29 +173,25 @@ class RepositoryVerifyDialogTest(RepositoryDialogFixture, unittest.TestCase):
             self._complete(4, "0\t0\n")
         verified.assert_called_once_with(RepositorySyncStatus("synced", 0, 0))
         closed.assert_called_once_with()
-        self.watcher.resume_with_full_refresh.assert_called_once_with(
-            refresh_branch=True
-        )
+        self.watcher.pause_after_current.assert_not_called()
+        self.watcher.resume_with_full_refresh.assert_not_called()
 
-    def test_unattended_close_releases_a_pending_watcher_pause(self) -> None:
-        """An explicit action can preempt a queued check without freezing its watcher."""
+    def test_unattended_close_cancels_work_without_touching_the_watcher(self) -> None:
+        """An explicit action can preempt a check while local events remain active."""
 
         closed = MagicMock()
-        runner = UnattendedRepositoryVerifier(
-            GitSCM(self.temporary.name),
-            self.watcher,
-            MagicMock(),
-            closed,
-        )
-        runner.start()
-        paused_callback = self.watcher.pause_after_current.call_args.args[0]
-        runner.close()
-        self.watcher.resume_with_full_refresh.assert_called_once_with(
-            refresh_branch=True
-        )
+        with patch("slate.repository_verify.run_async", self._record_command):
+            runner = UnattendedRepositoryVerifier(
+                GitSCM(self.temporary.name),
+                MagicMock(),
+                closed,
+            )
+            runner.start()
+            runner.close()
+        self.command.cancel.assert_called_once_with()
         closed.assert_called_once_with()
-        paused_callback()
-        self.assertEqual(self.calls, [])
+        self.watcher.pause_after_current.assert_not_called()
+        self.watcher.resume_with_full_refresh.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -48,8 +48,9 @@ class RepositoryOperationDialog(Gtk.Dialog):
         self.allow_idle_close = allow_idle_close
         self.command: AsyncCommand | None = None
         self.command_cancellable = False
-        self.watcher_acquired = False
+        self.watcher_pause_requested = False
         self.watcher_released = False
+        self.closed = False
         self.finished = False
         self.cancel_requested = False
         self.ready_to_submit = False
@@ -95,12 +96,14 @@ class RepositoryOperationDialog(Gtk.Dialog):
 
         self.spinner.start()
         self._set_progress("Waiting for the local check…")
+        self.watcher_pause_requested = True
         self.watcher.pause_after_current(self._on_watcher_paused)
 
     def _on_watcher_paused(self) -> None:
         """Begin the specialized workflow after automatic commands become quiet."""
 
-        self.watcher_acquired = True
+        if self.closed:
+            return
         self._begin()
 
     def _begin(self) -> None:
@@ -215,7 +218,13 @@ class RepositoryOperationDialog(Gtk.Dialog):
     def _close(self) -> None:
         """Resume one coherent watcher refresh and destroy this modal."""
 
-        if self.watcher_acquired and not self.watcher_released:
+        if self.closed:
+            return
+        self.closed = True
+        # 2026-08-23: la modale può chiudersi mentre attende ancora il watcher;
+        # anche quella pausa pendente va revocata, altrimenti conserva un
+        # callback verso widget distrutti e blocca tutti i refresh successivi.
+        if self.watcher_pause_requested and not self.watcher_released:
             self.watcher_released = True
             self.watcher.resume_with_full_refresh(refresh_branch=True)
         self.destroy()

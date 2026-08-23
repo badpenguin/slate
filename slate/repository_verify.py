@@ -326,36 +326,28 @@ class _RepositoryVerificationWorkflow:
 
 
 class UnattendedRepositoryVerifier(_RepositoryVerificationWorkflow):
-    """Run one lazy remote comparison without constructing or showing a dialog."""
+    """Run one lazy remote comparison without blocking local watcher updates."""
 
     def __init__(
         self,
         scm: SCM,
-        watcher: RepoWatcher,
         on_verified: Callable[[RepositorySyncStatus], None],
         on_closed: Callable[[], None],
     ) -> None:
-        """Retain one repository, its watcher boundary and completion callbacks."""
+        """Retain one repository and its headless completion callbacks."""
 
         self.scm = scm
-        self.watcher = watcher
         self.on_closed = on_closed
         self.command: AsyncCommand | None = None
-        self.watcher_pause_requested = False
         self.closed = False
         self._initialize_verification(on_verified)
 
     def start(self) -> None:
-        """Wait for the watcher read in flight before starting remote work."""
+        """Start remote verification without pausing local filesystem updates."""
 
-        self.watcher_pause_requested = True
-        self.watcher.pause_after_current(self._on_watcher_paused)
-
-    def _on_watcher_paused(self) -> None:
-        """Start verification after obtaining exclusive repository access."""
-
-        if self.closed:
-            return
+        # 2026-08-23: Scansiona avvia questa verifica invisibile e la rete può
+        # restare lenta indefinitamente; sospendere il watcher locale in attesa
+        # farebbe sparire tutti gli aggiornamenti file fino alla sua conclusione.
         self._begin()
 
     def _run_command(
@@ -408,14 +400,11 @@ class UnattendedRepositoryVerifier(_RepositoryVerificationWorkflow):
         self._close()
 
     def _close(self) -> None:
-        """Resume the watcher once and notify the unattended queue."""
+        """Close once and notify the unattended verification queue."""
 
         if self.closed:
             return
         self.closed = True
-        if self.watcher_pause_requested:
-            self.watcher_pause_requested = False
-            self.watcher.resume_with_full_refresh(refresh_branch=True)
         self.on_closed()
 
 

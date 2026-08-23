@@ -1459,7 +1459,6 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.unattended_verifier_key = key
             self.unattended_verifier = UnattendedRepositoryVerifier(
                 scm,
-                watcher,
                 verified,
                 closed,
             )
