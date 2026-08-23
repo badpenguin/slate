@@ -3228,8 +3228,10 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         run_commit(0)
 
-    def _preview_file(self, status: FileStatus | None) -> None:
-        """Show one asynchronous file preview over project and terminal columns."""
+    def _preview_file(
+        self, status: FileStatus | None, force: bool = False
+    ) -> None:
+        """Show one asynchronous file preview unless it is already current."""
 
         repository = (
             RepositoryRef(status.repository, status.scm_type) if status else None
@@ -3237,6 +3239,15 @@ class SlateWindow(Gtk.ApplicationWindow):
         scm = self._repository_scm(repository) if repository else None
         if status is None or scm is None:
             self._close_preview()
+            return
+        # 2026-08-21: un secondo clic sulla stessa riga, inclusa la sua checkbox,
+        # non deve cancellare e rilanciare la preview asincrona già visibile.
+        if (
+            not force
+            and self.preview.get_visible()
+            and self.preview.current_path == status.path
+            and getattr(self, "preview_status", None) == status
+        ):
             return
         self.preview_status = status
         self.preview.show_status(scm.root, scm, status)
@@ -3291,7 +3302,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         if current is None:
             self._close_preview()
         else:
-            self._preview_file(current)
+            # Il watcher richiede un reload anche quando l'identità della riga
+            # non cambia, perché il contenuto sul filesystem può essere mutato.
+            self._preview_file(current, force=True)
 
     def _close_preview(self) -> None:
         """Cancel pending preview work and hide the overlay immediately."""

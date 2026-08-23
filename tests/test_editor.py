@@ -132,6 +132,37 @@ class EditorTest(unittest.TestCase):
         self.assertFalse(editor.info_bar.get_visible())
         editor.close()
 
+    def test_repeated_atomic_replacements_keep_clean_markdown_current(self) -> None:
+        """Agent-style atomic writes keep refreshing an already open document."""
+
+        editor = self._document()
+
+        for index, revision in enumerate(("# Agente uno\n", "# Agente due\n")):
+            if index == 0:
+                # Riproduce la finestra di soppressione lasciata da un salvataggio
+                # dell'editor immediatamente precedente alla scrittura dell'agente.
+                editor.mute_monitor_until = (
+                    GLib.get_monotonic_time() // 1000 + 500
+                )
+            replacement = self.root / ".TODO.md.agent"
+            replacement.write_text(revision, encoding="utf-8")
+            replacement.replace(self.path)
+
+            def buffer_is_current(expected: str = revision) -> bool:
+                """Report when the asynchronous monitor reload reaches this revision."""
+
+                text = editor.buffer.get_text(
+                    editor.buffer.get_start_iter(),
+                    editor.buffer.get_end_iter(),
+                    True,
+                )
+                return not editor.loading and text == expected
+
+            self._wait_until(buffer_is_current)
+            self.assertIsNotNone(editor.monitor)
+
+        editor.close()
+
     def test_dirty_external_change_requires_explicit_version_choice(self) -> None:
         """Dirty content survives external writes until the user chooses a side."""
 
@@ -151,6 +182,30 @@ class EditorTest(unittest.TestCase):
         self._wait_until(lambda: bool(completed))
         self.assertEqual(completed, [True])
         self.assertEqual(self.path.read_text(encoding="utf-8"), "# Locale\n")
+        editor.close()
+
+    def test_typing_during_external_reload_preserves_the_local_buffer(self) -> None:
+        """A late asynchronous disk read becomes a conflict after local typing."""
+
+        editor = self._document()
+        editor.loading = True
+        editor.buffer.set_text("# Digitato durante il reload\n")
+        source = MagicMock()
+        source.load_contents_finish.return_value = (
+            True,
+            b"# Versione agente\n",
+            "etag-agente",
+        )
+
+        EditorDocument._on_loaded(editor, source, MagicMock(), "external")
+
+        text = editor.buffer.get_text(
+            editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True
+        )
+        self.assertEqual(text, "# Digitato durante il reload\n")
+        self.assertTrue(editor.external_conflict)
+        self.assertTrue(editor.attention)
+        self.assertTrue(editor.info_bar.get_visible())
         editor.close()
 
     def test_disk_conflict_choice_hides_notice_after_reload(self) -> None:

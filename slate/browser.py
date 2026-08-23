@@ -229,6 +229,12 @@ class BrowserPage(Gtk.Box):
         self.responsive_viewport: tuple[int, int] | None = None
         self.responsive_layout: tuple[int, int, int, int, float] | None = None
         self.desktop_layout: tuple[int, int] | None = None
+        self.open_context_link_action = Gio.SimpleAction.new(
+            "open-context-link", GLib.VariantType.new("s")
+        )
+        self.open_context_link_action.connect(
+            "activate", self._on_open_context_link
+        )
 
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         toolbar.get_style_context().add_class("browser-toolbar")
@@ -371,6 +377,7 @@ class BrowserPage(Gtk.Box):
         )
         self.web_view.connect("decide-policy", self._on_decide_policy)
         self.web_view.connect("create", self._on_create)
+        self.web_view.connect("context-menu", self._on_context_menu)
         self.web_view.connect(
             "context-menu-dismissed", self._on_context_menu_dismissed
         )
@@ -431,6 +438,48 @@ class BrowserPage(Gtk.Box):
         # appunti quando la WebView viene nascosta; Gtk chiede al clipboard
         # manager di conservare tutti i formati senza trasformarli in solo testo.
         GLib.idle_add(self._store_clipboard)
+
+    def _on_context_menu(
+        self,
+        _web_view: object,
+        context_menu: object,
+        _event: object,
+        hit_test_result: object,
+    ) -> bool:
+        """Make the native new-window link action open in the desktop browser."""
+
+        if not hit_test_result.context_is_link():
+            return False
+        uri = hit_test_result.get_link_uri() or ""
+        if urlsplit(uri).scheme.lower() not in {"http", "https"}:
+            return False
+
+        # 2026-08-22: WebKitGTK non marca sempre come gesto utente l'azione
+        # contestuale "Open Link in New Window"; la sostituiamo conservandone
+        # posizione e testo, così il link esplicito non viene scambiato per un
+        # popup automatico dalla policy di navigazione.
+        for position, item in enumerate(context_menu.get_items()):
+            if (
+                item.get_stock_action()
+                != WebKit2.ContextMenuAction.OPEN_LINK_IN_NEW_WINDOW
+            ):
+                continue
+            replacement = WebKit2.ContextMenuItem.new_from_gaction(
+                self.open_context_link_action,
+                "Open Link in New Window",
+                GLib.Variant.new_string(uri),
+            )
+            context_menu.remove(item)
+            context_menu.insert(replacement, position)
+            break
+        return False
+
+    def _on_open_context_link(
+        self, _action: Gio.SimpleAction, target: GLib.Variant
+    ) -> None:
+        """Open the link explicitly selected from WebKit's context menu."""
+
+        self._open_external_uri(target.get_string())
 
     def _store_clipboard(self) -> bool:
         """Ask the desktop clipboard manager to retain WebKit's current data."""
@@ -854,6 +903,14 @@ class BrowserPage(Gtk.Box):
     ) -> bool:
         """Keep the page usable and expose a non-modal retry after load failure."""
 
+        if error.matches(
+            WebKit2.network_error_quark(), WebKit2.NetworkError.CANCELLED
+        ):
+            # 2026-08-22: Stop e una navigazione che sostituisce quella corrente
+            # producono una cancellazione WebKit prevista, non un guasto da
+            # mostrare come errore recuperabile all'utente.
+            self._set_loading(False)
+            return True
         self.failed_loading = True
         self._set_loading(False)
         self.error_label.set_text(f"Failed to load {failing_uri}: {error}")
@@ -926,6 +983,11 @@ class BrowserPage(Gtk.Box):
         uri = request.get_uri() or ""
         scheme = urlsplit(uri).scheme.lower()
         if uri in {"", "about:blank"}:
+            # 2026-08-22: il bridge esiste per completare azioni esplicite come
+            # la preview WordPress, non per mantenere popup automatici invisibili.
+            if not navigation_action.is_user_gesture():
+                _report_blocked_navigation(uri, scheme, "page popup")
+                return None
             # 2026-08-18: WordPress apre prima una finestra nominata vuota e
             # poi vi invia il form di preview. Un bridge correlato completa il
             # POST e passa solo l'URL finale al browser predefinito.
@@ -947,6 +1009,11 @@ class BrowserPage(Gtk.Box):
         popup_view.connect(
             "load-changed", self._on_external_popup_bridge_load_changed
         )
+        # 2026-08-22: un bridge nascosto che fallisce deve essere rilasciato
+        # subito e lasciare un errore visibile, invece di vivere fino al tab.
+        popup_view.connect(
+            "load-failed", self._on_external_popup_bridge_load_failed
+        )
         popup_view.connect("destroy", self._on_external_popup_bridge_destroyed)
         popup_view.connect("create", self._on_create)
         popup_view.connect("decide-policy", self._on_decide_policy)
@@ -964,6 +1031,25 @@ class BrowserPage(Gtk.Box):
             return
         self._open_external_uri(uri)
         self._release_external_popup_bridge(web_view)
+
+    def _on_external_popup_bridge_load_failed(
+        self,
+        web_view: object,
+        _load_event: object,
+        _failing_uri: str,
+        error: GLib.Error,
+    ) -> bool:
+        """Release a failed hidden popup and report its actionable error."""
+
+        if web_view not in self.external_popup_bridges:
+            return True
+        cancelled = error.matches(
+            WebKit2.network_error_quark(), WebKit2.NetworkError.CANCELLED
+        )
+        self._release_external_popup_bridge(web_view)
+        if not cancelled and not self.closed:
+            self.on_error(f"Unable to open the requested external page: {error}")
+        return True
 
     def _release_external_popup_bridge(self, web_view: object) -> None:
         """Stop and destroy one invisible related WebView exactly once."""
@@ -995,6 +1081,12 @@ class BrowserPage(Gtk.Box):
         scheme = urlsplit(uri).scheme.lower()
         if decision_type == WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION:
             if uri in {"", "about:blank"}:
+                # 2026-08-22: la stessa barriera precede create, così WebKit non
+                # materializza nemmeno un target vuoto richiesto solo da script.
+                if not action.is_user_gesture():
+                    decision.ignore()
+                    _report_blocked_navigation(uri, scheme, "page popup")
+                    return True
                 # Il create handler deve ricevere il contenitore iniziale usato
                 # dai form con target nominato; ignorarlo troncherebbe il POST.
                 decision.use()

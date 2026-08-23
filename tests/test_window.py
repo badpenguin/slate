@@ -22,6 +22,43 @@ from slate.window import SlateWindow, _CODEX_RESUME_COMMAND, _moved_sequence
 class WindowActionTest(unittest.TestCase):
     """Verify high-level SCM actions independently from GTK window startup."""
 
+    def test_visible_revision_preview_ignores_repeated_same_file_request(self) -> None:
+        """A second click on the current revision row must not reload its preview."""
+
+        status = FileStatus("tracked.py", "modified")
+        preview = MagicMock(current_path=status.path)
+        preview.get_visible.return_value = True
+        owner = SimpleNamespace(
+            preview=preview,
+            preview_status=status,
+            _repository_scm=MagicMock(),
+            _close_preview=MagicMock(),
+            _update_preview_geometry=MagicMock(),
+        )
+
+        SlateWindow._preview_file(owner, status)
+
+        preview.show_status.assert_not_called()
+        owner._update_preview_geometry.assert_not_called()
+
+    def test_revision_watcher_forces_current_preview_reload(self) -> None:
+        """A watcher refresh reloads content even when the row identity is unchanged."""
+
+        status = FileStatus("tracked.py", "modified")
+        owner = SimpleNamespace(
+            preview=MagicMock(current_path=status.path),
+            preview_status=status,
+            right_notebook=MagicMock(),
+            _close_preview=MagicMock(),
+            _preview_file=MagicMock(),
+        )
+        owner.preview.get_visible.return_value = True
+        owner.right_notebook.get_current_page.return_value = 0
+
+        SlateWindow._refresh_visible_preview(owner, [status])
+
+        owner._preview_file.assert_called_once_with(status, force=True)
+
     def test_extra_command_closes_popover_and_creates_named_terminal(self) -> None:
         """Configured command buttons preserve their shell line, label and icon."""
 

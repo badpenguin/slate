@@ -280,6 +280,27 @@ class EditorDocument(Gtk.Box):
                 return
             self._show_notice(f"Unable to read the file: {error}", Gtk.MessageType.ERROR)
             return
+        if reason == "external" and self.etag is not None and etag == self.etag:
+            # 2026-08-23: gli eventi prodotti dal salvataggio interno vengono
+            # differiti oltre il mute; l'etag evita che il loro controllo
+            # azzeri inutilmente cronologia, selezione e scroll del buffer.
+            self.loading = False
+            self._ensure_monitor()
+            return
+        if reason == "external" and self.dirty:
+            # 2026-08-23: l'utente può iniziare a digitare mentre la lettura
+            # asincrona è attiva; il contenuto locale deve allora diventare un
+            # conflitto esplicito, mai essere sostituito dal callback tardivo.
+            self.loading = False
+            self.external_conflict = True
+            self.deleted_conflict = False
+            self.attention = True
+            self._show_conflict(
+                "The file changed on disk while it contains local changes.",
+                (("Use version on disk", self.RESPONSE_DISK), ("Keep my version", self.RESPONSE_MINE)),
+            )
+            self.on_state(self)
+            return
         data = bytes(contents)
         if len(data) > self.MAX_TEXT_BYTES:
             self.loading = False
@@ -386,28 +407,55 @@ class EditorDocument(Gtk.Box):
     ) -> None:
         """Debounce meaningful external writes, moves and deletions."""
 
-        now = GLib.get_monotonic_time() // 1000
-        if self.saving or now < self.mute_monitor_until:
-            return
         if event_type not in {
+            Gio.FileMonitorEvent.CHANGED,
             Gio.FileMonitorEvent.CHANGES_DONE_HINT,
             Gio.FileMonitorEvent.CREATED,
             Gio.FileMonitorEvent.DELETED,
+            Gio.FileMonitorEvent.MOVED,
             Gio.FileMonitorEvent.MOVED_IN,
             Gio.FileMonitorEvent.MOVED_OUT,
             Gio.FileMonitorEvent.RENAMED,
         }:
             return
+        if event_type in {
+            Gio.FileMonitorEvent.DELETED,
+            Gio.FileMonitorEvent.MOVED,
+            Gio.FileMonitorEvent.MOVED_OUT,
+            Gio.FileMonitorEvent.RENAMED,
+        } and self.monitor is _monitor:
+            # 2026-08-23: le sostituzioni atomiche usate dagli agenti possono
+            # invalidare il monitor legato al vecchio inode; il reload riuscito
+            # ne creerà uno nuovo sul path corrente.
+            self.monitor.cancel()
+            self.monitor = None
         if self.monitor_source_id is not None:
             GLib.source_remove(self.monitor_source_id)
+        now = GLib.get_monotonic_time() // 1000
+        delay = max(
+            self.MONITOR_DEBOUNCE_MS,
+            self.mute_monitor_until - now,
+        )
         self.monitor_source_id = GLib.timeout_add(
-            self.MONITOR_DEBOUNCE_MS, self._handle_external_change
+            delay, self._handle_external_change
         )
 
     def _handle_external_change(self) -> bool:
         """Reload clean buffers or require a choice for dirty/deleted buffers."""
 
         self.monitor_source_id = None
+        now = GLib.get_monotonic_time() // 1000
+        if self.saving or now < self.mute_monitor_until:
+            # Un salvataggio asincrono può essere ancora attivo quando scade il
+            # primo debounce; conserviamo l'evento finché l'etag è definitivo.
+            delay = max(
+                self.MONITOR_DEBOUNCE_MS,
+                self.mute_monitor_until - now,
+            )
+            self.monitor_source_id = GLib.timeout_add(
+                delay, self._handle_external_change
+            )
+            return GLib.SOURCE_REMOVE
         exists = bool(self.path and Path(self.path).exists())
         if not exists:
             if self.dirty:
@@ -423,6 +471,7 @@ class EditorDocument(Gtk.Box):
                 self.on_removed(self, f"File deleted: {self.relative_path}")
             return GLib.SOURCE_REMOVE
         if self.dirty:
+            self._ensure_monitor()
             self.external_conflict = True
             self.deleted_conflict = False
             self.attention = True
@@ -581,6 +630,7 @@ class EditorDocument(Gtk.Box):
         self.attention = False
         self.mute_monitor_until = GLib.get_monotonic_time() // 1000 + 500
         self.buffer.set_modified(False)
+        self._ensure_monitor()
         self._hide_notice()
         self.on_state(self)
         self._finish_save(True)

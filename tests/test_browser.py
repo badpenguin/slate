@@ -12,7 +12,7 @@ import gi
 
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from slate.browser import (
     BrowserManager,
@@ -274,6 +274,41 @@ class BrowserTest(unittest.TestCase):
             "https://example.com/popup"
         )
 
+    def test_context_new_window_action_opens_link_in_default_browser(self) -> None:
+        """The native right-click action reliably launches its explicit link."""
+
+        manager = BrowserManager(
+            _BrowserStack(), MagicMock(), MagicMock(), MagicMock()
+        )
+        entry = manager.open_page("repo", private=True)
+        page = entry.page
+        page._open_external_uri = MagicMock()
+        context_menu = WebKit2.ContextMenu.new()
+        context_menu.append(
+            WebKit2.ContextMenuItem.new_from_stock_action(
+                WebKit2.ContextMenuAction.OPEN_LINK_IN_NEW_WINDOW
+            )
+        )
+        hit_test = MagicMock()
+        hit_test.context_is_link.return_value = True
+        hit_test.get_link_uri.return_value = "https://example.test/documentation"
+
+        handled = BrowserPage._on_context_menu(
+            page, object(), context_menu, object(), hit_test
+        )
+
+        self.assertFalse(handled)
+        replacement = context_menu.get_item_at_position(0)
+        self.assertEqual(
+            replacement.get_stock_action(),
+            WebKit2.ContextMenuAction.CUSTOM,
+        )
+        replacement.get_gaction().activate(replacement.get_gaction_target())
+        page._open_external_uri.assert_called_once_with(
+            "https://example.test/documentation"
+        )
+        manager.shutdown()
+
     def test_blank_named_window_is_preserved_for_wordpress_preview_post(self) -> None:
         """WordPress may submit its preview form only after opening a blank target."""
 
@@ -285,12 +320,29 @@ class BrowserTest(unittest.TestCase):
         request.get_uri.return_value = "about:blank"
         action = MagicMock()
         action.get_request.return_value = request
+        action.is_user_gesture.return_value = True
         opener = MagicMock()
 
         created = BrowserPage._on_create(page, opener, action)
 
         self.assertIs(created, popup)
         page._create_external_popup_bridge.assert_called_once_with(opener)
+
+    def test_automatic_blank_popup_does_not_create_a_hidden_bridge(self) -> None:
+        """A script-only blank popup is rejected before allocating a related view."""
+
+        page = SimpleNamespace(_create_external_popup_bridge=MagicMock())
+        request = MagicMock()
+        request.get_uri.return_value = "about:blank"
+        action = MagicMock()
+        action.get_request.return_value = request
+        action.is_user_gesture.return_value = False
+
+        with redirect_stderr(io.StringIO()):
+            created = BrowserPage._on_create(page, MagicMock(), action)
+
+        self.assertIsNone(created)
+        page._create_external_popup_bridge.assert_not_called()
 
     def test_preview_bridge_shares_context_without_creating_a_slate_window(self) -> None:
         """The hidden bridge retains login state and owns no native popup window."""
@@ -326,6 +378,36 @@ class BrowserTest(unittest.TestCase):
         )
         page._release_external_popup_bridge.assert_called_once_with(bridge)
 
+    def test_failed_preview_bridge_is_reported_and_released(self) -> None:
+        """A failed hidden navigation cannot leak its related WebView."""
+
+        bridge = MagicMock()
+        error = GLib.Error.new_literal(
+            WebKit2.network_error_quark(),
+            "Connection refused",
+            int(WebKit2.NetworkError.TRANSPORT),
+        )
+        page = SimpleNamespace(
+            external_popup_bridges={bridge},
+            closed=False,
+            on_error=MagicMock(),
+            _release_external_popup_bridge=MagicMock(),
+        )
+
+        handled = BrowserPage._on_external_popup_bridge_load_failed(
+            page,
+            bridge,
+            WebKit2.LoadEvent.STARTED,
+            "https://example.test/preview",
+            error,
+        )
+
+        self.assertTrue(handled)
+        page._release_external_popup_bridge.assert_called_once_with(bridge)
+        page.on_error.assert_called_once_with(
+            f"Unable to open the requested external page: {error}"
+        )
+
     def test_blank_new_window_policy_reaches_the_create_handler(self) -> None:
         """The initial blank target is used instead of being discarded externally."""
 
@@ -334,6 +416,7 @@ class BrowserTest(unittest.TestCase):
         request.get_uri.return_value = "about:blank"
         action = MagicMock()
         action.get_request.return_value = request
+        action.is_user_gesture.return_value = True
         decision = MagicMock()
         decision.get_navigation_action.return_value = action
 
@@ -348,6 +431,47 @@ class BrowserTest(unittest.TestCase):
         decision.use.assert_called_once_with()
         decision.ignore.assert_not_called()
         page._open_external_uri.assert_not_called()
+
+    def test_automatic_blank_new_window_policy_is_ignored(self) -> None:
+        """A script-only blank target cannot pass through to the create signal."""
+
+        page = SimpleNamespace(_open_external_uri=MagicMock(), on_error=MagicMock())
+        request = MagicMock()
+        request.get_uri.return_value = "about:blank"
+        action = MagicMock()
+        action.get_request.return_value = request
+        action.is_user_gesture.return_value = False
+        decision = MagicMock()
+        decision.get_navigation_action.return_value = action
+
+        with redirect_stderr(io.StringIO()):
+            handled = BrowserPage._on_decide_policy(
+                page,
+                object(),
+                decision,
+                WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION,
+            )
+
+        self.assertTrue(handled)
+        decision.ignore.assert_called_once_with()
+        decision.use.assert_not_called()
+
+    def test_response_policy_is_left_to_webkit_download_handling(self) -> None:
+        """Response decisions retain WebKit's normal rendering and download path."""
+
+        decision = MagicMock()
+
+        handled = BrowserPage._on_decide_policy(
+            SimpleNamespace(),
+            object(),
+            decision,
+            WebKit2.PolicyDecisionType.RESPONSE,
+        )
+
+        self.assertFalse(handled)
+        decision.use.assert_not_called()
+        decision.ignore.assert_not_called()
+        decision.download.assert_not_called()
 
     def test_blob_navigation_remains_inside_webview_for_gutenberg_canvas(self) -> None:
         """A page-owned blob may initialize Gutenberg's authenticated iframe."""
@@ -399,6 +523,35 @@ class BrowserTest(unittest.TestCase):
             "URL: 'javascript:secretToken()').\n",
         )
         self.assertIn("secretToken", stderr.getvalue())
+
+    def test_cancelled_load_does_not_show_an_error(self) -> None:
+        """Stopping a request restores idle controls without a false failure."""
+
+        error = GLib.Error.new_literal(
+            WebKit2.network_error_quark(),
+            "Load cancelled",
+            int(WebKit2.NetworkError.CANCELLED),
+        )
+        page = SimpleNamespace(
+            failed_loading=False,
+            _set_loading=MagicMock(),
+            error_label=MagicMock(),
+            error_bar=MagicMock(),
+        )
+
+        handled = BrowserPage._on_load_failed(
+            page,
+            object(),
+            WebKit2.LoadEvent.STARTED,
+            "https://example.test/slow",
+            error,
+        )
+
+        self.assertTrue(handled)
+        self.assertFalse(page.failed_loading)
+        page._set_loading.assert_called_once_with(False)
+        page.error_label.set_text.assert_not_called()
+        page.error_bar.show_all.assert_not_called()
 
     def test_browser_shortcuts_are_scoped_to_visible_page(self) -> None:
         """Navigation shortcuts act on the browser and ignore the terminal page."""
