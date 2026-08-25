@@ -1,6 +1,7 @@
 """Launcher tests that avoid starting or disturbing the active SLATE instance."""
 
 import io
+import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -81,10 +82,21 @@ class DetachedLauncherTest(unittest.TestCase):
     def test_production_debug_removes_only_its_launcher_flag(self) -> None:
         """Debug diagnosis enables fatal-signal stacks without detaching."""
 
+        observed_debug: list[str | None] = []
+
+        def run_debug(_arguments: list[str]) -> int:
+            """Record the diagnostic environment while the application runs."""
+
+            observed_debug.append(os.environ.get("SLATE_DEBUG"))
+            return 4
+
+        os.environ.pop("SLATE_DEBUG", None)
         with patch.object(launcher.faulthandler, "is_enabled", return_value=False):
             with patch.object(launcher.faulthandler, "enable") as enable:
                 with patch.object(launcher.faulthandler, "disable") as disable:
-                    with patch.object(launcher, "_run_application", return_value=4) as run:
+                    with patch.object(
+                        launcher, "_run_application", side_effect=run_debug
+                    ) as run:
                         with patch.object(launcher, "_detach") as detach:
                             result = launcher.main(["slate", "--debug"])
         self.assertEqual(result, 4)
@@ -92,6 +104,8 @@ class DetachedLauncherTest(unittest.TestCase):
         detach.assert_not_called()
         enable.assert_called_once_with(all_threads=True)
         disable.assert_called_once_with()
+        self.assertEqual(observed_debug, ["1"])
+        self.assertNotIn("SLATE_DEBUG", os.environ)
 
     def test_normal_launch_uses_detached_path(self) -> None:
         """A normal invocation detaches only after a successful preflight."""

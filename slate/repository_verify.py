@@ -296,7 +296,7 @@ class _RepositoryVerificationWorkflow:
         self._finish_verified(
             RepositorySyncStatus(state, ahead, behind),
             title,
-            f"Ahead: {ahead} · Behind: {behind}",
+            f"{ahead} to publish · {behind} to update",
         )
 
     def _finish_access_required(self, result: CommandResult) -> None:

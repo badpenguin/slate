@@ -781,15 +781,15 @@ class SCMPanel(Gtk.Box):
             repository, RepositorySyncStatus()
         )
         if sync_status.state == "synced":
-            remote = "remote: up to date"
+            remote = "up to date"
         elif sync_status.state == "ahead":
-            remote = f"remote: ahead {sync_status.ahead}"
+            remote = f"{sync_status.ahead} to publish"
         elif sync_status.state == "behind":
-            remote = f"remote: behind {sync_status.behind}"
+            remote = f"{sync_status.behind} to update"
         elif sync_status.state == "diverged":
             remote = (
-                f"remote: diverged · ahead {sync_status.ahead}, "
-                f"behind {sync_status.behind}"
+                f"{sync_status.ahead} to publish · "
+                f"{sync_status.behind} to update"
             )
         elif sync_status.state == "local":
             remote = "local repository"

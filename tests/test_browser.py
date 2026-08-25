@@ -139,6 +139,36 @@ class BrowserTest(unittest.TestCase):
         self.assertEqual(entry.title, "Docs")
         manager.shutdown()
 
+    def test_normal_pages_wait_for_the_shared_cookie_jar_before_loading(self) -> None:
+        """Restored normal tabs navigate only after persistent cookies are ready."""
+
+        manager = BrowserManager(
+            MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        )
+        manager.normal_profile_cancellable = MagicMock()
+        first = SimpleNamespace(
+            closed=False,
+            entry=SimpleNamespace(url="https://example.com/first"),
+            web_view=MagicMock(),
+        )
+        second = SimpleNamespace(
+            closed=False,
+            entry=SimpleNamespace(url="https://example.com/second"),
+            web_view=MagicMock(),
+        )
+        first.entry.page = first
+        second.entry.page = second
+        manager.pending_normal_pages.extend((first, second))
+        cookie_manager = MagicMock()
+
+        manager._on_normal_profile_loaded(cookie_manager, MagicMock())
+
+        cookie_manager.get_all_cookies_finish.assert_called_once()
+        first.web_view.load_uri.assert_called_once_with(first.entry.url)
+        second.web_view.load_uri.assert_called_once_with(second.entry.url)
+        self.assertTrue(manager.normal_profile_ready)
+        self.assertEqual(manager.pending_normal_pages, [])
+
     def test_private_pages_use_distinct_ephemeral_contexts(self) -> None:
         """Anonymous tabs persist metadata while profiles remain isolated."""
 

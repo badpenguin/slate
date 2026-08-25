@@ -126,9 +126,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             # 2026-08-17: i SIGSEGV nelle librerie GTK non generano eccezioni
             # Python; il terminale debug deve comunque mostrare gli stack.
             faulthandler.enable(all_threads=True)
+        previous_debug = os.environ.get("SLATE_DEBUG")
+        # 2026-08-24: il flag deve raggiungere i componenti già costruiti senza
+        # entrare negli argomenti GTK; una variabile limitata alla vita del
+        # processo foreground abilita soltanto la diagnostica richiesta.
+        os.environ["SLATE_DEBUG"] = "1"
         try:
             return _run_application(debug_arguments)
         finally:
+            if previous_debug is None:
+                os.environ.pop("SLATE_DEBUG", None)
+            else:
+                os.environ["SLATE_DEBUG"] = previous_debug
             if not fault_handler_was_enabled:
                 faulthandler.disable()
     # 2026-08-16: il detach è l'ultima fase del launcher normale, dopo tutti i

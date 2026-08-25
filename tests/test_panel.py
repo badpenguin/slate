@@ -419,9 +419,43 @@ class SCMPanelTest(unittest.TestCase):
         )
         self.assertEqual(
             self.panel.store.get_value(tree_iter, self.panel.COL_TEXT),
-            "[root] — main — remote: diverged · ahead 2, behind 3",
+            "[root] — main — 2 to publish · 3 to update",
         )
         self.assertIs(self.panel.repository_iters[repository], tree_iter)
+
+    def test_ahead_status_explicitly_refers_to_the_local_repository(self) -> None:
+        """An ahead count cannot be mistaken for commits present on the remote."""
+
+        repository = RepositoryRef(".", "hg")
+        self.panel.set_repositories([repository])
+        self.panel.update_status([], "default", repository)
+        self.panel.set_remote_status(
+            repository, RepositorySyncStatus("ahead", 2, 0)
+        )
+
+        self.assertEqual(
+            self.panel.store.get_value(
+                self.panel.repository_iters[repository], self.panel.COL_TEXT
+            ),
+            "[root] — default — 2 to publish",
+        )
+
+    def test_behind_status_explicitly_refers_to_the_local_repository(self) -> None:
+        """A behind count states that the local repository lacks remote commits."""
+
+        repository = RepositoryRef(".", "git")
+        self.panel.set_repositories([repository])
+        self.panel.update_status([], "main", repository)
+        self.panel.set_remote_status(
+            repository, RepositorySyncStatus("behind", 0, 3)
+        )
+
+        self.assertEqual(
+            self.panel.store.get_value(
+                self.panel.repository_iters[repository], self.panel.COL_TEXT
+            ),
+            "[root] — main — 3 to update",
+        )
 
     def test_inactive_history_change_invalidates_cached_remote_status(self) -> None:
         """An inactive project cannot retain a stale verified relationship."""

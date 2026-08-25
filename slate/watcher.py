@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections import deque
 from functools import partial
 from operator import attrgetter
@@ -56,7 +57,9 @@ class RepoWatcher:
         self.on_file_change = on_file_change or self._ignore_file_change
         self.on_ignored = on_ignored or self._ignore_ignored
         self.on_history_change = on_history_change or self._ignore_history_change
+        self.debug = os.environ.get("SLATE_DEBUG") == "1"
         self.monitors: dict[str, Gio.FileMonitor] = {}
+        self.metadata_monitors: dict[str, Gio.FileMonitor] = {}
         self.ignored: set[str] = set()
         self.nested_repositories: set[str] = set()
         self.pending_id: int | None = None
@@ -74,6 +77,7 @@ class RepoWatcher:
         self.command: AsyncCommand | None = None
         self._mount_queue: deque[str] = deque()
         self._branch = ""
+        self._git_branch_monitor_path: str | None = None
         self._statuses: dict[str, FileStatus] = {}
         self._published_snapshot: (
             tuple[tuple[tuple[str, str, str | None], ...], str] | None
@@ -90,6 +94,7 @@ class RepoWatcher:
         self._initial_monitor_reconciliation_required = False
         # 2026-08-17: startup work enters the same per-repository scheduler as
         # later events, preventing the former burst of parallel hg processes.
+        self._mount_scm_metadata_monitors()
         self._schedule_pending()
 
     def set_active(self, active: bool) -> None:
@@ -173,6 +178,7 @@ class RepoWatcher:
     def request_scan(self) -> None:
         """Queue the explicit full status, branch and ignore refresh."""
 
+        self._debug("manual scan requested")
         self.request_full(
             refresh_branch=True,
             refresh_ignored=True,
@@ -226,6 +232,9 @@ class RepoWatcher:
         for monitor in self.monitors.values():
             monitor.cancel()
         self.monitors.clear()
+        for monitor in self.metadata_monitors.values():
+            monitor.cancel()
+        self.metadata_monitors.clear()
         if self.command is not None:
             self.command.cancel()
             self.command = None
@@ -267,6 +276,18 @@ class RepoWatcher:
         # 2026-08-16: il file manager riusa la stessa classificazione del
         # watcher, evitando un secondo comando VCS e filtri divergenti.
         self.on_ignored(set(self.ignored))
+        # 2026-08-24: Scansiona deve riparare anche la copertura inotify, non
+        # soltanto lo snapshot SCM. Ripercorrere i monitor ancora vivi scopre
+        # directory nate durante eventi persi e ritenta i mount falliti.
+        for directory, monitor in tuple(self.monitors.items()):
+            if self._should_prune(directory):
+                self._debug(f"monitor pruned path={directory}")
+                monitor.cancel()
+                self.monitors.pop(directory, None)
+        self._debug(
+            f"monitor reconciliation queued mounted={len(self.monitors)}"
+        )
+        self._mount_scm_metadata_monitors()
         self._queue_mount(self.path)
 
     def _on_branch(self, result: CommandResult) -> None:
@@ -274,6 +295,7 @@ class RepoWatcher:
 
         if result.ok:
             self._branch = result.stdout.strip()
+            self._mount_git_branch_monitor()
         else:
             self.on_error(
                 self._describe_error(
@@ -440,6 +462,7 @@ class RepoWatcher:
             return
         if self.scm.is_locked():
             self.waiting_for_unlock = True
+            self._debug("status waiting for repository lock release")
             return
         self.waiting_for_unlock = False
         paths: tuple[str, ...] = ()
@@ -457,6 +480,10 @@ class RepoWatcher:
         else:
             self.ready = False
             return
+        self._debug(
+            f"status started scope={'full' if not paths else 'incremental'} "
+            f"paths={len(paths)}"
+        )
         self._run(
             self.scm.status_argv(paths),
             partial(self._on_status, paths),
@@ -489,13 +516,83 @@ class RepoWatcher:
         )
 
     def _queue_mount(self, directory: str) -> None:
-        """Queue a subtree for non-blocking breadth-first monitor creation."""
+        """Queue a subtree for non-blocking breadth-first monitor reconciliation."""
 
         resolved = str(Path(directory).resolve())
-        if resolved not in self.monitors and resolved not in self._mount_queue:
+        if resolved not in self._mount_queue:
             self._mount_queue.append(resolved)
         if self.mount_idle_id is None:
             self.mount_idle_id = GLib.idle_add(self._mount_batch)
+
+    def _mount_scm_metadata_monitors(self) -> None:
+        """Watch only explicit SCM metadata files that can affect visible state."""
+
+        if self.closed:
+            return
+        # 2026-08-24: osservare ricorsivamente le directory amministrative
+        # consegna anche ogni temporaneo creato dai comandi di lettura. Monitor
+        # distinti sui soli file semantici riducono la pressione su inotify.
+        if self.scm.kind == "hg":
+            relatives = (
+                ".hg/branch",
+                ".hg/dirstate",
+                ".hg/merge/state",
+                ".hg/store/00changelog.i",
+                ".hg/wlock",
+            )
+        else:
+            relatives = (
+                ".git/FETCH_HEAD",
+                ".git/HEAD",
+                ".git/index",
+                ".git/index.lock",
+                ".git/info/exclude",
+                ".git/packed-refs",
+            )
+        for relative in relatives:
+            self._mount_metadata_file(relative)
+        self._mount_git_branch_monitor()
+
+    def _mount_metadata_file(self, relative: str) -> None:
+        """Mount one path-specific metadata monitor unless it already exists."""
+
+        path = os.path.join(self.path, relative)
+        if path in self.metadata_monitors:
+            return
+        try:
+            monitor = Gio.File.new_for_path(path).monitor_file(
+                Gio.FileMonitorFlags.WATCH_MOVES, None
+            )
+            monitor.connect("changed", self._on_change)
+            self.metadata_monitors[path] = monitor
+            self._debug(f"metadata monitor mounted path={relative}")
+        except GLib.Error as error:
+            self.on_error(f"Monitor unavailable for {path}: {error}")
+
+    def _mount_git_branch_monitor(self) -> None:
+        """Retarget the precise Git ref monitor to the currently named branch."""
+
+        if self.scm.kind != "git" or self.closed:
+            return
+        relative = f".git/refs/heads/{self._branch}" if self._branch else None
+        path = os.path.join(self.path, relative) if relative is not None else None
+        if path == self._git_branch_monitor_path and (
+            path is None or path in self.metadata_monitors
+        ):
+            return
+        if self._git_branch_monitor_path is not None:
+            monitor = self.metadata_monitors.pop(
+                self._git_branch_monitor_path, None
+            )
+            if monitor is not None:
+                self._debug(
+                    "metadata monitor dropped "
+                    f"path={os.path.relpath(self._git_branch_monitor_path, self.path)}"
+                )
+                monitor.cancel()
+        self._git_branch_monitor_path = path
+        if relative is not None:
+            self._mount_metadata_file(relative)
 
     def _drop_monitor_subtree(self, directory: str) -> None:
         """Remove dead monitors and queued mounts below a replaced directory."""
@@ -504,6 +601,7 @@ class RepoWatcher:
         prefix = f"{root}{os.sep}"
         for monitored, monitor in tuple(self.monitors.items()):
             if monitored == root or monitored.startswith(prefix):
+                self._debug(f"monitor dropped path={monitored}")
                 monitor.cancel()
                 self.monitors.pop(monitored, None)
         self._mount_queue = deque(
@@ -530,17 +628,22 @@ class RepoWatcher:
         ):
             directory = self._mount_queue.popleft()
             processed += 1
-            if self._should_prune(directory) or directory in self.monitors:
+            if self._should_prune(directory):
                 continue
             try:
-                monitor = Gio.File.new_for_path(directory).monitor_directory(
-                    Gio.FileMonitorFlags.WATCH_MOVES, None
-                )
-                monitor.connect("changed", self._on_change)
-                self.monitors[directory] = monitor
+                if directory not in self.monitors:
+                    monitor = Gio.File.new_for_path(directory).monitor_directory(
+                        Gio.FileMonitorFlags.WATCH_MOVES, None
+                    )
+                    monitor.connect("changed", self._on_change)
+                    self.monitors[directory] = monitor
+                    self._debug(f"monitor mounted path={directory}")
                 with os.scandir(directory) as entries:
                     for entry in entries:
-                        if entry.is_dir(follow_symlinks=False):
+                        if (
+                            entry.is_dir(follow_symlinks=False)
+                            and entry.path not in self._mount_queue
+                        ):
                             self._mount_queue.append(entry.path)
             except (OSError, GLib.Error) as error:
                 self.on_error(f"Monitor unavailable for {directory}: {error}")
@@ -570,6 +673,9 @@ class RepoWatcher:
             return False
         parts = relative.split("/")
         if any(part in self.HARD_PRUNE for part in parts):
+            return True
+        metadata_root = f".{self.scm.kind}"
+        if relative == metadata_root or relative.startswith(f"{metadata_root}/"):
             return True
         if self._is_nested_repository_path(relative):
             return True
@@ -604,6 +710,22 @@ class RepoWatcher:
         metadata = relative == metadata_root or relative.startswith(
             f"{metadata_root}/"
         )
+        # 2026-08-24: Mercurial e Git creano molti file temporanei durante le
+        # letture. Non modificano lo stato osservato e, soprattutto in debug,
+        # elaborarli e stamparli può nascondere gli eventi realmente causali.
+        if metadata and not self._is_relevant_metadata_path(relative):
+            return
+        event_name = getattr(event_type, "value_name", str(int(event_type)))
+        self._debug(f"filesystem event type={event_name} path={relative}")
+        lock_path = relative == (
+            ".git/index.lock" if self.scm.kind == "git" else ".hg/wlock"
+        )
+        # 2026-08-24: il mute elimina il feedback dei metadati prodotti da
+        # SLATE, ma non può nascondere l'unico evento che libera uno scheduler
+        # fermo su un lock. Gli status successivi restano comunque single-flight.
+        if metadata and lock_path:
+            self._on_metadata_change(relative, event_type)
+            return
         if metadata and now < self.mute_until:
             return
         if metadata:
@@ -652,6 +774,33 @@ class RepoWatcher:
             self._pending_ignored = True
         self.request_paths(paths)
 
+    def _is_relevant_metadata_path(self, relative: str) -> bool:
+        """Return whether an SCM metadata path can change visible watcher state."""
+
+        if self.scm.kind == "git":
+            return relative in {
+                ".git/FETCH_HEAD",
+                ".git/HEAD",
+                ".git/index",
+                ".git/index.lock",
+                ".git/info/exclude",
+                ".git/packed-refs",
+            } or relative == self._git_branch_relative()
+        return relative in {
+            ".hg/branch",
+            ".hg/dirstate",
+            ".hg/merge/state",
+            ".hg/store/00changelog.i",
+            ".hg/wlock",
+        }
+
+    def _git_branch_relative(self) -> str | None:
+        """Return the monitored current-branch ref relative to the repository."""
+
+        if self.scm.kind != "git" or not self._branch:
+            return None
+        return f".git/refs/heads/{self._branch}"
+
     def _is_nested_repository_path(self, relative: str) -> bool:
         """Return whether a path belongs to an independently watched child root."""
 
@@ -676,6 +825,7 @@ class RepoWatcher:
                 Gio.FileMonitorEvent.MOVED_OUT,
             ) or not self.scm.is_locked():
                 self.waiting_for_unlock = False
+                self._debug("Mercurial lock released; full status queued")
                 self.request_full()
             return
         if relative == ".hg/branch":
@@ -686,10 +836,10 @@ class RepoWatcher:
             return
         if (
             relative == ".hg/dirstate"
-            or relative == ".hg/store"
-            or relative.startswith(".hg/merge/")
+            or relative == ".hg/merge/state"
+            or relative == ".hg/store/00changelog.i"
         ):
-            if relative in {".hg/dirstate", ".hg/store"}:
+            if relative in {".hg/dirstate", ".hg/store/00changelog.i"}:
                 self.on_history_change()
             self.request_full()
 
@@ -706,11 +856,15 @@ class RepoWatcher:
                 Gio.FileMonitorEvent.MOVED_OUT,
             ) or not self.scm.is_locked():
                 self.waiting_for_unlock = False
+                self._debug("Git lock released; full status queued")
                 self.request_full()
             return
         if relative == ".git/HEAD":
             self.on_history_change()
             self.request_full(refresh_branch=True)
+            return
+        if relative == ".git/FETCH_HEAD":
+            self.on_history_change()
             return
         if relative == ".git/packed-refs" or relative.startswith(".git/refs/"):
             # 2026-08-19: local and remote ref movements make a previous
@@ -730,6 +884,16 @@ class RepoWatcher:
 
         detail = str(result.error) if result.error else result.stderr.strip()
         return f"{context}: {detail or f'exit code {result.returncode}'}"
+
+    def _debug(self, message: str) -> None:
+        """Write focused watcher lifecycle diagnostics only in explicit debug mode."""
+
+        if self.debug:
+            print(
+                f"[SLATE watcher] repository={self.path} {message}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     @staticmethod
     def _ignore_error(_message: str) -> None:

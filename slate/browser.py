@@ -1164,6 +1164,9 @@ class BrowserManager:
         self.cache_directory = cache_directory or cache_home / "slate" / "webkit"
         self.context: object | None = None
         self.data_manager: object | None = None
+        self.normal_profile_ready = False
+        self.normal_profile_cancellable: Gio.Cancellable | None = None
+        self.pending_normal_pages: list[BrowserPage] = []
         self.next_identifier = 1
 
     def restore(self, projects: list[dict]) -> None:
@@ -1233,13 +1236,20 @@ class BrowserManager:
             if entry.private
             else self._normal_context()
         )
+        normal_profile_ready = entry.private or self.normal_profile_ready
         page = BrowserPage(
             entry,
             context,
             self._on_page_state_changed,
             self._on_reload_on_bell_changed,
             self.on_error,
+            load_initial=normal_profile_ready,
         )
+        if not normal_profile_ready:
+            # 2026-08-24: il primo caricamento delle tab normali attende che
+            # WebKit abbia letto il cookie jar condiviso; navigare prima può
+            # presentare richieste anonime ai siti e invalidare le sessioni.
+            self.pending_normal_pages.append(page)
         entry.context = context if entry.private else None
         entry.page = page
         self.workspace.add_named(
@@ -1277,7 +1287,35 @@ class BrowserManager:
             self.context = WebKit2.WebContext.new_with_website_data_manager(
                 self.data_manager
             )
+            # 2026-08-24: get_all_cookies è usato come barriera asincrona di
+            # inizializzazione, non per copiare né esporre cookie applicativi.
+            self.normal_profile_cancellable = Gio.Cancellable()
+            cookie_manager.get_all_cookies(
+                self.normal_profile_cancellable,
+                self._on_normal_profile_loaded,
+            )
         return self.context
+
+    def _on_normal_profile_loaded(
+        self, cookie_manager: object, result: Gio.AsyncResult
+    ) -> None:
+        """Load queued normal tabs after WebKit has opened the shared cookie jar."""
+
+        try:
+            cookie_manager.get_all_cookies_finish(result)
+        except GLib.Error as error:
+            if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                self.on_error(f"Unable to load persistent browser cookies: {error}")
+        self.normal_profile_cancellable = None
+        self.normal_profile_ready = True
+        pending_pages = tuple(self.pending_normal_pages)
+        self.pending_normal_pages.clear()
+        for page in pending_pages:
+            # Le pagine possono essere state chiuse mentre il profilo era in
+            # lettura; soltanto quelle ancora possedute devono navigare.
+            if page.closed or page.entry.page is not page:
+                continue
+            page.web_view.load_uri(page.entry.url)
 
     def _on_page_state_changed(self, page: BrowserPage) -> None:
         """Update persisted metadata and publish one page UI change."""
@@ -1446,6 +1484,10 @@ class BrowserManager:
     def shutdown(self) -> None:
         """Close materialized pages and release persistent/private contexts."""
 
+        if self.normal_profile_cancellable is not None:
+            self.normal_profile_cancellable.cancel()
+            self.normal_profile_cancellable = None
+        self.pending_normal_pages.clear()
         for entry in tuple(self.pages.values()):
             if entry.page is not None:
                 entry.page.close()
@@ -1456,3 +1498,4 @@ class BrowserManager:
         self.pages.clear()
         self.context = None
         self.data_manager = None
+        self.normal_profile_ready = False

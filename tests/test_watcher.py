@@ -1,6 +1,7 @@
 """Focused tests for non-blocking recursive watcher mounting."""
 
 from collections import deque
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,7 +36,9 @@ class RepoWatcherMountTest(unittest.TestCase):
                 active=False,
                 closed=False,
                 waiting_for_unlock=False,
-                scm=SimpleNamespace(is_locked=MagicMock(return_value=False)),
+                scm=SimpleNamespace(
+                    kind="hg", is_locked=MagicMock(return_value=False)
+                ),
                 mount_idle_id=1,
                 MOUNT_ACTIVE_BATCH=RepoWatcher.MOUNT_ACTIVE_BATCH,
                 MOUNT_INACTIVE_BATCH=RepoWatcher.MOUNT_INACTIVE_BATCH,
@@ -44,6 +47,7 @@ class RepoWatcherMountTest(unittest.TestCase):
                 _should_prune=None,
                 _is_nested_repository_path=None,
                 _on_change=MagicMock(),
+                _debug=MagicMock(),
                 on_error=MagicMock(),
             )
             owner._should_prune = RepoWatcher._should_prune.__get__(owner)
@@ -84,6 +88,7 @@ class RepoWatcherMountTest(unittest.TestCase):
                 on_file_change=MagicMock(),
                 request_paths=MagicMock(),
                 _on_metadata_change=MagicMock(),
+                _debug=MagicMock(),
             )
             owner._is_nested_repository_path = (
                 RepoWatcher._is_nested_repository_path.__get__(owner)
@@ -131,6 +136,7 @@ class RepoWatcherMountTest(unittest.TestCase):
                 on_file_change=MagicMock(),
                 request_paths=MagicMock(),
                 _on_metadata_change=MagicMock(),
+                _debug=MagicMock(),
             )
             owner._is_nested_repository_path = (
                 RepoWatcher._is_nested_repository_path.__get__(owner)
@@ -154,6 +160,83 @@ class RepoWatcherMountTest(unittest.TestCase):
             self.assertEqual(owner.monitors, {})
             self.assertEqual(owner._mount_queue, deque([str(rebuilt)]))
             owner.request_paths.assert_called_once_with(["src"])
+
+    def test_reconciliation_walks_below_an_existing_root_monitor(self) -> None:
+        """A manual rescan discovers directories missed by the live root monitor."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missed = root / "missed"
+            missed.mkdir()
+            root_monitor = MagicMock()
+            owner = SimpleNamespace(
+                _mount_queue=deque([str(root)]),
+                monitors={str(root): root_monitor},
+                ignored=set(),
+                nested_repositories=set(),
+                path=str(root),
+                active=False,
+                closed=False,
+                waiting_for_unlock=False,
+                scm=SimpleNamespace(
+                    kind="hg", is_locked=MagicMock(return_value=False)
+                ),
+                mount_idle_id=1,
+                MOUNT_ACTIVE_BATCH=RepoWatcher.MOUNT_ACTIVE_BATCH,
+                MOUNT_INACTIVE_BATCH=RepoWatcher.MOUNT_INACTIVE_BATCH,
+                MOUNT_BUDGET_US=RepoWatcher.MOUNT_BUDGET_US,
+                HARD_PRUNE=RepoWatcher.HARD_PRUNE,
+                _should_prune=None,
+                _is_nested_repository_path=None,
+                _on_change=MagicMock(),
+                _reconcile_initial_monitor_coverage=MagicMock(),
+                _debug=MagicMock(),
+                on_error=MagicMock(),
+            )
+            owner._should_prune = RepoWatcher._should_prune.__get__(owner)
+            owner._is_nested_repository_path = (
+                RepoWatcher._is_nested_repository_path.__get__(owner)
+            )
+
+            result = RepoWatcher._mount_batch(owner)
+
+            self.assertEqual(result, GLib.SOURCE_CONTINUE)
+            self.assertEqual(owner._mount_queue, deque([str(missed)]))
+            self.assertIs(owner.monitors[str(root)], root_monitor)
+
+    def test_mercurial_metadata_tree_is_pruned_from_recursive_mounts(self) -> None:
+        """The worktree traversal never subscribes to all Mercurial temporaries."""
+
+        owner = SimpleNamespace(
+            path="/project",
+            scm=SimpleNamespace(kind="hg"),
+            ignored=set(),
+            nested_repositories=set(),
+            HARD_PRUNE=RepoWatcher.HARD_PRUNE,
+            _is_nested_repository_path=MagicMock(return_value=False),
+        )
+
+        self.assertTrue(RepoWatcher._should_prune(owner, "/project/.hg"))
+        self.assertTrue(
+            RepoWatcher._should_prune(owner, "/project/.hg/store/data")
+        )
+
+    def test_git_metadata_tree_is_pruned_from_recursive_mounts(self) -> None:
+        """The worktree traversal never subscribes to Git administrative noise."""
+
+        owner = SimpleNamespace(
+            path="/project",
+            scm=SimpleNamespace(kind="git"),
+            ignored=set(),
+            nested_repositories=set(),
+            HARD_PRUNE=RepoWatcher.HARD_PRUNE,
+            _is_nested_repository_path=MagicMock(return_value=False),
+        )
+
+        self.assertTrue(RepoWatcher._should_prune(owner, "/project/.git"))
+        self.assertTrue(
+            RepoWatcher._should_prune(owner, "/project/.git/objects/ab")
+        )
 
 
 class _RepoWatcherSchedulingFixture:
@@ -247,6 +330,39 @@ class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase
         self.assertEqual(len(self.calls), 3)
         self._complete(2, "[]")
         self.assertEqual(len(self.calls), 3)
+
+    def test_watcher_diagnostics_are_emitted_only_in_debug_mode(self) -> None:
+        """Focused lifecycle traces remain silent outside explicit debug mode."""
+
+        diagnostics = io.StringIO()
+        with patch("slate.watcher.sys.stderr", diagnostics):
+            self.watcher._debug("hidden")
+            self.watcher.debug = True
+            self.watcher._debug("visible")
+
+        self.assertNotIn("hidden", diagnostics.getvalue())
+        self.assertIn(
+            f"[SLATE watcher] repository={self.watcher.path} visible",
+            diagnostics.getvalue(),
+        )
+
+    def test_mercurial_uses_only_explicit_metadata_file_monitors(self) -> None:
+        """HG metadata coverage excludes its recursively noisy administrative tree."""
+
+        relatives = {
+            Path(path).relative_to(self.root).as_posix()
+            for path in self.watcher.metadata_monitors
+        }
+        self.assertEqual(
+            relatives,
+            {
+                ".hg/branch",
+                ".hg/dirstate",
+                ".hg/merge/state",
+                ".hg/store/00changelog.i",
+                ".hg/wlock",
+            },
+        )
 
     def test_initial_mount_gap_queues_one_reconciliation_status(self) -> None:
         """Changes during recursive monitor mounting receive one final full status."""
@@ -480,6 +596,50 @@ class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase
             self.calls[2][0], ["hg", "status", "--copies", "-Tjson"]
         )
 
+    def test_muted_lock_removal_still_releases_waiting_status(self) -> None:
+        """Metadata muting cannot consume the event needed to resume the scheduler."""
+
+        self._complete(0)
+        self._complete(1, "default\n")
+        self.watcher.waiting_for_unlock = True
+        self.watcher.mute_until = (GLib.get_monotonic_time() // 1000) + 500
+        changed = MagicMock()
+        changed.get_path.return_value = str(self.root / ".hg" / "wlock")
+
+        self.watcher._on_change(
+            MagicMock(),
+            changed,
+            None,
+            Gio.FileMonitorEvent.DELETED,
+        )
+        self._drain_main_context()
+
+        self.assertFalse(self.watcher.waiting_for_unlock)
+        self.assertEqual(
+            self.calls[2][0], ["hg", "status", "--copies", "-Tjson"]
+        )
+
+    def test_mercurial_temporary_metadata_is_discarded_before_diagnostics(
+        self,
+    ) -> None:
+        """HG command temporaries neither queue work nor flood debug output."""
+
+        self.watcher.debug = True
+        self.watcher._debug = MagicMock()
+        self.watcher._on_metadata_change = MagicMock()
+        temporary = MagicMock()
+        temporary.get_path.return_value = str(self.root / ".hg" / "tmp123")
+
+        self.watcher._on_change(
+            MagicMock(),
+            temporary,
+            None,
+            Gio.FileMonitorEvent.CREATED,
+        )
+
+        self.watcher._debug.assert_not_called()
+        self.watcher._on_metadata_change.assert_not_called()
+
 
 class GitRepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase):
     """Verify Git reuses the event-driven, sequential incremental scheduler."""
@@ -505,6 +665,44 @@ class GitRepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestC
         self._complete(1, "main\n")
         self.assertEqual(self.calls[2][0][:3], ["git", "status", "--porcelain=v2"])
         self.assertEqual(len(self.calls), 3)
+
+    def test_git_uses_explicit_metadata_and_current_branch_monitors(self) -> None:
+        """Git avoids recursive metadata watches while retaining its active ref."""
+
+        self._finish_startup()
+        relatives = {
+            Path(path).relative_to(self.root).as_posix()
+            for path in self.watcher.metadata_monitors
+        }
+        self.assertEqual(
+            relatives,
+            {
+                ".git/FETCH_HEAD",
+                ".git/HEAD",
+                ".git/index",
+                ".git/index.lock",
+                ".git/info/exclude",
+                ".git/packed-refs",
+                ".git/refs/heads/main",
+            },
+        )
+
+    def test_git_branch_change_retargets_the_precise_ref_monitor(self) -> None:
+        """Changing branch cancels the old ref monitor and watches the new ref."""
+
+        self._finish_startup()
+        previous_path = str(self.root / ".git" / "refs" / "heads" / "main")
+        previous_monitor = self.watcher.metadata_monitors[previous_path]
+
+        self.watcher._branch = "feature/topic"
+        self.watcher._mount_git_branch_monitor()
+
+        current_path = str(
+            self.root / ".git" / "refs" / "heads" / "feature" / "topic"
+        )
+        self.assertTrue(previous_monitor.is_cancelled())
+        self.assertNotIn(previous_path, self.watcher.metadata_monitors)
+        self.assertIn(current_path, self.watcher.metadata_monitors)
 
     def test_git_worktree_change_uses_path_limited_status(self) -> None:
         """A small Git change receives the same bounded incremental refresh as HG."""
