@@ -276,7 +276,12 @@ class EditorDocument(Gtk.Box):
             if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 return
             if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND):
-                self.on_removed(self, f"File no longer exists: {self.relative_path}")
+                if reason == "initial":
+                    self.on_removed(
+                        self, f"File no longer exists: {self.relative_path}"
+                    )
+                else:
+                    self._show_deleted_conflict()
                 return
             self._show_notice(f"Unable to read the file: {error}", Gtk.MessageType.ERROR)
             return
@@ -441,7 +446,7 @@ class EditorDocument(Gtk.Box):
         )
 
     def _handle_external_change(self) -> bool:
-        """Reload clean buffers or require a choice for dirty/deleted buffers."""
+        """Reload existing files or retain deleted buffers for an explicit choice."""
 
         self.monitor_source_id = None
         now = GLib.get_monotonic_time() // 1000
@@ -458,17 +463,7 @@ class EditorDocument(Gtk.Box):
             return GLib.SOURCE_REMOVE
         exists = bool(self.path and Path(self.path).exists())
         if not exists:
-            if self.dirty:
-                self.external_conflict = True
-                self.deleted_conflict = True
-                self.attention = True
-                self._show_conflict(
-                    "The file was deleted on disk.",
-                    (("Recreate from my buffer", self.RESPONSE_RECREATE), ("Discard", self.RESPONSE_DISCARD)),
-                )
-                self.on_state(self)
-            else:
-                self.on_removed(self, f"File deleted: {self.relative_path}")
+            self._show_deleted_conflict()
             return GLib.SOURCE_REMOVE
         if self.dirty:
             self._ensure_monitor()
@@ -483,6 +478,25 @@ class EditorDocument(Gtk.Box):
         else:
             self._begin_load("external")
         return GLib.SOURCE_REMOVE
+
+    def _show_deleted_conflict(self) -> None:
+        """Keep a deleted file open and offer recovery without losing its buffer."""
+
+        # 2026-08-26: gli agenti sostituiscono spesso un file con delete+create;
+        # la scheda resta viva e monitora lo stesso path, così una ricomparsa
+        # può seguire il normale reload esterno invece di perdere il documento.
+        self._ensure_monitor()
+        self.external_conflict = True
+        self.deleted_conflict = True
+        self.attention = True
+        self._show_conflict(
+            "The file was deleted on disk. It may be replaced shortly.",
+            (
+                ("Recreate from my buffer", self.RESPONSE_RECREATE),
+                ("Close tab", self.RESPONSE_DISCARD),
+            ),
+        )
+        self.on_state(self)
 
     def _show_conflict(
         self, message: str, actions: tuple[tuple[str, int], ...]
@@ -529,6 +543,10 @@ class EditorDocument(Gtk.Box):
             self._begin_load("conflict-disk")
             return
         if response in {self.RESPONSE_MINE, self.RESPONSE_RECREATE}:
+            if response == self.RESPONSE_RECREATE and not self.dirty:
+                # Anche un buffer pulito conserva l'ultima versione valida; la
+                # scelta esplicita lo rende salvabile sul path ormai assente.
+                self.buffer.set_modified(True)
             self.external_conflict = False
             self.deleted_conflict = False
             self.force_next_save = True

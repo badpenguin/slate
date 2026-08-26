@@ -132,6 +132,70 @@ class EditorTest(unittest.TestCase):
         self.assertFalse(editor.info_bar.get_visible())
         editor.close()
 
+    def test_clean_external_deletion_keeps_the_editor_open(self) -> None:
+        """A deleted clean file remains recoverable until the user chooses an action."""
+
+        editor = self._document()
+        self.path.unlink()
+
+        editor._handle_external_change()
+
+        self.assertEqual(self.removed, [])
+        self.assertTrue(editor.external_conflict)
+        self.assertTrue(editor.deleted_conflict)
+        self.assertTrue(editor.attention)
+        self.assertTrue(editor.info_bar.get_visible())
+        self.assertIsNotNone(editor.monitor)
+        editor.close()
+
+    def test_deleted_clean_file_reloads_when_an_agent_recreates_it(self) -> None:
+        """A replacement appearing after deletion follows the standard clean reload."""
+
+        editor = self._document()
+        self.path.unlink()
+        self._wait_until(lambda: editor.deleted_conflict)
+        self.path.write_text("# Recreated by agent\n", encoding="utf-8")
+
+        def recreated_buffer_is_current() -> bool:
+            """Report when the recreated file has completed its external reload."""
+
+            text = editor.buffer.get_text(
+                editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True
+            )
+            return not editor.loading and text == "# Recreated by agent\n"
+
+        self._wait_until(recreated_buffer_is_current)
+
+        text = editor.buffer.get_text(
+            editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True
+        )
+        self.assertEqual(text, "# Recreated by agent\n")
+        self.assertEqual(self.removed, [])
+        self.assertFalse(editor.external_conflict)
+        self.assertFalse(editor.deleted_conflict)
+        self.assertFalse(editor.attention)
+        self.assertFalse(editor.info_bar.get_visible())
+        editor.close()
+
+    def test_recreate_choice_makes_a_clean_deleted_buffer_savable(self) -> None:
+        """Choosing recreation marks the retained last disk version for saving."""
+
+        editor = self._document()
+        self.path.unlink()
+        editor._handle_external_change()
+
+        editor._on_info_response(editor.info_bar, editor.RESPONSE_RECREATE)
+
+        self.assertTrue(editor.dirty)
+        self.assertTrue(editor.force_next_save)
+        self.assertFalse(editor.external_conflict)
+        completed: list[bool] = []
+        editor.save(completed.append)
+        self._wait_until(lambda: bool(completed))
+        self.assertEqual(completed, [True])
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "# TODO\n")
+        editor.close()
+
     def test_repeated_atomic_replacements_keep_clean_markdown_current(self) -> None:
         """Agent-style atomic writes keep refreshing an already open document."""
 
