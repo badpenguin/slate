@@ -100,6 +100,7 @@ class SlateWindow(Gtk.ApplicationWindow):
     PROJECT_DRAG_PAYLOAD = b"slate-project-sidebar-row"
     PROJECT_DRAG_ACTIONS = Gdk.DragAction.COPY | Gdk.DragAction.MOVE
     BROWSER_BELL_DEBOUNCE_MS = 250
+    INACTIVE_WATCHER_EVICTION_MS = 60 * 60 * 1000
 
     def __init__(
         self,
@@ -120,6 +121,8 @@ class SlateWindow(Gtk.ApplicationWindow):
         # 2026-08-17: typed references keep mixed HG/Git runtime objects
         # isolated without changing the lazy per-project lifetime architecture.
         self.watchers: dict[tuple[str, RepositoryRef], RepoWatcher] = {}
+        self.inactive_watcher_eviction_ids: dict[str, int] = {}
+        self.evicted_watcher_projects: set[str] = set()
         self.scm_by_repository: dict[tuple[str, RepositoryRef], SCM] = {}
         self.snapshots: dict[
             tuple[str, RepositoryRef], tuple[list[FileStatus], str]
@@ -1208,15 +1211,17 @@ class SlateWindow(Gtk.ApplicationWindow):
         return SlateWindow._sorted_repositories(repositories)
 
     def _attach_repository(self, project: dict, repository: RepositoryRef) -> None:
-        """Create the persistent SCM adapter and watcher for one discovered root."""
+        """Create or restore the SCM adapter and watcher for one repository root."""
 
         project_name = project["name"]
         key = (project_name, repository)
         root = self._repository_root(project, repository.path)
-        if root is None or key in self.scm_by_repository:
+        if root is None or key in self.watchers:
             return
-        scm: SCM = GitSCM(root) if repository.scm_type == "git" else MercurialSCM(root)
-        self.scm_by_repository[key] = scm
+        scm = self.scm_by_repository.get(key)
+        if scm is None:
+            scm = GitSCM(root) if repository.scm_type == "git" else MercurialSCM(root)
+            self.scm_by_repository[key] = scm
         self.repositories_by_project.setdefault(project_name, set()).add(repository)
 
         def status_changed(
@@ -1285,8 +1290,9 @@ class SlateWindow(Gtk.ApplicationWindow):
                 repo_key[0], repo_key[1], RepositorySyncStatus()
             )
 
-        # 2026-08-17: each working copy owns a watcher, while cached instances
-        # survive project switches to avoid rebuilding large monitor trees.
+        # 2026-08-26: ogni working copy mantiene un solo watcher, ma dopo
+        # un'ora di inattività il progetto può ricrearlo riusando adapter e
+        # snapshot già in cache, senza toccare terminali o viste persistenti.
         watcher = RepoWatcher(
             root,
             scm,
@@ -1299,6 +1305,66 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.watchers[key] = watcher
         self._update_repository_boundaries(project_name)
         watcher.set_active(project_name == self.active_project_name)
+
+    def _schedule_inactive_watcher_eviction(self, project_name: str) -> None:
+        """Schedule one watcher cleanup after a project remains inactive for an hour."""
+
+        if not project_name or project_name in self.inactive_watcher_eviction_ids:
+            return
+        source_id = GLib.timeout_add(
+            self.INACTIVE_WATCHER_EVICTION_MS,
+            self._evict_inactive_project_watchers,
+            project_name,
+        )
+        self.inactive_watcher_eviction_ids[project_name] = source_id
+        self._debug_watcher_lifecycle(
+            project_name,
+            "inactive cleanup scheduled in 60 minutes",
+        )
+
+    def _cancel_inactive_watcher_eviction(self, project_name: str) -> None:
+        """Cancel a pending inactive cleanup when its project becomes active."""
+
+        source_id = self.inactive_watcher_eviction_ids.pop(project_name, None)
+        if source_id is None:
+            return
+        GLib.source_remove(source_id)
+        self._debug_watcher_lifecycle(
+            project_name,
+            "inactive cleanup cancelled",
+        )
+
+    def _evict_inactive_project_watchers(self, project_name: str) -> bool:
+        """Close repository watchers after one uninterrupted inactive interval."""
+
+        self.inactive_watcher_eviction_ids.pop(project_name, None)
+        if self.closing or project_name == self.active_project_name:
+            return GLib.SOURCE_REMOVE
+        evicted = 0
+        for key, watcher in tuple(self.watchers.items()):
+            if key[0] != project_name:
+                continue
+            watcher.close()
+            self.watchers.pop(key, None)
+            evicted += 1
+        if evicted:
+            self.evicted_watcher_projects.add(project_name)
+        self._debug_watcher_lifecycle(
+            project_name,
+            f"inactive cleanup completed watchers={evicted}",
+        )
+        return GLib.SOURCE_REMOVE
+
+    @staticmethod
+    def _debug_watcher_lifecycle(project_name: str, message: str) -> None:
+        """Write project watcher eviction diagnostics only under explicit --debug."""
+
+        if os.environ.get("SLATE_DEBUG") == "1":
+            print(
+                f"[SLATE watcher] project={project_name} {message}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def _scan_project_repositories(
         self, project: dict, refresh_existing: bool = False
@@ -1560,6 +1626,8 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _remove_project_repository_runtime(self, project_name: str) -> None:
         """Close discovery and every repository object owned by one project."""
 
+        self._cancel_inactive_watcher_eviction(project_name)
+        self.evicted_watcher_projects.discard(project_name)
         discovery = self.discovery_by_project.pop(project_name, None)
         if discovery is not None:
             discovery.cancel()
@@ -1977,7 +2045,8 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Switch terminal and project panel without remounting a shared watcher."""
 
         self._close_preview()
-        project_changed = self.active_project_name != project["name"]
+        previous_project_name = self.active_project_name
+        project_changed = previous_project_name != project["name"]
         if project_changed and hasattr(self, "project_search"):
             self._close_project_search()
         valid_terminal = (
@@ -2043,12 +2112,25 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.right_notebook.set_current_page(0)
         self.file_manager.set_active(False)
         self.active_project_name = project["name"]
+        self._cancel_inactive_watcher_eviction(project["name"])
         # 2026-08-17: attach the cached project model before discovery; binding
         # it as supported avoids clearing clean repository roots during switch.
         self.panel.bind_project(project["name"], True)
+        restoring_evicted_watchers = project["name"] in self.evicted_watcher_projects
         repositories = self._ensure_project_repositories(project)
+        if restoring_evicted_watchers:
+            restored_count = sum(
+                1 for name, _repository in self.watchers if name == project["name"]
+            )
+            self.evicted_watcher_projects.discard(project["name"])
+            self._debug_watcher_lifecycle(
+                project["name"],
+                f"watchers reinitialized count={restored_count}; full reconciliation queued",
+            )
         for (name, _repository), watcher in self.watchers.items():
             watcher.set_active(name == self.active_project_name)
+        if previous_project_name is not None:
+            self._schedule_inactive_watcher_eviction(previous_project_name)
         self.panel.set_repositories(
             repositories, project["name"] in self.discovery_by_project
         )
@@ -4319,6 +4401,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         self._close_preview()
         self._close_project_search()
         self._stop_unattended_verification()
+        for source_id in self.inactive_watcher_eviction_ids.values():
+            GLib.source_remove(source_id)
+        self.inactive_watcher_eviction_ids.clear()
+        self.evicted_watcher_projects.clear()
         if self.browser_bell_timeout_id is not None:
             GLib.source_remove(self.browser_bell_timeout_id)
             self.browser_bell_timeout_id = None

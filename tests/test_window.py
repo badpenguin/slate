@@ -1,5 +1,6 @@
 """Focused window-action tests without constructing another SLATE GUI."""
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -457,12 +458,17 @@ class WindowActionTest(unittest.TestCase):
             watchers={},
             snapshots={},
             discovery_by_project={},
+            inactive_watcher_eviction_ids={},
+            evicted_watcher_projects=set(),
             _close_preview=MagicMock(),
             _configure_file_manager=MagicMock(),
             _set_revision_count=MagicMock(),
             _ensure_project_repositories=MagicMock(return_value=[]),
             _update_active_revision_count=MagicMock(),
             _queue_unattended_project_verification=MagicMock(),
+            _cancel_inactive_watcher_eviction=MagicMock(),
+            _schedule_inactive_watcher_eviction=MagicMock(),
+            _debug_watcher_lifecycle=MagicMock(),
         )
         first = {
             "name": "first",
@@ -490,6 +496,7 @@ class WindowActionTest(unittest.TestCase):
             owner.terminals.add.call_args_list[1],
             call(first, "test", initial_command="codex resume"),
         )
+        owner._schedule_inactive_watcher_eviction.assert_called_once_with("first")
         owner._configure_file_manager.assert_not_called()
 
     def test_file_tab_recovers_the_active_project_binding(self) -> None:
@@ -614,6 +621,114 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._attach_repository(owner, project, repository)
         self.assertIsInstance(owner.scm_by_repository[("repo", repository)], GitSCM)
         watcher_class.assert_called_once()
+
+    def test_evicted_repository_reuses_adapter_and_recreates_watcher(self) -> None:
+        """Reactivation remounts one watcher without replacing cached SCM state."""
+
+        project = {"name": "repo", "path": "/tmp/repo"}
+        repository = RepositoryRef(".", "hg")
+        scm = MagicMock()
+        owner = SimpleNamespace(
+            scm_by_repository={("repo", repository): scm},
+            watchers={},
+            snapshots={},
+            repositories_by_project={"repo": {repository}},
+            ignored_by_repository={},
+            active_project_name="repo",
+            panel=MagicMock(),
+            file_manager=MagicMock(),
+            _repository_root=MagicMock(return_value="/tmp/repo"),
+            _update_repository_boundaries=MagicMock(),
+        )
+
+        with patch("slate.window.RepoWatcher") as watcher_class:
+            SlateWindow._attach_repository(owner, project, repository)
+
+        self.assertIs(owner.scm_by_repository[("repo", repository)], scm)
+        self.assertIs(
+            owner.watchers[("repo", repository)], watcher_class.return_value
+        )
+        self.assertIs(watcher_class.call_args.args[1], scm)
+        watcher_class.return_value.set_active.assert_called_once_with(True)
+
+    def test_inactive_watcher_cleanup_is_scheduled_only_once(self) -> None:
+        """One project switch owns one one-hour eviction source, never a poll."""
+
+        owner = SimpleNamespace(
+            inactive_watcher_eviction_ids={},
+            INACTIVE_WATCHER_EVICTION_MS=SlateWindow.INACTIVE_WATCHER_EVICTION_MS,
+            _evict_inactive_project_watchers=MagicMock(),
+            _debug_watcher_lifecycle=MagicMock(),
+        )
+        with patch("slate.window.GLib.timeout_add", return_value=73) as timeout_add:
+            SlateWindow._schedule_inactive_watcher_eviction(owner, "repo")
+            SlateWindow._schedule_inactive_watcher_eviction(owner, "repo")
+
+        timeout_add.assert_called_once_with(
+            60 * 60 * 1000,
+            owner._evict_inactive_project_watchers,
+            "repo",
+        )
+        self.assertEqual(owner.inactive_watcher_eviction_ids, {"repo": 73})
+
+    def test_reactivation_cancels_pending_watcher_cleanup(self) -> None:
+        """Returning before one hour preserves the existing watcher instances."""
+
+        owner = SimpleNamespace(
+            inactive_watcher_eviction_ids={"repo": 73},
+            _debug_watcher_lifecycle=MagicMock(),
+        )
+        with patch("slate.window.GLib.source_remove") as source_remove:
+            SlateWindow._cancel_inactive_watcher_eviction(owner, "repo")
+
+        source_remove.assert_called_once_with(73)
+        self.assertEqual(owner.inactive_watcher_eviction_ids, {})
+
+    def test_elapsed_inactive_cleanup_closes_only_project_watchers(self) -> None:
+        """Eviction retains adapters and snapshots while releasing inotify monitors."""
+
+        first = MagicMock()
+        second = MagicMock()
+        other = MagicMock()
+        owner = SimpleNamespace(
+            inactive_watcher_eviction_ids={"repo": 73},
+            closing=False,
+            active_project_name="other",
+            watchers={
+                ("repo", RepositoryRef(".", "hg")): first,
+                ("repo", RepositoryRef("nested", "git")): second,
+                ("other", RepositoryRef(".", "git")): other,
+            },
+            scm_by_repository={"retained": MagicMock()},
+            snapshots={"retained": MagicMock()},
+            evicted_watcher_projects=set(),
+            _debug_watcher_lifecycle=MagicMock(),
+        )
+
+        result = SlateWindow._evict_inactive_project_watchers(owner, "repo")
+
+        self.assertFalse(result)
+        first.close.assert_called_once_with()
+        second.close.assert_called_once_with()
+        other.close.assert_not_called()
+        self.assertEqual(list(owner.watchers), [("other", RepositoryRef(".", "git"))])
+        self.assertIn("retained", owner.scm_by_repository)
+        self.assertIn("retained", owner.snapshots)
+        self.assertEqual(owner.evicted_watcher_projects, {"repo"})
+
+    def test_watcher_cleanup_debug_is_silent_without_debug_flag(self) -> None:
+        """Lifecycle messages appear only in an explicitly foreground debug run."""
+
+        diagnostics = io.StringIO()
+        with patch.dict("slate.window.os.environ", {}, clear=True), patch(
+            "slate.window.sys.stderr", diagnostics
+        ):
+            SlateWindow._debug_watcher_lifecycle("repo", "hidden")
+            with patch.dict("slate.window.os.environ", {"SLATE_DEBUG": "1"}):
+                SlateWindow._debug_watcher_lifecycle("repo", "visible")
+
+        self.assertNotIn("hidden", diagnostics.getvalue())
+        self.assertIn("[SLATE watcher] project=repo visible", diagnostics.getvalue())
 
     def test_automatic_repository_scan_runs_only_on_first_project_use(self) -> None:
         """Switching back to a loaded project never repeats its filesystem scan."""
