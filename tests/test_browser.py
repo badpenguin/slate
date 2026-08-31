@@ -15,6 +15,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk
 
 from slate.browser import (
+    BrowserEntry,
     BrowserManager,
     BrowserPage,
     WebKit2,
@@ -71,6 +72,54 @@ class BrowserTest(unittest.TestCase):
         self.assertIsNone(normalize_browser_uri("file:///tmp/secret"))
         self.assertIsNone(normalize_browser_uri("javascript:alert(1)"))
         self.assertIsNone(normalize_browser_uri("   "))
+
+    def test_first_entered_url_becomes_the_persistent_home(self) -> None:
+        """Only the first real address entered in a new tab defines its Home URL."""
+
+        entry = BrowserEntry("repo", "browser-1")
+        owner = SimpleNamespace(
+            entry=entry,
+            failed_loading=True,
+            error_bar=MagicMock(),
+            home_button=MagicMock(),
+            web_view=MagicMock(),
+            on_state_changed=MagicMock(),
+            on_error=MagicMock(),
+        )
+        address = MagicMock()
+        address.get_text.return_value = "example.com/start"
+
+        BrowserPage._on_uri_activated(owner, address)
+
+        self.assertEqual(entry.home_url, "https://example.com/start")
+        owner.home_button.set_sensitive.assert_called_once_with(True)
+        owner.web_view.load_uri.assert_called_once_with(entry.home_url)
+        address.get_text.return_value = "example.com/other"
+        BrowserPage._on_uri_activated(owner, address)
+        self.assertEqual(entry.home_url, "https://example.com/start")
+        self.assertEqual(owner.on_state_changed.call_count, 1)
+
+    def test_about_blank_does_not_define_home_and_home_loads_exact_url(self) -> None:
+        """The initial blank page leaves Home disabled until a real URL exists."""
+
+        entry = BrowserEntry("repo", "browser-1")
+        owner = SimpleNamespace(
+            entry=entry,
+            failed_loading=False,
+            error_bar=MagicMock(),
+            home_button=MagicMock(),
+            web_view=MagicMock(),
+            on_state_changed=MagicMock(),
+            on_error=MagicMock(),
+        )
+        address = MagicMock()
+        address.get_text.return_value = "about:blank"
+        BrowserPage._on_uri_activated(owner, address)
+        self.assertIsNone(entry.home_url)
+
+        entry.home_url = "https://example.com/home"
+        BrowserPage._on_home_clicked(owner, MagicMock())
+        owner.web_view.load_uri.assert_called_with(entry.home_url)
 
     def test_responsive_fit_scale_never_enlarges_the_viewport(self) -> None:
         """Fit calculations preserve 100% or reduce both dimensions uniformly."""
@@ -137,7 +186,42 @@ class BrowserTest(unittest.TestCase):
         self.assertIsNone(manager.context)
         self.assertIsNone(entry.page)
         self.assertEqual(entry.title, "Docs")
+        self.assertEqual(entry.home_url, "https://example.com/docs")
         manager.shutdown()
+
+    def test_initial_load_starts_only_after_the_page_is_visible(self) -> None:
+        """Map the WebView before HTTP authentication can request its dialog."""
+
+        workspace = MagicMock()
+        manager = BrowserManager(
+            workspace, MagicMock(), MagicMock(), MagicMock()
+        )
+        entry = BrowserEntry(
+            "repo",
+            "browser-1",
+            url="https://protected.example/start",
+            private=True,
+            context=MagicMock(),
+        )
+        page = MagicMock()
+        calls = MagicMock()
+        calls.attach_mock(workspace.add_named, "add_named")
+        calls.attach_mock(page.show_all, "show_all")
+        calls.attach_mock(workspace.set_visible_child, "set_visible_child")
+        calls.attach_mock(page.web_view.load_uri, "load_uri")
+
+        with patch("slate.browser.BrowserPage", return_value=page):
+            manager._materialize(entry)
+
+        call_names = [call[0] for call in calls.mock_calls]
+        self.assertLess(call_names.index("add_named"), call_names.index("show_all"))
+        self.assertLess(
+            call_names.index("show_all"), call_names.index("set_visible_child")
+        )
+        self.assertLess(
+            call_names.index("set_visible_child"), call_names.index("load_uri")
+        )
+        page.web_view.load_uri.assert_called_once_with(entry.url)
 
     def test_normal_pages_wait_for_the_shared_cookie_jar_before_loading(self) -> None:
         """Restored normal tabs navigate only after persistent cookies are ready."""
@@ -191,12 +275,14 @@ class BrowserTest(unittest.TestCase):
                 {
                     "id": "browser-1",
                     "url": "about:blank",
+                    "home_url": None,
                     "title": "Browser",
                     "private": True,
                 },
                 {
                     "id": "browser-2",
                     "url": "about:blank",
+                    "home_url": None,
                     "title": "Browser",
                     "private": True,
                 },
@@ -582,6 +668,49 @@ class BrowserTest(unittest.TestCase):
         page._set_loading.assert_called_once_with(False)
         page.error_label.set_text.assert_not_called()
         page.error_bar.show_all.assert_not_called()
+
+    def test_auth_debug_preserves_the_native_dialog_without_exposing_realm(self) -> None:
+        """Authentication diagnostics remain metadata-only and propagate WebKit."""
+
+        page = SimpleNamespace(project_name="repo", identifier="browser-1")
+        request = MagicMock()
+        request.get_host.return_value = "protected.example"
+        request.is_retry.return_value = True
+        request.can_save_credentials.return_value = True
+        stderr = io.StringIO()
+
+        with (
+            patch.dict("slate.browser.os.environ", {"SLATE_DEBUG": "1"}),
+            redirect_stderr(stderr),
+        ):
+            handled = BrowserPage._on_authenticate(page, object(), request)
+
+        self.assertFalse(handled)
+        self.assertIn("host='protected.example'", stderr.getvalue())
+        self.assertIn("retry=True can-save=True", stderr.getvalue())
+        self.assertNotIn("realm", stderr.getvalue())
+
+    def test_cookie_debug_reports_only_the_aggregate_count(self) -> None:
+        """Cookie changes expose their total count without cookie contents."""
+
+        manager = BrowserManager(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        cookie_manager = MagicMock()
+        cookie_manager.get_all_cookies_finish.return_value = [object(), object()]
+        stderr = io.StringIO()
+
+        with (
+            patch.dict("slate.browser.os.environ", {"SLATE_DEBUG": "1"}),
+            redirect_stderr(stderr),
+        ):
+            manager._on_cookie_store_changed(cookie_manager)
+            callback = cookie_manager.get_all_cookies.call_args.args[1]
+            callback(cookie_manager, MagicMock())
+
+        self.assertEqual(
+            stderr.getvalue(),
+            "[SLATE browser] persistent cookie store changed count=2\n",
+        )
+        self.assertFalse(manager.cookie_debug_in_flight)
 
     def test_browser_shortcuts_are_scoped_to_visible_page(self) -> None:
         """Navigation shortcuts act on the browser and ignore the terminal page."""

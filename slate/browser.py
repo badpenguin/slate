@@ -35,6 +35,13 @@ _BLOCKED_SCHEMES = {"about", "blob", "data", "file", "javascript"}
 _RESPONSIVE_STAGE_PADDING = 24
 
 
+def _debug_browser(message: str) -> None:
+    """Write privacy-safe browser lifecycle diagnostics only under --debug."""
+
+    if os.environ.get("SLATE_DEBUG") == "1":
+        print(f"[SLATE browser] {message}", file=sys.stderr, flush=True)
+
+
 def _report_blocked_navigation(uri: str, scheme: str, source: str) -> None:
     """Write one complete WebKit policy rejection to standard error."""
 
@@ -118,6 +125,7 @@ class BrowserEntry:
     project_name: str
     identifier: str
     url: str = "about:blank"
+    home_url: str | None = None
     title: str = "Browser"
     private: bool = False
     reload_on_bell: bool = False
@@ -204,9 +212,8 @@ class BrowserPage(Gtk.Box):
         on_reload_on_bell_changed: Callable[["BrowserPage", bool], None],
         on_error: Callable[[str], None],
         web_view: object | None = None,
-        load_initial: bool = True,
     ) -> None:
-        """Build and start one page in its persistent or private context."""
+        """Build one page in its persistent or private context."""
 
         if WebKit2 is None:
             raise RuntimeError("WebKitGTK 4.1 is unavailable")
@@ -243,12 +250,16 @@ class BrowserPage(Gtk.Box):
         self.reload_button = self._icon_button(
             "view-refresh", "Reload (F5 / Ctrl+R)"
         )
+        self.home_button = self._icon_button("go-home", "Home")
         self.back_button.connect("clicked", self._on_back_clicked)
         self.forward_button.connect("clicked", self._on_forward_clicked)
         self.reload_button.connect("clicked", self._on_reload_clicked)
+        self.home_button.connect("clicked", self._on_home_clicked)
+        self.home_button.set_sensitive(entry.home_url is not None)
         toolbar.pack_start(self.back_button, False, False, 0)
         toolbar.pack_start(self.forward_button, False, False, 0)
         toolbar.pack_start(self.reload_button, False, False, 0)
+        toolbar.pack_start(self.home_button, False, False, 0)
 
         self.development_button = Gtk.MenuButton(label="Development")
         self.development_menu = Gtk.Menu()
@@ -356,6 +367,10 @@ class BrowserPage(Gtk.Box):
         self.pack_start(self.error_bar, False, False, 0)
 
         self.web_view = web_view or WebKit2.WebView.new_with_context(context)
+        _debug_browser(
+            f"page created project={entry.project_name!r} id={entry.identifier!r} "
+            f"private={entry.private}"
+        )
         settings = self.web_view.get_settings()
         settings.set_enable_developer_extras(True)
         if entry.private:
@@ -372,6 +387,7 @@ class BrowserPage(Gtk.Box):
         self.web_view.connect("notify::uri", self._on_page_identity_changed)
         self.web_view.connect("load-changed", self._on_load_changed)
         self.web_view.connect("load-failed", self._on_load_failed)
+        self.web_view.connect("authenticate", self._on_authenticate)
         self.web_view.connect(
             "web-process-terminated", self._on_web_process_terminated
         )
@@ -410,10 +426,6 @@ class BrowserPage(Gtk.Box):
         self.viewport_overlay.add_overlay(self.exit_responsive_button)
         self.pack_start(self.viewport_overlay, True, True, 0)
         self.uri_entry.set_text(entry.url)
-        # 2026-08-17: il caricamento parte solo dopo la materializzazione lazy;
-        # il ripristino della sola riga non crea WebView né richieste di rete.
-        if load_initial:
-            self.web_view.load_uri(entry.url)
         self._update_navigation_state()
         self._update_development_actions()
 
@@ -557,6 +569,9 @@ class BrowserPage(Gtk.Box):
     def close(self) -> None:
         """Stop loading and release developer tools and pending popup bridges."""
 
+        _debug_browser(
+            f"page closing project={self.project_name!r} id={self.identifier!r}"
+        )
         self.closed = True
         for popup_view in tuple(self.external_popup_bridges):
             self._release_external_popup_bridge(popup_view)
@@ -588,6 +603,15 @@ class BrowserPage(Gtk.Box):
             self.web_view.stop_loading()
         else:
             self.reload()
+
+    def _on_home_clicked(self, _button: Gtk.Button) -> None:
+        """Navigate this page to its first explicitly entered persistent URL."""
+
+        if self.entry.home_url is None:
+            return
+        self.failed_loading = False
+        self.error_bar.hide()
+        self.web_view.load_uri(self.entry.home_url)
 
     def _on_hard_reload_activate(self, _item: Gtk.MenuItem) -> None:
         """Run the explicit development reload without consulting HTTP cache."""
@@ -863,6 +887,14 @@ class BrowserPage(Gtk.Box):
         self.failed_loading = False
         entry.set_text(uri)
         entry.set_position(-1)
+        if self.entry.home_url is None and uri != "about:blank":
+            # 2026-08-27: Home identifica il primo indirizzo realmente inserito
+            # nella scheda; redirect e navigazioni successive non devono
+            # cambiarlo, mentre about:blank resta soltanto lo stato iniziale.
+            self.entry.home_url = uri
+            self.home_button.set_sensitive(True)
+            self.entry.url = uri
+            self.on_state_changed(self)
         self.web_view.load_uri(uri)
 
     def _on_page_identity_changed(
@@ -916,6 +948,20 @@ class BrowserPage(Gtk.Box):
         self.error_label.set_text(f"Failed to load {failing_uri}: {error}")
         self.error_bar.show_all()
         return True
+
+    def _on_authenticate(self, _web_view: object, request: object) -> bool:
+        """Trace an HTTP challenge and preserve WebKit's native auth dialog."""
+
+        # 2026-08-27: host e stato della challenge distinguono credenziali non
+        # riutilizzate da reset del profilo; realm, username e password restano
+        # esclusi perché possono contenere informazioni sensibili.
+        _debug_browser(
+            f"auth challenge project={self.project_name!r} "
+            f"id={self.identifier!r} host={request.get_host()!r} "
+            f"retry={request.is_retry()} "
+            f"can-save={request.can_save_credentials()}"
+        )
+        return False
 
     def _on_web_process_terminated(
         self, _web_view: object, _reason: object
@@ -1167,6 +1213,7 @@ class BrowserManager:
         self.normal_profile_ready = False
         self.normal_profile_cancellable: Gio.Cancellable | None = None
         self.pending_normal_pages: list[BrowserPage] = []
+        self.cookie_debug_in_flight = False
         self.next_identifier = 1
 
     def restore(self, projects: list[dict]) -> None:
@@ -1174,10 +1221,16 @@ class BrowserManager:
 
         for project in projects:
             for item in project.get("browsers", []):
+                home_url = item.get("home_url")
+                if "home_url" not in item and item["url"] != "about:blank":
+                    # 2026-08-27: restore può ricevere direttamente anche il
+                    # vecchio formato, senza passare dalla normalizzazione.
+                    home_url = item["url"]
                 entry = BrowserEntry(
                     project_name=project["name"],
                     identifier=item["id"],
                     url=item["url"],
+                    home_url=home_url,
                     title=item["title"],
                     private=item.get("private", False) is True,
                 )
@@ -1243,13 +1296,7 @@ class BrowserManager:
             self._on_page_state_changed,
             self._on_reload_on_bell_changed,
             self.on_error,
-            load_initial=normal_profile_ready,
         )
-        if not normal_profile_ready:
-            # 2026-08-24: il primo caricamento delle tab normali attende che
-            # WebKit abbia letto il cookie jar condiviso; navigare prima può
-            # presentare richieste anonime ai siti e invalidare le sessioni.
-            self.pending_normal_pages.append(page)
         entry.context = context if entry.private else None
         entry.page = page
         self.workspace.add_named(
@@ -1260,6 +1307,16 @@ class BrowserManager:
         page.spinner.hide()
         self.workspace.set_visible_child(page)
         page.focus_location()
+        if normal_profile_ready:
+            # 2026-08-27: la prima richiesta parte soltanto dopo che la WebView
+            # è nello stack ed è visibile; il dialogo HTTP Basic predefinito di
+            # WebKit può così essere associato a una finestra GTK presentabile.
+            page.web_view.load_uri(entry.url)
+        else:
+            # 2026-08-24: il primo caricamento delle tab normali attende che
+            # WebKit abbia letto il cookie jar condiviso; navigare prima può
+            # presentare richieste anonime ai siti e invalidare le sessioni.
+            self.pending_normal_pages.append(page)
         return page
 
     def _normal_context(self) -> object:
@@ -1284,9 +1341,11 @@ class BrowserManager:
                 WebKit2.CookiePersistentStorage.SQLITE,
             )
             self.data_manager.set_persistent_credential_storage_enabled(True)
+            cookie_manager.connect("changed", self._on_cookie_store_changed)
             self.context = WebKit2.WebContext.new_with_website_data_manager(
                 self.data_manager
             )
+            _debug_browser("persistent context created")
             # 2026-08-24: get_all_cookies è usato come barriera asincrona di
             # inizializzazione, non per copiare né esporre cookie applicativi.
             self.normal_profile_cancellable = Gio.Cancellable()
@@ -1302,10 +1361,12 @@ class BrowserManager:
         """Load queued normal tabs after WebKit has opened the shared cookie jar."""
 
         try:
-            cookie_manager.get_all_cookies_finish(result)
+            cookies = cookie_manager.get_all_cookies_finish(result)
         except GLib.Error as error:
+            cookies = []
             if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 self.on_error(f"Unable to load persistent browser cookies: {error}")
+        _debug_browser(f"persistent cookie store ready count={len(cookies)}")
         self.normal_profile_cancellable = None
         self.normal_profile_ready = True
         pending_pages = tuple(self.pending_normal_pages)
@@ -1316,6 +1377,27 @@ class BrowserManager:
             if page.closed or page.entry.page is not page:
                 continue
             page.web_view.load_uri(page.entry.url)
+
+    def _on_cookie_store_changed(self, cookie_manager: object) -> None:
+        """Queue one privacy-safe cookie count after a persistent-store change."""
+
+        if os.environ.get("SLATE_DEBUG") != "1" or self.cookie_debug_in_flight:
+            return
+        self.cookie_debug_in_flight = True
+        cookie_manager.get_all_cookies(None, self._on_cookie_debug_loaded)
+
+    def _on_cookie_debug_loaded(
+        self, cookie_manager: object, result: Gio.AsyncResult
+    ) -> None:
+        """Report only the total cookie count, never cookie names or values."""
+
+        self.cookie_debug_in_flight = False
+        try:
+            cookies = cookie_manager.get_all_cookies_finish(result)
+        except GLib.Error as error:
+            _debug_browser(f"cookie count unavailable error={error.code}")
+            return
+        _debug_browser(f"persistent cookie store changed count={len(cookies)}")
 
     def _on_page_state_changed(self, page: BrowserPage) -> None:
         """Update persisted metadata and publish one page UI change."""
@@ -1452,6 +1534,7 @@ class BrowserManager:
             {
                 "id": entry.identifier,
                 "url": entry.url,
+                "home_url": entry.home_url,
                 "title": entry.title,
                 "private": entry.private,
             }
@@ -1484,6 +1567,7 @@ class BrowserManager:
     def shutdown(self) -> None:
         """Close materialized pages and release persistent/private contexts."""
 
+        _debug_browser("manager shutdown started")
         if self.normal_profile_cancellable is not None:
             self.normal_profile_cancellable.cancel()
             self.normal_profile_cancellable = None
@@ -1499,3 +1583,5 @@ class BrowserManager:
         self.context = None
         self.data_manager = None
         self.normal_profile_ready = False
+        self.cookie_debug_in_flight = False
+        _debug_browser("persistent context released")

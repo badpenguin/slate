@@ -382,10 +382,24 @@ class ConfigStore:
                     continue
                 title = str(item.get("title", "")).strip()[:300]
                 private = item.get("private", False) is True
+                raw_home_url = item.get("home_url")
+                home_url = (
+                    _normalize_browser_url(raw_home_url)
+                    if raw_home_url is not None
+                    else None
+                )
+                if "home_url" not in item and url != "about:blank":
+                    # 2026-08-27: le configurazioni precedenti conservavano
+                    # soltanto l'ultima pagina; usarla come Home mantiene ogni
+                    # scheda esistente immediatamente navigabile dopo l'upgrade.
+                    home_url = url
+                if home_url == "about:blank":
+                    home_url = None
                 browsers.append(
                     {
                         "id": identifier,
                         "url": url,
+                        "home_url": home_url,
                         "title": title or "Browser",
                         "private": private,
                     }

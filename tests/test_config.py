@@ -450,6 +450,7 @@ class ConfigStoreTest(unittest.TestCase):
                                     {
                                         "id": "browser-2",
                                         "url": "https://example.com",
+                                        "home_url": "https://home.example/start",
                                         "title": "Anonimo",
                                         "private": True,
                                     },
@@ -477,12 +478,14 @@ class ConfigStoreTest(unittest.TestCase):
                     {
                         "id": "browser-1",
                         "url": "https://example.com/a",
+                        "home_url": "https://example.com/a",
                         "title": "A",
                         "private": False,
                     },
                     {
                         "id": "browser-2",
                         "url": "https://example.com",
+                        "home_url": "https://home.example/start",
                         "title": "Anonimo",
                         "private": True,
                     }

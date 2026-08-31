@@ -116,6 +116,21 @@ class EditorTest(unittest.TestCase):
         self.assertFalse(editor.dirty)
         editor.close()
 
+    def test_save_preserves_executable_file_mode(self) -> None:
+        """Atomic replacement must not remove execute bits from a script."""
+
+        editor = self._document()
+        self.path.chmod(0o751)
+        editor.buffer.insert(editor.buffer.get_end_iter(), "echo deploy\n")
+        completed: list[bool] = []
+
+        editor.save(completed.append)
+
+        self._wait_until(completed.__len__)
+        self.assertEqual(completed, [True])
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o751)
+        editor.close()
+
     def test_external_clean_reload_is_silent(self) -> None:
         """An external write silently reloads a buffer without local edits."""
 

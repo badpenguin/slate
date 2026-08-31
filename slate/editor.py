@@ -592,12 +592,16 @@ class EditorDocument(Gtk.Box):
         self.save_button.set_sensitive(False)
         self.save_cancellable = Gio.Cancellable()
         expected_etag = None if self.force_next_save else self.etag
+        # 2026-08-31: il replace atomico standard conserva la modalità Unix del
+        # file; REPLACE_DESTINATION la ricreava invece con 0664, rimuovendo +x
+        # da script come deploy.sh dopo ogni salvataggio nell'editor interno.
+        create_flags = Gio.FileCreateFlags.NONE
         if data:
             self.file.replace_contents_bytes_async(
                 GLib.Bytes.new(data),
                 expected_etag,
                 False,
-                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                create_flags,
                 self.save_cancellable,
                 self._on_saved,
                 None,
@@ -609,7 +613,7 @@ class EditorDocument(Gtk.Box):
                 data,
                 expected_etag,
                 False,
-                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                create_flags,
                 self.save_cancellable,
                 self._on_saved,
                 None,
