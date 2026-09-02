@@ -95,6 +95,7 @@ class TerminalHelpersTest(unittest.TestCase):
         terminal = MagicMock()
         terminal.get_has_selection.return_value = True
         copy_item = MagicMock()
+        copy_link_item = MagicMock()
         paste_item = MagicMock()
         search_item = MagicMock()
         menu = MagicMock()
@@ -102,7 +103,7 @@ class TerminalHelpersTest(unittest.TestCase):
         with patch.object(
             TerminalManager,
             "_terminal_menu_item",
-            side_effect=(copy_item, paste_item, search_item),
+            side_effect=(copy_item, copy_link_item, paste_item, search_item),
         ) as item_factory:
             with patch("slate.terminals.Gtk.Menu", return_value=menu):
                 with patch(
@@ -112,7 +113,7 @@ class TerminalHelpersTest(unittest.TestCase):
                     manager._show_terminal_menu(terminal, None)
 
         self.assertEqual(
-            item_factory.call_args_list[2].args,
+            item_factory.call_args_list[3].args,
             (
                 "Project Search",
                 "edit-find",
@@ -122,12 +123,29 @@ class TerminalHelpersTest(unittest.TestCase):
             ),
         )
         search_item.set_sensitive.assert_called_once_with(True)
+        copy_link_item.set_sensitive.assert_called_once_with(False)
         self.assertEqual(
             [call.args[0] for call in menu.append.call_args_list],
-            [copy_item, paste_item, separator, search_item],
+            [copy_item, copy_link_item, paste_item, separator, search_item],
         )
         manager._on_project_search_from_terminal_menu(search_item)
         manager.on_project_search.assert_called_once_with()
+
+    def test_terminal_link_can_be_copied_without_selecting_its_text(self) -> None:
+        """The contextual link action writes the hovered URL to the clipboard."""
+
+        clipboard = MagicMock()
+        with patch(
+            "slate.terminals.Gtk.Clipboard.get", return_value=clipboard
+        ):
+            TerminalManager._copy_terminal_uri(
+                MagicMock(), "https://example.com/docs"
+            )
+
+        clipboard.set_text.assert_called_once_with(
+            "https://example.com/docs", -1
+        )
+        clipboard.store.assert_called_once_with()
 
     def test_click_opens_terminal_hyperlink_externally(self) -> None:
         """A direct click launches an OSC 8 hyperlink with the default application."""

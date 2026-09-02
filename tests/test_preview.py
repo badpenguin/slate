@@ -11,7 +11,8 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
-from gi.repository import GLib, Gtk
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf, GLib, Gtk
 
 from slate.preview import FilePreview
 from slate.scm.base import FileStatus
@@ -102,6 +103,63 @@ class FilePreviewTest(unittest.TestCase):
             text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
             self.assertEqual(text, "value = 42\n")
             self.assertIsNotNone(buffer.get_language())
+
+    def test_project_image_loads_inline_without_enlargement(self) -> None:
+        """A raster file uses the image surface and retains its smaller dimensions."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preview.png"
+            source = GdkPixbuf.Pixbuf.new(
+                GdkPixbuf.Colorspace.RGB, True, 8, 32, 16
+            )
+            source.fill(0x336699FF)
+            source.savev(str(path), "png", [], [])
+
+            self.preview.set_no_show_all(False)
+            self.preview.show_all()
+            self.preview.show_file(directory, "preview.png")
+            deadline = time.monotonic() + 2
+            context = GLib.MainContext.default()
+            while (
+                self.preview.file_cancellable is not None
+                and time.monotonic() < deadline
+            ):
+                context.iteration(True)
+
+            self.preview._fit_image(100, 100)
+            displayed = self.preview.image.get_pixbuf()
+            self.assertIsNotNone(displayed)
+            self.assertEqual((displayed.get_width(), displayed.get_height()), (32, 16))
+            self.assertEqual(
+                self.preview.content_stack.get_visible_child_name(), "image"
+            )
+
+    def test_large_image_refits_when_the_preview_area_changes(self) -> None:
+        """Image rendering follows the current viewport rather than a fixed cap."""
+
+        source = GdkPixbuf.Pixbuf.new(
+            GdkPixbuf.Colorspace.RGB, True, 8, 400, 200
+        )
+        self.preview.image_source_pixbuf = source
+
+        self.preview._fit_image(204, 104)
+
+        displayed = self.preview.image.get_pixbuf()
+        self.assertEqual(
+            (displayed.get_width(), displayed.get_height()), (200, 100)
+        )
+
+    def test_modified_image_uses_current_file_instead_of_binary_diff(self) -> None:
+        """Revision image rows bypass SCM diff generation and use the image loader."""
+
+        status = FileStatus("assets/logo.png", "modified")
+        scm = SimpleNamespace(root="/tmp/repo", environment={})
+        with patch.object(self.preview, "_load_working_file") as load:
+            self.preview.show_status("/tmp/repo", scm, status)
+
+        load.assert_called_once_with(
+            "/tmp/repo", "assets/logo.png", self.preview.request_serial
+        )
 
     def test_moved_file_uses_one_rename_aware_diff(self) -> None:
         """Move preview labels both endpoints and requests the Git-style patch."""

@@ -9,9 +9,10 @@ from typing import Callable
 import gi
 
 gi.require_version("Gio", "2.0")
+gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
-from gi.repository import Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
+from gi.repository import GdkPixbuf, Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
 
 from .processes import AsyncCommand, CommandResult, run_async
 from .search import source_symbol_at_cursor
@@ -22,6 +23,8 @@ class FilePreview(Gtk.Box):
     """Render one selected path without allowing edits to the working copy."""
 
     MAX_TEXT_BYTES = 5 * 1024 * 1024
+    MAX_IMAGE_BYTES = 20 * 1024 * 1024
+    MAX_IMAGE_PIXELS = 40_000_000
 
     def __init__(
         self,
@@ -38,6 +41,8 @@ class FilePreview(Gtk.Box):
         self.command: AsyncCommand | None = None
         self.file_cancellable: Gio.Cancellable | None = None
         self.request_serial = 0
+        self.image_source_pixbuf: GdkPixbuf.Pixbuf | None = None
+        self.image_fit_size: tuple[int, int] | None = None
         self.get_style_context().add_class("file-preview")
         self.set_no_show_all(True)
 
@@ -86,7 +91,23 @@ class FilePreview(Gtk.Box):
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.view)
-        self.pack_start(scroller, True, True, 0)
+        self.text_scroller = scroller
+        self.image = Gtk.Image()
+        self.image.set_halign(Gtk.Align.CENTER)
+        self.image.set_valign(Gtk.Align.CENTER)
+        image_viewport = Gtk.Viewport()
+        image_viewport.add(self.image)
+        self.image_scroller = Gtk.ScrolledWindow()
+        self.image_scroller.set_policy(
+            Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC
+        )
+        self.image_scroller.add(image_viewport)
+        self.image_scroller.connect("size-allocate", self._on_image_area_allocated)
+        self.content_stack = Gtk.Stack()
+        self.content_stack.set_transition_type(Gtk.StackTransitionType.NONE)
+        self.content_stack.add_named(self.text_scroller, "text")
+        self.content_stack.add_named(self.image_scroller, "image")
+        self.pack_start(self.content_stack, True, True, 0)
         self._set_plain_text("Select a file to preview it.")
 
     def show_status(
@@ -106,6 +127,12 @@ class FilePreview(Gtk.Box):
         self.title.set_text(title)
         self.title.set_tooltip_text(title)
         self._set_plain_text("Loading preview…")
+        if status.state != "removed" and self._is_image_path(status.path):
+            # 2026-09-02: i diff binari non aiutano a valutare una modifica;
+            # Revisioni mostra quindi l'immagine corrente con lo stesso loader
+            # confinato e limitato usato dalla vista File.
+            self._load_working_file(root, status.path, request_serial)
+            return
         if status.state == "moved" and status.source_path:
             # 2026-08-17: rename-aware output is required because a normal patch
             # can render a move as unrelated add/remove blocks.
@@ -160,6 +187,9 @@ class FilePreview(Gtk.Box):
         if self.file_cancellable is not None:
             self.file_cancellable.cancel()
             self.file_cancellable = None
+        self.image_source_pixbuf = None
+        self.image_fit_size = None
+        self.image.clear()
 
     def _load_working_file(
         self, root: str, relative_path: str, request_serial: int
@@ -178,12 +208,22 @@ class FilePreview(Gtk.Box):
         except OSError as error:
             self._set_plain_text(f"Unable to read the file:\n{error}")
             return
-        if size > self.MAX_TEXT_BYTES:
+        image_path = self._is_image_path(relative_path)
+        maximum = self.MAX_IMAGE_BYTES if image_path else self.MAX_TEXT_BYTES
+        if size > maximum:
             self._set_plain_text(
                 f"File too large to preview ({size / 1024 / 1024:.1f} MiB)."
             )
             return
         self.file_cancellable = Gio.Cancellable()
+        if image_path:
+            GdkPixbuf.Pixbuf.get_file_info_async(
+                str(candidate),
+                self.file_cancellable,
+                self._on_image_info_loaded,
+                (request_serial, relative_path, str(candidate)),
+            )
+            return
         Gio.File.new_for_path(str(candidate)).load_contents_async(
             self.file_cancellable,
             self._on_file_loaded,
@@ -218,6 +258,126 @@ class FilePreview(Gtk.Box):
             self._set_plain_text("Binary file: text preview is unavailable.")
             return
         self._set_source_text(data.decode("utf-8", "replace"), relative_path)
+
+    def _on_image_info_loaded(
+        self,
+        _source: object,
+        result: Gio.AsyncResult,
+        request: tuple[int, str, str],
+    ) -> None:
+        """Read image dimensions asynchronously and choose a non-enlarging size."""
+
+        request_serial, relative_path, path = request
+        if request_serial != self.request_serial or relative_path != self.current_path:
+            return
+        try:
+            image_format, width, height = GdkPixbuf.Pixbuf.get_file_info_finish(result)
+        except GLib.Error as error:
+            self.file_cancellable = None
+            if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                self._set_plain_text(f"Unable to inspect the image:\n{error}")
+            return
+        if image_format is None or width <= 0 or height <= 0:
+            self.file_cancellable = None
+            self._set_plain_text("Unsupported or invalid image format.")
+            return
+        if width * height > self.MAX_IMAGE_PIXELS:
+            self.file_cancellable = None
+            self._set_plain_text(
+                f"Image dimensions are too large to preview ({width}×{height})."
+            )
+            return
+        Gio.File.new_for_path(path).read_async(
+            GLib.PRIORITY_DEFAULT,
+            self.file_cancellable,
+            self._on_image_stream_opened,
+            (request_serial, relative_path),
+        )
+
+    def _on_image_stream_opened(
+        self,
+        source: Gio.File,
+        result: Gio.AsyncResult,
+        request: tuple[int, str],
+    ) -> None:
+        """Begin a bounded asynchronous pixbuf decode for the current image."""
+
+        request_serial, relative_path = request
+        if request_serial != self.request_serial or relative_path != self.current_path:
+            return
+        try:
+            stream = source.read_finish(result)
+        except GLib.Error as error:
+            self.file_cancellable = None
+            if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                self._set_plain_text(f"Unable to read the image:\n{error}")
+            return
+        GdkPixbuf.Pixbuf.new_from_stream_async(
+            stream,
+            self.file_cancellable,
+            self._on_image_loaded,
+            request,
+        )
+
+    def _on_image_loaded(
+        self,
+        _source: object,
+        result: Gio.AsyncResult,
+        request: tuple[int, str],
+    ) -> None:
+        """Display a decoded image only while its preview request remains current."""
+
+        request_serial, relative_path = request
+        if request_serial != self.request_serial or relative_path != self.current_path:
+            return
+        self.file_cancellable = None
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_stream_finish(result)
+        except GLib.Error as error:
+            if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                self._set_plain_text(f"Unable to decode the image:\n{error}")
+            return
+        if pixbuf is None:
+            self._set_plain_text("Unable to decode the image.")
+            return
+        self.image_source_pixbuf = pixbuf
+        self.image_fit_size = None
+        self.content_stack.set_visible_child_name("image")
+        allocation = self.image_scroller.get_allocation()
+        self._fit_image(allocation.width, allocation.height)
+
+    def _on_image_area_allocated(
+        self, _scroller: Gtk.ScrolledWindow, allocation: object
+    ) -> None:
+        """Refit the current image whenever the visible preview area changes."""
+
+        self._fit_image(allocation.width, allocation.height)
+
+    def _fit_image(self, available_width: int, available_height: int) -> None:
+        """Scale the decoded image to fit the viewport without enlarging it."""
+
+        source = self.image_source_pixbuf
+        if source is None or available_width <= 1 or available_height <= 1:
+            return
+        # 2026-09-02: il rendering segue l'allocazione GTK reale invece di un
+        # limite arbitrario; sottrarre il bordo evita scrollbar per pochi pixel.
+        width = max(1, available_width - 4)
+        height = max(1, available_height - 4)
+        scale = min(1.0, width / source.get_width(), height / source.get_height())
+        target = (
+            max(1, round(source.get_width() * scale)),
+            max(1, round(source.get_height() * scale)),
+        )
+        if target == self.image_fit_size:
+            return
+        self.image_fit_size = target
+        if target == (source.get_width(), source.get_height()):
+            displayed = source
+        else:
+            displayed = source.scale_simple(
+                target[0], target[1], GdkPixbuf.InterpType.BILINEAR
+            )
+        self.image.set_from_pixbuf(displayed)
 
     def _on_base_loaded(
         self, request_serial: int, relative_path: str, result: CommandResult
@@ -262,6 +422,10 @@ class FilePreview(Gtk.Box):
     def _set_source_text(self, text: str, path: str) -> None:
         """Display an entire text file with language-aware highlighting."""
 
+        self.content_stack.set_visible_child_name("text")
+        self.image_source_pixbuf = None
+        self.image_fit_size = None
+        self.image.clear()
         language = GtkSource.LanguageManager.get_default().guess_language(path, None)
         self.buffer.set_language(language)
         self.buffer.set_highlight_syntax(language is not None)
@@ -274,6 +438,10 @@ class FilePreview(Gtk.Box):
     def _set_diff_text(self, text: str) -> None:
         """Display a unified diff with semantic colors based on line prefixes."""
 
+        self.content_stack.set_visible_child_name("text")
+        self.image_source_pixbuf = None
+        self.image_fit_size = None
+        self.image.clear()
         self.buffer.set_language(None)
         self.buffer.set_highlight_syntax(False)
         self.buffer.set_text(text)
@@ -301,9 +469,20 @@ class FilePreview(Gtk.Box):
     def _set_plain_text(self, text: str) -> None:
         """Display an informational or error message without syntax processing."""
 
+        self.content_stack.set_visible_child_name("text")
+        self.image_source_pixbuf = None
+        self.image_fit_size = None
+        self.image.clear()
         self.buffer.set_language(None)
         self.buffer.set_highlight_syntax(False)
         self.buffer.set_text(text)
+
+    @staticmethod
+    def _is_image_path(path: str) -> bool:
+        """Return whether Gio identifies the path as an image MIME type."""
+
+        content_type, _uncertain = Gio.content_type_guess(path, None)
+        return bool(content_type and content_type.startswith("image/"))
 
     @staticmethod
     def _preferred_scheme_name() -> str:

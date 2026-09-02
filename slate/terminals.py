@@ -330,28 +330,38 @@ class TerminalManager:
         """Open an explicit terminal URL or the clipboard menu."""
 
         if event.button == 1:
-            uri = terminal.hyperlink_check_event(event)
-            if not uri:
-                matched_uri, _tag = terminal.match_check_event(event)
-                uri = matched_uri
+            uri = TerminalManager._terminal_uri_at_event(terminal, event)
             if uri:
-                # 2026-08-17: la punteggiatura finale appartiene spesso alla
-                # frase che contiene il link, non all'indirizzo da aprire.
-                uri = uri.rstrip(".,;:!?)]}")
-                if GLib.uri_parse_scheme(uri) in {"http", "https"}:
-                    Gio.AppInfo.launch_default_for_uri_async(
-                        uri,
-                        None,
-                        None,
-                        self._on_terminal_uri_opened,
-                        uri,
-                    )
-                    return True
+                Gio.AppInfo.launch_default_for_uri_async(
+                    uri,
+                    None,
+                    None,
+                    self._on_terminal_uri_opened,
+                    uri,
+                )
+                return True
 
         if event.button != 3:
             return False
         self._show_terminal_menu(terminal, event)
         return True
+
+    @staticmethod
+    def _terminal_uri_at_event(
+        terminal: Vte.Terminal, event: Gdk.EventButton
+    ) -> str | None:
+        """Return one safe OSC 8 or textual HTTP URL under a pointer event."""
+
+        uri = terminal.hyperlink_check_event(event)
+        if not uri:
+            matched_uri, _tag = terminal.match_check_event(event)
+            uri = matched_uri
+        if not uri:
+            return None
+        # 2026-08-17: la punteggiatura finale appartiene spesso alla frase che
+        # contiene il link, non all'indirizzo da aprire o copiare.
+        clean_uri = uri.rstrip(".,;:!?)]}")
+        return clean_uri if GLib.uri_parse_scheme(clean_uri) in {"http", "https"} else None
 
     def _on_terminal_uri_opened(
         self, _source: object, result: Gio.AsyncResult, uri: str
@@ -375,12 +385,24 @@ class TerminalManager:
         """Build terminal clipboard and project-search contextual actions."""
 
         menu = Gtk.Menu()
+        uri = (
+            TerminalManager._terminal_uri_at_event(terminal, event)
+            if event is not None
+            else None
+        )
         copy_item = self._terminal_menu_item(
             "Copy",
             "edit-copy",
             Gdk.KEY_c,
             Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK,
             "Copy (Ctrl+Shift+C / Ctrl+Insert)",
+        )
+        copy_link_item = self._terminal_menu_item(
+            "Copy Link",
+            "edit-copy",
+            0,
+            Gdk.ModifierType(0),
+            "Copy the link under the pointer",
         )
         paste_item = self._terminal_menu_item(
             "Paste",
@@ -397,11 +419,14 @@ class TerminalManager:
             "Project Search (Ctrl+Shift+F)",
         )
         copy_item.set_sensitive(terminal.get_has_selection())
+        copy_link_item.set_sensitive(uri is not None)
         search_item.set_sensitive(self.project_search_available)
         copy_item.connect("activate", self._copy_from_terminal_menu, terminal)
+        copy_link_item.connect("activate", self._copy_terminal_uri, uri)
         paste_item.connect("activate", self._paste_from_terminal_menu, terminal)
         search_item.connect("activate", self._on_project_search_from_terminal_menu)
         menu.append(copy_item)
+        menu.append(copy_link_item)
         menu.append(paste_item)
         # 2026-08-20: la ricerca del progetto è distinta dalle operazioni sugli
         # appunti, ma riusa esattamente la stessa azione globale della HeaderBar.
@@ -434,7 +459,8 @@ class TerminalManager:
         accel_label = Gtk.AccelLabel(label=label)
         accel_label.set_xalign(0)
         accel_label.set_accel_widget(item)
-        accel_label.set_accel(keyval, modifiers)
+        if keyval:
+            accel_label.set_accel(keyval, modifiers)
         content.pack_start(icon, False, False, 0)
         content.pack_start(accel_label, True, True, 0)
         item.add(content)
@@ -448,6 +474,16 @@ class TerminalManager:
         """Copy the current Vte selection as plain text."""
 
         terminal.copy_clipboard_format(Vte.Format.TEXT)
+
+    @staticmethod
+    def _copy_terminal_uri(_item: Gtk.MenuItem, uri: str | None) -> None:
+        """Copy the explicit link under the context-menu pointer."""
+
+        if uri is None:
+            return
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(uri, -1)
+        clipboard.store()
 
     @staticmethod
     def _paste_from_terminal_menu(

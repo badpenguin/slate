@@ -193,7 +193,8 @@ The **Revisions** tab detects Git and Mercurial repositories in the
 project directory and its subdirectories. Status is updated automatically when
 files or repository metadata change.
 
-Selecting a modified file displays a diff preview. New files show their current
+Selecting a modified file displays a diff preview. Supported images instead
+fit their current working-copy content inside the available preview area. New files show their current
 contents; removed files show their base version; recognized moves appear as
 `source → destination`.
 
