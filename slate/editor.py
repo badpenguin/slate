@@ -15,6 +15,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, GtkSource, Pango  # noqa: E402
 
+from .search import source_symbol_at_cursor
+
 
 EditorRef = tuple[str, str]
 
@@ -47,6 +49,7 @@ class EditorDocument(Gtk.Box):
         font_size: int,
         on_state: Callable[["EditorDocument"], None],
         on_removed: Callable[["EditorDocument", str], None],
+        on_definition: Callable[[str, str, str], None] | None = None,
     ) -> None:
         """Build one editor and begin loading its working-copy file."""
 
@@ -56,6 +59,7 @@ class EditorDocument(Gtk.Box):
         self.relative_path = relative_path
         self.on_state = on_state
         self.on_removed = on_removed
+        self.on_definition = on_definition
         self.path = self._safe_path()
         self.file = Gio.File.new_for_path(self.path) if self.path else None
         self.etag: str | None = None
@@ -72,6 +76,7 @@ class EditorDocument(Gtk.Box):
         self.save_callbacks: list[Callable[[bool], None]] = []
         self.mute_monitor_until = 0
         self.initial_load_id: int | None = None
+        self.pending_line: int | None = None
 
         self._build_info_bar()
         self._build_toolbar()
@@ -200,6 +205,7 @@ class EditorDocument(Gtk.Box):
         self.view.set_tab_width(4)
         self.view.set_insert_spaces_instead_of_tabs(False)
         self.view.set_wrap_mode(Gtk.WrapMode.NONE)
+        self.view.connect("populate-popup", self._on_populate_popup)
         self.font_provider = Gtk.CssProvider()
         self.view.get_style_context().add_provider(
             self.font_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -353,6 +359,10 @@ class EditorDocument(Gtk.Box):
                 self.attention = False
             self._hide_notice()
         self.on_state(self)
+        if self.pending_line is not None:
+            line = self.pending_line
+            self.pending_line = None
+            self.goto_line_number(line)
 
     def _configure_language(self) -> None:
         """Select syntax and theme from the file name and current GTK theme."""
@@ -743,11 +753,47 @@ class EditorDocument(Gtk.Box):
         dialog.destroy()
         if response != Gtk.ResponseType.OK or not value.isdigit():
             return
-        line = min(max(1, int(value)), self.buffer.get_line_count()) - 1
+        self.goto_line_number(int(value))
+
+    def goto_line_number(self, line_number: int) -> None:
+        """Move to a one-based line now or immediately after initial loading."""
+
+        if self.loading:
+            self.pending_line = max(1, line_number)
+            return
+        line = min(max(1, line_number), self.buffer.get_line_count()) - 1
         cursor = self.buffer.get_iter_at_line(line)
         self.buffer.place_cursor(cursor)
         self.view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
         self.view.grab_focus()
+
+    def go_to_definition(self) -> bool:
+        """Request a project definition search for the symbol at the cursor."""
+
+        symbol = source_symbol_at_cursor(self.buffer)
+        if symbol is None:
+            return False
+        if self.on_definition is None:
+            return False
+        self.on_definition(self.root, self.relative_path, symbol)
+        return True
+
+    def _on_populate_popup(self, _view: Gtk.TextView, menu: Gtk.Menu) -> None:
+        """Append Go to Definition to the editor's existing context menu."""
+
+        separator = Gtk.SeparatorMenuItem()
+        menu.append(separator)
+        item = Gtk.MenuItem(label="Go to Definition")
+        item.set_sensitive(source_symbol_at_cursor(self.buffer) is not None)
+        item.connect("activate", self._on_definition_activate)
+        menu.append(item)
+        separator.show()
+        item.show()
+
+    def _on_definition_activate(self, _item: Gtk.MenuItem) -> None:
+        """Run contextual Go to Definition for the editor cursor."""
+
+        self.go_to_definition()
 
     def undo(self) -> None:
         """Undo one GtkSource buffer operation when available."""
@@ -861,6 +907,7 @@ class EditorWorkspace(Gtk.Stack):
         on_error: Callable[[str], None],
         on_collection_changed: Callable[[], None],
         on_state_changed: Callable[["EditorDocument"], None],
+        on_definition: Callable[[str, str, str], None] | None = None,
     ) -> None:
         """Build a central stack whose navigation is owned by the project tree."""
 
@@ -871,6 +918,7 @@ class EditorWorkspace(Gtk.Stack):
         self.on_error = on_error
         self.on_collection_changed = on_collection_changed
         self.on_state_changed = on_state_changed
+        self.on_definition = on_definition
         # 2026-08-17: le identità persistite restano separate dai widget per
         # evitare GtkSourceView, letture e monitor finché l'utente non le seleziona.
         self.editors: dict[EditorRef, EditorEntry] = {}
@@ -917,6 +965,7 @@ class EditorWorkspace(Gtk.Stack):
             self.font_size,
             self._on_editor_state,
             self._on_editor_removed,
+            self.on_definition,
         )
         entry.document = editor
         child_name = f"editor-{self.next_child_id}"
@@ -1011,6 +1060,8 @@ class EditorWorkspace(Gtk.Stack):
         keyval = Gdk.keyval_to_lower(event.keyval)
         if keyval == Gdk.KEY_s:
             editor.save()
+        elif keyval == Gdk.KEY_b:
+            return editor.go_to_definition()
         elif keyval == Gdk.KEY_f:
             editor.show_search()
         elif keyval == Gdk.KEY_g:

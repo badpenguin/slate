@@ -14,6 +14,7 @@ gi.require_version("GtkSource", "4")
 from gi.repository import Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
 
 from .processes import AsyncCommand, CommandResult, run_async
+from .search import source_symbol_at_cursor
 from .scm.base import FileStatus, SCM
 
 
@@ -22,12 +23,18 @@ class FilePreview(Gtk.Box):
 
     MAX_TEXT_BYTES = 5 * 1024 * 1024
 
-    def __init__(self, on_close: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        on_close: Callable[[], None],
+        on_definition: Callable[[str, str, str], None] | None = None,
+    ) -> None:
         """Build a header and GtkSourceView suitable for diff and source content."""
 
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.on_close = on_close
+        self.on_definition = on_definition
         self.current_path: str | None = None
+        self.current_root: str | None = None
         self.command: AsyncCommand | None = None
         self.file_cancellable: Gio.Cancellable | None = None
         self.request_serial = 0
@@ -68,11 +75,14 @@ class FilePreview(Gtk.Box):
         }
         self.view = GtkSource.View.new_with_buffer(self.buffer)
         self.view.set_editable(False)
-        self.view.set_cursor_visible(False)
+        # 2026-09-02: la preview resta non modificabile, ma il cursore visibile
+        # rende esplicito quale simbolo verrà usato da Ctrl+B e dal menu nativo.
+        self.view.set_cursor_visible(True)
         self.view.set_monospace(True)
         self.view.set_show_line_numbers(True)
         self.view.set_highlight_current_line(False)
         self.view.set_tab_width(4)
+        self.view.connect("populate-popup", self._on_populate_popup)
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.view)
@@ -87,6 +97,7 @@ class FilePreview(Gtk.Box):
         self.cancel()
         request_serial = self.request_serial
         self.current_path = status.path
+        self.current_root = str(Path(root).resolve())
         title = (
             f"{status.source_path} → {status.path}"
             if status.state == "moved" and status.source_path
@@ -129,6 +140,7 @@ class FilePreview(Gtk.Box):
         self.cancel()
         request_serial = self.request_serial
         self.current_path = relative_path
+        self.current_root = str(Path(root).resolve())
         self.title.set_text(relative_path)
         self.title.set_tooltip_text(relative_path)
         self._set_plain_text("Loading preview…")
@@ -305,3 +317,33 @@ class FilePreview(Gtk.Box):
         """Forward an explicit close action to the overlay owner."""
 
         self.on_close()
+
+    def go_to_definition(self) -> bool:
+        """Request a project lookup for the symbol targeted in this preview."""
+
+        if self.current_root is None or self.current_path is None:
+            return False
+        symbol = source_symbol_at_cursor(self.buffer)
+        if symbol is None:
+            return False
+        if self.on_definition is None:
+            return False
+        self.on_definition(self.current_root, self.current_path, symbol)
+        return True
+
+    def _on_populate_popup(self, _view: Gtk.TextView, menu: Gtk.Menu) -> None:
+        """Append Go to Definition to the preview's existing context menu."""
+
+        separator = Gtk.SeparatorMenuItem()
+        menu.append(separator)
+        item = Gtk.MenuItem(label="Go to Definition")
+        item.set_sensitive(source_symbol_at_cursor(self.buffer) is not None)
+        item.connect("activate", self._on_definition_activate)
+        menu.append(item)
+        separator.show()
+        item.show()
+
+    def _on_definition_activate(self, _item: Gtk.MenuItem) -> None:
+        """Run contextual Go to Definition for the preview cursor."""
+
+        self.go_to_definition()

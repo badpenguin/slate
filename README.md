@@ -276,6 +276,11 @@ syntax highlighting, line numbers, search, undo/redo, and atomic saving. If the
 file also changes on disk, SLATE asks which version to keep instead of
 overwriting it automatically.
 
+`Ctrl+B` or **Go to Definition** in the editor and quick-preview context menus
+searches declaration-shaped matches with ripgrep. A unique result opens at its
+source line; ambiguous definitions reuse the project-search result chooser.
+This lookup is intentionally heuristic and does not require an LSP server.
+
 The editor supports UTF-8 text files and does not retain drafts of unsaved
 content.
 

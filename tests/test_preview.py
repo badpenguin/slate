@@ -52,6 +52,21 @@ class FilePreviewTest(unittest.TestCase):
         self.assertIn("diff-removed", removed_tags)
         self.assertIn("diff-added", added_tags)
 
+    def test_preview_definition_uses_clicked_symbol_and_source_context(self) -> None:
+        """Read-only previews can dispatch the same definition lookup as editors."""
+
+        requested = MagicMock()
+        preview = FilePreview(self._ignore_close, requested)
+        preview.current_root = "/tmp/project"
+        preview.current_path = "src/app.php"
+        preview.buffer.set_text("+function deploy() {}\n")
+        preview.buffer.place_cursor(preview.buffer.get_iter_at_offset(12))
+
+        self.assertTrue(preview.go_to_definition())
+        requested.assert_called_once_with(
+            "/tmp/project", "src/app.php", "deploy"
+        )
+
     def test_new_python_file_uses_syntax_highlighting(self) -> None:
         """A recognizable new-file extension selects a GtkSource language."""
 

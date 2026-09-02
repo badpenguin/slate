@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -16,6 +17,20 @@ gi.require_version("Gio", "2.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
+
+
+SEARCH_EXCLUDED_DIRECTORIES = {
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+    ".cache",
+    ".git",
+    ".hg",
+    ".svn",
+}
 
 
 @dataclass(frozen=True)
@@ -55,6 +70,63 @@ def build_search_argv(query: str, excluded: set[str]) -> list[str]:
     return argv
 
 
+def build_definition_argv(symbol: str, excluded: set[str]) -> list[str]:
+    """Build a bounded best-effort declaration search for one source symbol."""
+
+    escaped = re.escape(symbol)
+    # 2026-09-02: senza LSP cerchiamo soltanto forme dichiarative comuni; non
+    # includere le normali occorrenze riduce i falsi positivi e rende utile la
+    # stessa scorciatoia in progetti PHP, JS, Python, shell e CSS/SCSS.
+    pattern = (
+        rf"(?x)^\s*(?:"
+        rf"(?:export\s+)?(?:abstract\s+|final\s+)?(?:async\s+)?"
+        rf"(?:class|interface|trait|enum|struct|type|def|function|fn|const|let|var)"
+        rf"\s+\$?{escaped}\b"
+        rf"|(?:public|protected|private|static|readonly|async|final|abstract|\s)+"
+        rf"function\s+{escaped}\b"
+        rf"|(?:@mixin|@function|@keyframes)\s+{escaped}\b"
+        rf"|{escaped}\s*\([^\r\n)]*\)\s*\{{"
+        rf"|(?:public|protected|private|static|readonly|\s)+\$?{escaped}\s*(?:=|:)"
+        rf"|\$?{escaped}\s*(?:=|:)"
+        rf"|[.#%]{escaped}\b[^{{]*\{{"
+        rf"|--{escaped}\s*:"
+        rf")"
+    )
+    argv = [
+        "rg",
+        "--json",
+        "--pcre2",
+        "--smart-case",
+        "--max-filesize",
+        "5M",
+    ]
+    for directory in sorted(excluded):
+        argv.extend(("--glob", f"!**/{directory}/**"))
+    argv.extend(("--regexp", pattern, "--", "."))
+    return argv
+
+
+def source_symbol_at_cursor(buffer: Gtk.TextBuffer) -> str | None:
+    """Return the selected identifier or the identifier at the insertion mark."""
+
+    bounds = buffer.get_selection_bounds()
+    if bounds:
+        selected = buffer.get_text(bounds[0], bounds[1], True).strip()
+        return selected if re.fullmatch(r"(?:--)?[A-Za-z_][\w-]*", selected) else None
+    cursor = buffer.get_iter_at_mark(buffer.get_insert())
+    line_start = cursor.copy()
+    line_start.set_line_offset(0)
+    line_end = line_start.copy()
+    line_end.forward_to_line_end()
+    line = buffer.get_text(line_start, line_end, True)
+    offset = cursor.get_line_offset()
+    for match in re.finditer(r"(?:--)?[A-Za-z_][\w-]*", line):
+        # Il bordo finale appartiene intuitivamente alla parola appena digitata.
+        if match.start() <= offset <= match.end():
+            return match.group(0).removeprefix("--")
+    return None
+
+
 class SearchCommand:
     """Stream bounded ripgrep JSON without blocking the GTK main loop."""
 
@@ -66,11 +138,12 @@ class SearchCommand:
         limit: int,
         on_result: Callable[[SearchResult], None],
         on_complete: Callable[[SearchCompletion], None],
+        argv: list[str] | None = None,
     ) -> None:
         """Start one cancellable search and deliver results incrementally."""
 
         self.root = str(Path(root).resolve())
-        self.argv = tuple(build_search_argv(query, excluded))
+        self.argv = tuple(argv or build_search_argv(query, excluded))
         self.limit = limit
         self.on_result = on_result
         self.on_complete = on_complete
@@ -298,6 +371,51 @@ class SearchCommand:
             return None
 
 
+class DefinitionSearch:
+    """Collect declaration-shaped ripgrep matches for one requested symbol."""
+
+    RESULT_LIMIT = 50
+
+    def __init__(
+        self,
+        root: str,
+        symbol: str,
+        on_complete: Callable[
+            [str, tuple[SearchResult, ...], SearchCompletion], None
+        ],
+    ) -> None:
+        """Start one asynchronous best-effort definition lookup."""
+
+        self.symbol = symbol
+        self.results: list[SearchResult] = []
+        self.on_complete = on_complete
+        argv = build_definition_argv(symbol, SEARCH_EXCLUDED_DIRECTORIES)
+        self.command = SearchCommand(
+            root,
+            symbol,
+            SEARCH_EXCLUDED_DIRECTORIES,
+            self.RESULT_LIMIT,
+            self._on_result,
+            self._on_complete,
+            argv,
+        )
+
+    def cancel(self) -> None:
+        """Cancel the active ripgrep definition lookup."""
+
+        self.command.cancel()
+
+    def _on_result(self, result: SearchResult) -> None:
+        """Retain one bounded declaration candidate."""
+
+        self.results.append(result)
+
+    def _on_complete(self, completion: SearchCompletion) -> None:
+        """Publish all candidates after ripgrep reaches a terminal state."""
+
+        self.on_complete(self.symbol, tuple(self.results), completion)
+
+
 class ProjectSearch(Gtk.Box):
     """Display project-wide matches and a non-editable source preview."""
 
@@ -315,7 +433,7 @@ class ProjectSearch(Gtk.Box):
         self,
         on_close: Callable[[], None],
         on_view: Callable[[str], None],
-        on_edit_internal: Callable[[str], None],
+        on_edit_internal: Callable[[str, int | None], None],
         on_edit_external: Callable[[str], None],
         can_open_meld: Callable[[str], bool],
         on_open_meld: Callable[[str], None],
@@ -346,6 +464,33 @@ class ProjectSearch(Gtk.Box):
 
         self._build_search_bar()
         self._build_results_and_preview()
+
+    def show_definition_results(
+        self,
+        project_name: str,
+        root: str,
+        symbol: str,
+        results: tuple[SearchResult, ...],
+    ) -> None:
+        """Reuse the project-search surface to choose an ambiguous definition."""
+
+        self.cancel()
+        self.selection_request_serial += 1
+        self.project_name = project_name
+        self.root = str(Path(root).resolve())
+        self.entry.set_text(symbol)
+        # set_text emits the normal live-search handler synchronously; cancel its
+        # debounce before installing the already filtered definition candidates.
+        self.cancel()
+        self.store.clear()
+        self._set_preview_message("Select a definition to preview it")
+        for result in results:
+            self._on_search_result(result)
+        self.status_label.set_text(f"{len(results)} definitions")
+        self.set_no_show_all(False)
+        self.show_all()
+        self.set_no_show_all(True)
+        self.tree.grab_focus()
 
     def _build_search_bar(self) -> None:
         """Create the query, live status and close controls in the first row."""
@@ -586,18 +731,7 @@ class ProjectSearch(Gtk.Box):
         if request_serial != self.request_serial or self.root is None:
             return GLib.SOURCE_REMOVE
         self.status_label.set_text("Searching…")
-        excluded = {
-            "node_modules",
-            "vendor",
-            "dist",
-            "build",
-            ".venv",
-            "__pycache__",
-            ".cache",
-            ".git",
-            ".hg",
-            ".svn",
-        }
+        excluded = SEARCH_EXCLUDED_DIRECTORIES
         self.command = SearchCommand(
             self.root,
             query,
@@ -877,7 +1011,7 @@ class ProjectSearch(Gtk.Box):
             self.on_view(result.path)
             return True
         if keyval == Gdk.KEY_e:
-            self.on_edit_internal(result.path)
+            self.on_edit_internal(result.path, result.line)
             # 2026-08-21: l'editor integrato vive sotto l'overlay opaco della
             # ricerca, che va chiuso per rendere visibile il documento aperto.
             self.on_close()
@@ -901,7 +1035,9 @@ class ProjectSearch(Gtk.Box):
         """Open the contextual result in SLATE and dismiss the opaque search."""
 
         if self.context_result is not None:
-            self.on_edit_internal(self.context_result.path)
+            self.on_edit_internal(
+                self.context_result.path, self.context_result.line
+            )
             self.on_close()
 
     def _on_context_edit_external(self, _item: Gtk.MenuItem) -> None:

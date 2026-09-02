@@ -43,7 +43,7 @@ from .scm.base import FileStatus, RepositoryRef, RepositorySyncStatus, SCM
 from .scm.detect import is_normal_repository
 from .scm.git import GitSCM
 from .scm.hg import MercurialSCM
-from .search import ProjectSearch
+from .search import DefinitionSearch, ProjectSearch, SearchCompletion, SearchResult
 from .settings import SettingsDialog
 from .terminals import (
     OrphanSession,
@@ -238,6 +238,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._show_file_error,
             self._on_editor_collection_changed,
             self._on_editor_state_changed,
+            self._start_definition_search,
         )
         # 2026-08-17: il manager browser condivide soltanto lo stack centrale;
         # contesto WebKit e pagine restano lazy fino al click esplicito.
@@ -277,7 +278,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.inner_paned.pack2(right_column, resize=False, shrink=False)
         self.outer_paned.set_position(self.config.data["pane_positions"][0])
         self.inner_paned.set_position(self.config.data["pane_positions"][1])
-        self.preview = FilePreview(self._close_preview)
+        self.preview = FilePreview(
+            self._close_preview, self._start_definition_search
+        )
         self.preview.set_halign(Gtk.Align.START)
         self.preview.set_valign(Gtk.Align.FILL)
         self.content_overlay.add_overlay(self.preview)
@@ -294,6 +297,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.project_search.set_halign(Gtk.Align.FILL)
         self.project_search.set_valign(Gtk.Align.FILL)
         self.content_overlay.add_overlay(self.project_search)
+        self.definition_search: DefinitionSearch | None = None
         self.outer_paned.connect("notify::position", self._update_preview_geometry)
         self.inner_paned.connect("notify::position", self._update_preview_geometry)
         self.content_overlay.connect("size-allocate", self._update_preview_geometry)
@@ -2606,7 +2610,20 @@ class SlateWindow(Gtk.ApplicationWindow):
         ):
             self._close_project_search()
             return True
+        if self.project_search.get_visible():
+            # 2026-09-02: l'overlay opaco possiede i propri tasti; nessuna
+            # scorciatoia deve raggiungere le viste ancora montate sotto di lui.
+            return False
         if self.browser_manager.handle_key(event):
+            return True
+        if (
+            Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b
+            and event.state & Gdk.ModifierType.CONTROL_MASK
+            and self.preview.get_visible()
+            and not self.project_search.get_visible()
+        ):
+            if not self.preview.go_to_definition():
+                self._show_error("Place the preview cursor on a source symbol first.")
             return True
         if self.editor_workspace.handle_key(event):
             return True
@@ -2642,6 +2659,82 @@ class SlateWindow(Gtk.ApplicationWindow):
             return
         self._close_preview()
         self.project_search.open(project["name"], project["path"])
+
+    def _start_definition_search(
+        self, source_root: str, source_path: str, symbol: str
+    ) -> None:
+        """Resolve one editor or preview symbol asynchronously within its project."""
+
+        if not self.search_available:
+            self._show_error(
+                "Go to Definition is unavailable: install ripgrep (rg)."
+            )
+            return
+        project = self.config.find_project(self.active_project_name or "")
+        if project is None:
+            return
+        project_root = Path(project["path"]).resolve()
+        source = (Path(source_root).resolve() / source_path).resolve()
+        try:
+            relative_source = str(source.relative_to(project_root))
+        except ValueError:
+            self._show_error("Go to Definition rejected a path outside the project.")
+            return
+        if self.definition_search is not None:
+            self.definition_search.cancel()
+        # 2026-09-02: una ricerca per volta evita risultati tardivi appartenenti
+        # a un simbolo o progetto non più attivo, mantenendo il flusso event-driven.
+        self.definition_search = DefinitionSearch(
+            str(project_root),
+            symbol,
+            partial(
+                self._on_definition_search_complete,
+                project["name"],
+                str(project_root),
+                relative_source,
+            ),
+        )
+
+    def _on_definition_search_complete(
+        self,
+        project_name: str,
+        project_root: str,
+        source_path: str,
+        symbol: str,
+        results: tuple[SearchResult, ...],
+        completion: SearchCompletion,
+    ) -> None:
+        """Open one definition directly or show the existing result chooser."""
+
+        self.definition_search = None
+        if project_name != self.active_project_name:
+            return
+        if completion.error:
+            self._show_error(f"Go to Definition failed: {completion.error}")
+            return
+
+        def candidate_key(result: SearchResult) -> tuple[bool, bool, str, int]:
+            """Prioritize the current file and then its source-language suffix."""
+
+            return (
+                result.path != source_path,
+                Path(result.path).suffix != Path(source_path).suffix,
+                result.path,
+                result.line,
+            )
+
+        unique = {(result.path, result.line): result for result in results}
+        ordered = tuple(sorted(unique.values(), key=candidate_key))
+        if not ordered:
+            self._show_error(f"No definition found for {symbol}.")
+            return
+        if len(ordered) == 1:
+            self._edit_project_file_internal(ordered[0].path, ordered[0].line)
+            return
+        self._close_preview()
+        self.project_search.show_definition_results(
+            project_name, project_root, symbol, ordered
+        )
 
     def _close_project_search(self) -> None:
         """Cancel project search and reveal the unchanged workbench below it."""
@@ -3604,7 +3697,9 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._workspace_repository_path(status.repository, status.path)
         )
 
-    def _edit_project_file_internal(self, relative_path: str) -> None:
+    def _edit_project_file_internal(
+        self, relative_path: str, line: int | None = None
+    ) -> None:
         """Open one safe active-project file in the persistent internal editor."""
 
         path = self._project_file_path(relative_path)
@@ -3615,9 +3710,11 @@ class SlateWindow(Gtk.ApplicationWindow):
         order_changed = self._append_project_item(
             project, "editor", relative_path
         )
-        self.editor_workspace.open_file(
+        editor = self.editor_workspace.open_file(
             project["name"], project["path"], relative_path
         )
+        if line is not None:
+            editor.goto_line_number(line)
         if order_changed:
             self.config.save()
         # 2026-08-16: la riga creata nell'albero, non il contenitore centrale,
@@ -4400,6 +4497,9 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         self._close_preview()
         self._close_project_search()
+        if self.definition_search is not None:
+            self.definition_search.cancel()
+            self.definition_search = None
         self._stop_unattended_verification()
         for source_id in self.inactive_watcher_eviction_ids.values():
             GLib.source_remove(source_id)

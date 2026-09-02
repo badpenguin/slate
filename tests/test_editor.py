@@ -340,6 +340,38 @@ class EditorTest(unittest.TestCase):
         self.assertFalse(workspace.handle_key(save_event))
         workspace.shutdown()
 
+    def test_ctrl_b_requests_definition_for_the_symbol_at_cursor(self) -> None:
+        """The active editor forwards Ctrl+B with project source context."""
+
+        requested = MagicMock()
+        workspace = EditorWorkspace(
+            Gtk.Box(),
+            10,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            requested,
+        )
+        editor = workspace.open_file("project", str(self.root), "TODO.md")
+
+        def editor_loaded() -> bool:
+            """Report when the asynchronously materialized editor is ready."""
+
+            return not editor.loading
+
+        self._wait_until(editor_loaded)
+        editor.buffer.set_text("function deploy() {}\ndeploy();\n")
+        editor.buffer.place_cursor(editor.buffer.get_iter_at_offset(23))
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_b,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+
+        self.assertTrue(workspace.handle_key(event))
+        requested.assert_called_once_with(str(self.root), "TODO.md", "deploy")
+        workspace.shutdown()
+
     def test_workspace_rekeys_dirty_editor_after_file_rename(self) -> None:
         """A renamed open file keeps its buffer and receives the new identity."""
 

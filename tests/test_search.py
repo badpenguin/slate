@@ -14,11 +14,14 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk
 
 from slate.search import (
+    DefinitionSearch,
     ProjectSearch,
     SearchCommand,
     SearchCompletion,
     SearchResult,
+    build_definition_argv,
     build_search_argv,
+    source_symbol_at_cursor,
 )
 
 
@@ -33,6 +36,28 @@ class SearchCommandTest(unittest.TestCase):
         self.assertIn(("--glob", "!**/node_modules/**"), tuple(zip(argv, argv[1:])))
         self.assertIn(("--glob", "!**/vendor/**"), tuple(zip(argv, argv[1:])))
         self.assertEqual(argv[-3:], ["--", "value $(unsafe)", "."])
+
+    def test_definition_argv_searches_declarations_without_shell_interpolation(self) -> None:
+        """Definition lookup passes one escaped PCRE pattern directly to ripgrep."""
+
+        argv = build_definition_argv("render$value", {"vendor"})
+        pattern = argv[argv.index("--regexp") + 1]
+        self.assertIn(r"render\$value", pattern)
+        self.assertIn(("--glob", "!**/vendor/**"), tuple(zip(argv, argv[1:])))
+        self.assertEqual(argv[-2:], ["--", "."])
+
+    def test_symbol_at_cursor_accepts_selection_and_word_boundaries(self) -> None:
+        """A source buffer yields either its selected or cursor-adjacent identifier."""
+
+        buffer = Gtk.TextBuffer()
+        buffer.set_text("call renderWidget now")
+        cursor = buffer.get_iter_at_offset(11)
+        buffer.place_cursor(cursor)
+        self.assertEqual(source_symbol_at_cursor(buffer), "renderWidget")
+        start = buffer.get_iter_at_offset(5)
+        end = buffer.get_iter_at_offset(17)
+        buffer.select_range(start, end)
+        self.assertEqual(source_symbol_at_cursor(buffer), "renderWidget")
 
     def test_json_match_normalizes_path_and_unicode_byte_offsets(self) -> None:
         """UTF-8 byte spans become GtkTextBuffer-compatible character spans."""
@@ -99,6 +124,33 @@ class SearchCommandTest(unittest.TestCase):
         self.assertTrue(completions[0].truncated)
         self.assertFalse(completions[0].error)
 
+    def test_definition_search_returns_declarations_not_plain_calls(self) -> None:
+        """The heuristic resolver excludes ordinary symbol references."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "app.php").write_text(
+                "function deploy() {}\ndeploy();\n",
+                encoding="utf-8",
+            )
+            loop = GLib.MainLoop()
+            observed: list[tuple[SearchResult, ...]] = []
+
+            def completed(
+                _symbol: str,
+                results: tuple[SearchResult, ...],
+                _completion: SearchCompletion,
+            ) -> None:
+                """Retain definition candidates and stop the isolated loop."""
+
+                observed.append(results)
+                loop.quit()
+
+            DefinitionSearch(directory, "deploy", completed)
+            loop.run()
+
+        self.assertEqual(len(observed[0]), 1)
+        self.assertEqual(observed[0][0].line, 1)
+
 
 class ProjectSearchTest(unittest.TestCase):
     """Verify query threshold, selection and contextual keyboard actions."""
@@ -115,14 +167,14 @@ class ProjectSearchTest(unittest.TestCase):
         """Create an inert search surface with observable action callbacks."""
 
         self.viewed: list[str] = []
-        self.edited_internal: list[str] = []
+        self.edited_internal: list[tuple[str, int | None]] = []
         self.edited_external: list[str] = []
         self.melded: list[str] = []
         self.close_count = 0
         self.search = ProjectSearch(
             self._ignore_close,
             self.viewed.append,
-            self.edited_internal.append,
+            self._edit_internal,
             self.edited_external.append,
             self._can_meld,
             self.melded.append,
@@ -132,6 +184,11 @@ class ProjectSearchTest(unittest.TestCase):
         """Record search dismissal without changing widget visibility."""
 
         self.close_count += 1
+
+    def _edit_internal(self, path: str, line: int | None) -> None:
+        """Record the file and exact line requested from a search result."""
+
+        self.edited_internal.append((path, line))
 
     @staticmethod
     def _can_meld(path: str) -> bool:
@@ -200,7 +257,7 @@ class ProjectSearchTest(unittest.TestCase):
             self.assertTrue(press(Gdk.KEY_m))
             self.assertTrue(press(Gdk.KEY_d))
         self.assertEqual(self.viewed, ["src/app.py"])
-        self.assertEqual(self.edited_internal, ["src/app.py"])
+        self.assertEqual(self.edited_internal, [("src/app.py", 4)])
         self.assertEqual(self.edited_external, ["src/app.py"])
         self.assertEqual(self.melded, ["src/app.py"])
         self.assertEqual(self.close_count, 1)
