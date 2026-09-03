@@ -1951,6 +1951,48 @@ class WindowActionTest(unittest.TestCase):
         tree.expand_row.assert_called_once_with(path, False)
         tree.queue_draw.assert_called_once_with()
 
+    def test_file_click_activates_an_already_open_internal_editor(self) -> None:
+        """File-panel selection prefers the existing editor over quick preview."""
+
+        project = {"name": "repo", "path": "/tmp/repo"}
+        owner = SimpleNamespace(
+            active_project_name="repo",
+            config=SimpleNamespace(find_project=MagicMock(return_value=project)),
+            editor_workspace=SimpleNamespace(
+                editors={("repo", "src/app.py"): object()}
+            ),
+            preview=MagicMock(),
+            _edit_project_file_internal=MagicMock(),
+            _close_preview=MagicMock(),
+            _update_preview_geometry=MagicMock(),
+        )
+
+        SlateWindow._preview_project_file(owner, "src/app.py")
+
+        owner._edit_project_file_internal.assert_called_once_with("src/app.py")
+        owner.preview.show_file.assert_not_called()
+
+    def test_file_click_previews_a_file_without_an_editor(self) -> None:
+        """Files not open in the editor retain the existing quick-preview flow."""
+
+        project = {"name": "repo", "path": "/tmp/repo"}
+        owner = SimpleNamespace(
+            active_project_name="repo",
+            config=SimpleNamespace(find_project=MagicMock(return_value=project)),
+            editor_workspace=SimpleNamespace(editors={}),
+            preview=MagicMock(),
+            _edit_project_file_internal=MagicMock(),
+            _close_preview=MagicMock(),
+            _update_preview_geometry=MagicMock(),
+        )
+
+        SlateWindow._preview_project_file(owner, "src/app.py")
+
+        owner.preview.show_file.assert_called_once_with(
+            "/tmp/repo", "src/app.py"
+        )
+        owner._edit_project_file_internal.assert_not_called()
+
     def test_exited_active_terminal_selects_configured_fallback(self) -> None:
         """Removing an ended shell updates config and activates its sibling."""
 

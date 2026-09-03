@@ -3439,6 +3439,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         if relative_path is None or project is None:
             self._close_preview()
             return
+        if (project["name"], relative_path) in self.editor_workspace.editors:
+            # 2026-09-03: una scheda editor già aperta è la rappresentazione
+            # principale del file; il click in File deve riportarvi l'utente
+            # invece di sovrapporre una seconda rappresentazione in preview.
+            self._edit_project_file_internal(relative_path)
+            return
         self.preview.show_file(project["path"], relative_path)
         self._update_preview_geometry()
         self.preview.set_no_show_all(False)
