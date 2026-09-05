@@ -970,6 +970,42 @@ class SCMPanelTest(unittest.TestCase):
         self.assertEqual(self.diffed_repository, repository)
         self.assertEqual(self.diffed_paths, ())
 
+    def test_single_click_preview_waits_for_double_click_deadline(self) -> None:
+        """A mouse preview is shown only after GTK's double-click interval."""
+
+        status = FileStatus("tracked.py", "modified")
+        with mock.patch("slate.panel.GLib.timeout_add", return_value=73) as timeout_add:
+            self.panel._schedule_preview(status)
+
+        self.assertIsNone(self.previewed)
+        self.assertEqual(self.panel.preview_timeout_id, 73)
+        timeout_callback = timeout_add.call_args.args[1]
+        self.assertEqual(timeout_callback(), GLib.SOURCE_REMOVE)
+        self.assertEqual(self.previewed, status)
+
+    def test_double_click_cancels_preview_before_opening_meld(self) -> None:
+        """Activating a tracked row opens Meld without an intermediate preview."""
+
+        status = FileStatus("tracked.py", "modified")
+        self.panel.set_supported(True)
+        self.panel.update_status([status], "default")
+        source_path = self.panel.store.get_path(self.panel.iter_by_path[status.path])
+        filtered_path = self.panel.filtered_store.convert_child_path_to_path(
+            source_path
+        )
+        self.previewed = None
+        with mock.patch("slate.panel.GLib.timeout_add", return_value=73):
+            self.panel._schedule_preview(status)
+        with mock.patch("slate.panel.GLib.source_remove") as source_remove:
+            self.panel._on_row_activated(
+                self.panel.tree, filtered_path, self.panel.tree.get_column(0)
+            )
+
+        source_remove.assert_called_once_with(73)
+        self.assertIsNone(self.previewed)
+        self.assertEqual(self.diffed_repository, RepositoryRef(".", "hg"))
+        self.assertEqual(self.diffed_paths, ("tracked.py",))
+
     def test_modified_file_menu_exposes_meld_with_d(self) -> None:
         """The contextual tracked-file action displays the shared D shortcut."""
 

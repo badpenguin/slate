@@ -115,6 +115,8 @@ class SCMPanel(Gtk.Box):
         self.updating_select_all = False
         self.reconciling_status = False
         self.expansion_restore_id: int | None = None
+        self.preview_timeout_id: int | None = None
+        self.pending_preview_status: FileStatus | None = None
         self.context_status: FileStatus | None = None
         self.context_repository: RepositoryRef | None = None
         self.context_add_statuses: list[FileStatus] = []
@@ -1253,11 +1255,16 @@ class SCMPanel(Gtk.Box):
 
         hit = tree.get_path_at_pos(int(event.x), int(event.y))
         if event.button == 1:
+            if event.type == Gdk.EventType._2BUTTON_PRESS:
+                self._cancel_pending_preview()
+                return False
             if not hit:
+                self._cancel_pending_preview()
                 self.on_preview(None)
                 return False
             tree_iter = self.filtered_store.get_iter(hit[0])
             if self.filtered_store.get_value(tree_iter, self.COL_KIND) != "file":
+                self._cancel_pending_preview()
                 self.on_preview(None)
                 return False
             path = self.filtered_store.get_value(tree_iter, self.COL_PATH)
@@ -1265,7 +1272,7 @@ class SCMPanel(Gtk.Box):
                 tree_iter, self.COL_REPOSITORY
             )
             key = self._status_key(self._status_from_row(path, repository))
-            self.on_preview(self.status_by_path.get(key))
+            self._schedule_preview(self.status_by_path.get(key))
             return False
         if event.button != 3 or not hit:
             if event.button == 3:
@@ -1538,7 +1545,37 @@ class SCMPanel(Gtk.Box):
 
         if self.reconciling_status:
             return
+        # 2026-09-04: il primo evento di un doppio click è indistinguibile da un
+        # click singolo; mentre è pendente, il cursore non deve anticipare la preview.
+        if self.preview_timeout_id is not None:
+            return
         self.on_preview(self._focused_file_status())
+
+    def _schedule_preview(self, status: FileStatus | None) -> None:
+        """Delay a mouse preview long enough to distinguish a double click."""
+
+        self._cancel_pending_preview()
+        settings = Gtk.Settings.get_default()
+        delay = int(settings.get_property("gtk-double-click-time")) if settings else 250
+        self.pending_preview_status = status
+        self.preview_timeout_id = GLib.timeout_add(delay, self._on_preview_timeout)
+
+    def _cancel_pending_preview(self) -> None:
+        """Cancel a mouse preview that has not yet reached its display deadline."""
+
+        if self.preview_timeout_id is not None:
+            GLib.source_remove(self.preview_timeout_id)
+        self.preview_timeout_id = None
+        self.pending_preview_status = None
+
+    def _on_preview_timeout(self) -> bool:
+        """Display the deferred single-click preview once double-click time expires."""
+
+        status = self.pending_preview_status
+        self.preview_timeout_id = None
+        self.pending_preview_status = None
+        self.on_preview(status)
+        return GLib.SOURCE_REMOVE
 
     def _on_tree_key_press(self, _tree: Gtk.TreeView, event: Gdk.EventKey) -> bool:
         """Dispatch single-key file actions and checkbox toggling from the tree."""
@@ -1834,6 +1871,7 @@ class SCMPanel(Gtk.Box):
     ) -> None:
         """Open Meld for tracked files and retain the internal view for new ones."""
 
+        self._cancel_pending_preview()
         tree_iter = self.filtered_store.get_iter(path)
         if self.filtered_store.get_value(tree_iter, self.COL_KIND) == "file":
             file_path = self.filtered_store.get_value(tree_iter, self.COL_PATH)
