@@ -146,7 +146,7 @@ class FilePreview(Gtk.Box):
         if status.state in {"untracked", "added"}:
             self._load_working_file(root, status.path, request_serial)
             return
-        if status.state == "removed":
+        if status.state in {"missing", "removed"}:
             self.command = run_async(
                 scm.base_argv(status.path),
                 partial(self._on_base_loaded, request_serial, status.path),

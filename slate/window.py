@@ -2726,7 +2726,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         unique = {(result.path, result.line): result for result in results}
         ordered = tuple(sorted(unique.values(), key=candidate_key))
         if not ordered:
-            self._show_error(f"No definition found for {symbol}.")
+            # 2026-09-06: una ricerca strutturale senza risultati degrada alla
+            # ricerca testuale già disponibile, mantenendo il simbolo modificabile.
+            self._close_preview()
+            self.project_search.search_for(
+                project_name, project_root, symbol
+            )
             return
         if len(ordered) == 1:
             self._edit_project_file_internal(ordered[0].path, ordered[0].line)
@@ -4242,7 +4247,8 @@ class SlateWindow(Gtk.ApplicationWindow):
         resolved = self._search_result_status(workspace_path)
         return bool(
             resolved is not None
-            and resolved[1].state not in {"untracked", "added", "removed"}
+            and resolved[1].state
+            not in {"untracked", "added", "missing", "removed"}
             and self._repository_scm(resolved[0]) is not None
         )
 
@@ -4252,7 +4258,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         resolved = self._search_result_status(workspace_path)
         if (
             resolved is None
-            or resolved[1].state in {"untracked", "added", "removed"}
+            or resolved[1].state in {"untracked", "added", "missing", "removed"}
         ):
             return
         repository, status = resolved

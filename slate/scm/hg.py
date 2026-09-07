@@ -20,7 +20,9 @@ class MercurialSCM(SCM):
         "M": "modified",
         "A": "added",
         "R": "removed",
-        "!": "removed",
+        # 2026-09-05: Mercurial distingue un file soltanto assente (`!`) da
+        # una rimozione già registrata (`R`), che è invece pronta al commit.
+        "!": "missing",
         "?": "untracked",
         "C": "clean",
     }
@@ -333,6 +335,7 @@ class MercurialSCM(SCM):
             "extdiff",
             "-p",
             "meld",
+            "--option=--newtab",
             *( ["--", *paths] if paths else [] ),
         ]
 

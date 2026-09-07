@@ -214,6 +214,18 @@ class ProjectSearchTest(unittest.TestCase):
         )
         self.search.debounce_id = None
 
+    def test_definition_fallback_searches_short_text_immediately(self) -> None:
+        """An explicit fallback bypasses debounce and the free-typing threshold."""
+
+        with patch.object(self.search, "_start_search") as start:
+            self.search.search_for("project", "/tmp/project", "go")
+
+        self.assertEqual(self.search.project_name, "project")
+        self.assertEqual(self.search.root, "/tmp/project")
+        self.assertEqual(self.search.entry.get_text(), "go")
+        self.assertEqual(self.search.status_label.get_text(), "Searching…")
+        start.assert_called_once_with(self.search.request_serial, "go")
+
     def test_primary_selection_seeds_one_current_blank_search(self) -> None:
         """A concise external PRIMARY selection becomes the live project query."""
 

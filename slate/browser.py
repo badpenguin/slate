@@ -210,6 +210,7 @@ class BrowserPage(Gtk.Box):
         context: object,
         on_state_changed: Callable[["BrowserPage"], None],
         on_reload_on_bell_changed: Callable[["BrowserPage", bool], None],
+        on_authenticate: Callable[["BrowserPage", object], bool],
         on_error: Callable[[str], None],
         web_view: object | None = None,
     ) -> None:
@@ -223,6 +224,7 @@ class BrowserPage(Gtk.Box):
         self.identifier = entry.identifier
         self.on_state_changed = on_state_changed
         self.on_reload_on_bell_changed = on_reload_on_bell_changed
+        self.on_authenticate = on_authenticate
         self.on_error = on_error
         self.failed_loading = False
         self.inspector_open = False
@@ -950,7 +952,7 @@ class BrowserPage(Gtk.Box):
         return True
 
     def _on_authenticate(self, _web_view: object, request: object) -> bool:
-        """Trace an HTTP challenge and preserve WebKit's native auth dialog."""
+        """Trace an HTTP challenge and delegate it to the in-memory manager."""
 
         # 2026-08-27: host e stato della challenge distinguono credenziali non
         # riutilizzate da reset del profilo; realm, username e password restano
@@ -961,7 +963,7 @@ class BrowserPage(Gtk.Box):
             f"retry={request.is_retry()} "
             f"can-save={request.can_save_credentials()}"
         )
-        return False
+        return self.on_authenticate(self, request)
 
     def _on_web_process_terminated(
         self, _web_view: object, _reason: object
@@ -1214,6 +1216,7 @@ class BrowserManager:
         self.normal_profile_cancellable: Gio.Cancellable | None = None
         self.pending_normal_pages: list[BrowserPage] = []
         self.cookie_debug_in_flight = False
+        self.authentication_credentials: dict[tuple[object, ...], tuple[str, str]] = {}
         self.next_identifier = 1
 
     def restore(self, projects: list[dict]) -> None:
@@ -1295,6 +1298,7 @@ class BrowserManager:
             context,
             self._on_page_state_changed,
             self._on_reload_on_bell_changed,
+            self._authenticate,
             self.on_error,
         )
         entry.context = context if entry.private else None
@@ -1340,7 +1344,9 @@ class BrowserManager:
                 str(self.data_directory / "cookies.sqlite"),
                 WebKit2.CookiePersistentStorage.SQLITE,
             )
-            self.data_manager.set_persistent_credential_storage_enabled(True)
+            # 2026-09-05: HTTP Auth resta nella cache volatile di SLATE; evitare
+            # il credential store WebKit impedisce salvataggi impliciti su disco.
+            self.data_manager.set_persistent_credential_storage_enabled(False)
             cookie_manager.connect("changed", self._on_cookie_store_changed)
             self.context = WebKit2.WebContext.new_with_website_data_manager(
                 self.data_manager
@@ -1385,6 +1391,110 @@ class BrowserManager:
             return
         self.cookie_debug_in_flight = True
         cookie_manager.get_all_cookies(None, self._on_cookie_debug_loaded)
+
+    def _authentication_key(
+        self, page: BrowserPage, request: object
+    ) -> tuple[object, ...]:
+        """Identify one HTTP authentication space without persisting secrets."""
+
+        # 2026-09-05: le tab normali condividono la sessione; le tab private
+        # restano isolate fra loro anche quando visitano lo stesso host e realm.
+        scope: object = (
+            ("private", page.entry.reference)
+            if page.entry.private
+            else ("normal",)
+        )
+        return (
+            scope,
+            request.get_host(),
+            request.get_port(),
+            request.get_realm(),
+            request.get_scheme(),
+            request.is_for_proxy(),
+        )
+
+    def _authenticate(self, page: BrowserPage, request: object) -> bool:
+        """Reuse or request an HTTP credential kept only for this process."""
+
+        key = self._authentication_key(page, request)
+        cached = self.authentication_credentials.get(key)
+        if cached is not None and not request.is_retry():
+            request.authenticate(
+                WebKit2.Credential.new(
+                    cached[0], cached[1], WebKit2.CredentialPersistence.NONE
+                )
+            )
+            _debug_browser(
+                f"auth credential reused project={page.project_name!r} "
+                f"id={page.identifier!r} host={request.get_host()!r}"
+            )
+            return True
+        if request.is_retry():
+            self.authentication_credentials.pop(key, None)
+        return self._prompt_authentication(page, request, key)
+
+    def _prompt_authentication(
+        self,
+        page: BrowserPage,
+        request: object,
+        key: tuple[object, ...],
+    ) -> bool:
+        """Collect one HTTP username/password pair and answer the WebKit request."""
+
+        dialog = Gtk.Dialog(
+            title="HTTP authentication",
+            transient_for=self.workspace.get_toplevel(),
+            modal=True,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Log in", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_border_width(12)
+        host = request.get_host() or "this site"
+        realm = request.get_realm()
+        detail = f"Credentials required by {host}"
+        if realm:
+            detail += f" ({realm})"
+        label = Gtk.Label(label=detail, xalign=0)
+        username = Gtk.Entry()
+        username.set_placeholder_text("Username")
+        password = Gtk.Entry()
+        password.set_placeholder_text("Password")
+        password.set_visibility(False)
+        password.set_activates_default(True)
+        content.pack_start(label, False, False, 0)
+        content.pack_start(username, False, False, 0)
+        content.pack_start(password, False, False, 0)
+        dialog.show_all()
+        username.grab_focus()
+        response = dialog.run()
+        user_value = username.get_text()
+        password_value = password.get_text()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            request.cancel()
+            return True
+        self.authentication_credentials[key] = (user_value, password_value)
+        request.authenticate(
+            WebKit2.Credential.new(
+                user_value,
+                password_value,
+                WebKit2.CredentialPersistence.NONE,
+            )
+        )
+        return True
+
+    def _forget_private_credentials(self, entry: BrowserEntry) -> None:
+        """Discard volatile HTTP credentials owned by one private browser tab."""
+
+        scope = ("private", entry.reference)
+        self.authentication_credentials = {
+            key: credential
+            for key, credential in self.authentication_credentials.items()
+            if key[0] != scope
+        }
 
     def _on_cookie_debug_loaded(
         self, cookie_manager: object, result: Gio.AsyncResult
@@ -1496,6 +1606,8 @@ class BrowserManager:
         entry = self.pages.pop(reference, None)
         if entry is None:
             return False
+        if entry.private:
+            self._forget_private_credentials(entry)
         page = entry.page
         if page is not None:
             if self.workspace.get_visible_child() is page:
@@ -1516,6 +1628,8 @@ class BrowserManager:
         ]
         for reference in references:
             entry = self.pages.pop(reference)
+            if entry.private:
+                self._forget_private_credentials(entry)
             if entry.page is not None:
                 if self.workspace.get_visible_child() is entry.page:
                     self.workspace.show_terminal()
@@ -1580,6 +1694,7 @@ class BrowserManager:
                 entry.page = None
             entry.context = None
         self.pages.clear()
+        self.authentication_credentials.clear()
         self.context = None
         self.data_manager = None
         self.normal_profile_ready = False

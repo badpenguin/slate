@@ -86,8 +86,12 @@ class GitSCM(SCM):
             return "conflict"
         if "A" in (index_state, worktree_state):
             return "added"
-        if "D" in (index_state, worktree_state):
+        # 2026-09-05: una cancellazione solo nel working tree richiede ancora
+        # `git add -u`; non deve apparire come una rimozione pronta al commit.
+        if index_state == "D":
             return "removed"
+        if worktree_state == "D":
+            return "missing"
         if any(code not in {".", " "} for code in (index_state, worktree_state)):
             return "modified"
         return None
@@ -347,7 +351,7 @@ class GitSCM(SCM):
             "git",
             "difftool",
             "--no-prompt",
-            "--tool=meld",
+            "--extcmd=meld --newtab",
             "--dir-diff",
             "HEAD",
             *(["--", *paths] if paths else []),

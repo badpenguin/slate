@@ -1088,14 +1088,16 @@ class ProjectFileManager(Gtk.Box):
                 self.context_blocked = False
                 return self._show_entry_menu(event)
             return False
+        if event.button == 1:
+            # La selezione mostra subito una preview overlay: assegnare il focus
+            # prima evita che interrompa il normale focus-on-click di GTK e rende
+            # affidabili E, V, M, R, T e Canc per file e directory.
+            tree.grab_focus()
         tree.set_cursor(hit[0])
         if event.button == 1:
             tree_iter = self.store.get_iter(hit[0])
             if not self.store.get_value(tree_iter, self.COL_DIRECTORY):
                 return False
-            # Il click viene consumato dal toggle personalizzato, quindi il focus
-            # va assegnato esplicitamente affinché Canc raggiunga l'albero.
-            tree.grab_focus()
             # 2026-08-16: consumare il clic della cartella evita che l'expander
             # nativo e il toggle sulla label agiscano entrambi sullo stesso nodo.
             if tree.row_expanded(hit[0]):

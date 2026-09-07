@@ -492,6 +492,28 @@ class ProjectSearch(Gtk.Box):
         self.set_no_show_all(True)
         self.tree.grab_focus()
 
+    def search_for(self, project_name: str, root: str, query: str) -> None:
+        """Open or reuse the project search and immediately find explicit text."""
+
+        self.cancel()
+        self.selection_request_serial += 1
+        self.project_name = project_name
+        self.root = str(Path(root).resolve())
+        self.entry.set_text(query)
+        # 2026-09-06: il fallback di Go to Definition è una richiesta esplicita:
+        # annullare il debounce generato da set_text evita doppie ricerche e
+        # consente anche simboli più brevi del limite della digitazione libera.
+        self.cancel()
+        self.store.clear()
+        self._set_preview_message("Select a result to preview it")
+        self.set_no_show_all(False)
+        self.show_all()
+        self.set_no_show_all(True)
+        self.entry.grab_focus()
+        self.entry.select_region(0, -1)
+        self.status_label.set_text("Searching…")
+        self._start_search(self.request_serial, query)
+
     def _build_search_bar(self) -> None:
         """Create the query, live status and close controls in the first row."""
 

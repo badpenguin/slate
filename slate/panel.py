@@ -52,6 +52,7 @@ class SCMPanel(Gtk.Box):
         ("modified", "Modified", "accessories-text-editor"),
         ("moved", "Moved", "go-jump"),
         ("added", "Added", "list-add"),
+        ("missing", "Missing", "dialog-warning"),
         ("removed", "Removed", "list-remove"),
         ("untracked", "New", "document-new"),
     )
@@ -180,14 +181,24 @@ class SCMPanel(Gtk.Box):
         self.state_stack = Gtk.Stack()
         self.state_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.state_stack.set_transition_duration(120)
-        self.state_stack.add_named(
-            self._empty_state(
-                "folder-remote-symbolic",
-                "No supported repository",
-                "The terminal remains available, but no watcher is started.",
-            ),
-            "unsupported",
+        # 2026-09-05: quando la discovery non trova repository, l'azione nella
+        # pagina vuota consente di ripeterla senza dipendere dalla toolbar nascosta.
+        unsupported_state = self._empty_state(
+            "folder-remote-symbolic",
+            "No supported repository",
+            "The terminal remains available, but no watcher is started.",
         )
+        self.unsupported_scan_button = self._action_button(
+            "Scan again", "view-refresh", self._on_scan_clicked
+        )
+        self.unsupported_scan_button.set_halign(Gtk.Align.CENTER)
+        self.unsupported_scan_button.set_tooltip_text(
+            "Find HG and Git repositories in the project"
+        )
+        unsupported_state.pack_start(
+            self.unsupported_scan_button, False, False, 4
+        )
+        self.state_stack.add_named(unsupported_state, "unsupported")
         self.state_stack.add_named(
             self._loading_state(),
             "loading",
@@ -456,6 +467,7 @@ class SCMPanel(Gtk.Box):
             self._update_repository_label(repository)
         self.scan_button.set_sensitive(not scanning)
         self.reset_button.set_sensitive(not scanning)
+        self.unsupported_scan_button.set_sensitive(not scanning)
         if repositories:
             self._update_summary()
         elif scanning:
@@ -863,7 +875,7 @@ class SCMPanel(Gtk.Box):
                         False,
                         self.ICONS[status.state],
                         key in self.checked_paths,
-                        status.state != "untracked",
+                        status.state not in {"untracked", "missing"},
                         repository,
                         "file",
                         status.path,
@@ -872,7 +884,7 @@ class SCMPanel(Gtk.Box):
             elif old != status:
                 tree_iter = self.iter_by_path[key]
                 if old.state != status.state:
-                    if status.state == "untracked":
+                    if status.state in {"untracked", "missing"}:
                         self.checked_paths.discard(key)
                     self.store.remove(tree_iter)
                     tree_iter = self.store.append(
@@ -883,7 +895,7 @@ class SCMPanel(Gtk.Box):
                             False,
                             self.ICONS[status.state],
                             key in self.checked_paths,
-                            status.state != "untracked",
+                            status.state not in {"untracked", "missing"},
                             repository,
                             "file",
                             status.path,
@@ -960,7 +972,8 @@ class SCMPanel(Gtk.Box):
         return [
             status
             for key, status in self.status_by_path.items()
-            if key in self.checked_paths and status.state != "untracked"
+            if key in self.checked_paths
+            and status.state not in {"untracked", "missing"}
         ]
 
     def message_text(self) -> str:
@@ -1177,7 +1190,7 @@ class SCMPanel(Gtk.Box):
         tracked_paths = {
             path
             for path, status in self.status_by_path.items()
-            if status.state != "untracked"
+            if status.state not in {"untracked", "missing"}
         }
         controls = (self.select_all_check, self.commit_select_all_check)
         self.updating_select_all = True
@@ -1205,7 +1218,7 @@ class SCMPanel(Gtk.Box):
             return
         checked = button.get_active()
         for path, status in self.status_by_path.items():
-            if status.state == "untracked":
+            if status.state in {"untracked", "missing"}:
                 continue
             if checked:
                 self.checked_paths.add(path)
@@ -1385,7 +1398,11 @@ class SCMPanel(Gtk.Box):
         self.context_add_statuses = self.selected_untracked_statuses()
         self.context_forget_statuses = self.selected_added_statuses()
         self.context_checkbox_statuses = (
-            [status for status in selected if status.state != "untracked"]
+            [
+                status
+                for status in selected
+                if status.state not in {"untracked", "missing"}
+            ]
             if len(selected) > 1
             else []
         )
@@ -1437,7 +1454,7 @@ class SCMPanel(Gtk.Box):
             if (
                 self.context_status is not None
                 and self.context_status.state
-                not in {"untracked", "added", "removed"}
+                not in {"untracked", "added", "missing", "removed"}
             ):
                 meld_item = self._menu_item(
                     "Open in Meld", "document-open", Gdk.KEY_d
@@ -1599,13 +1616,13 @@ class SCMPanel(Gtk.Box):
         if status is None:
             return False
         multiple = len(self.selected_statuses()) > 1
-        if keyval == Gdk.KEY_space and status.state != "untracked":
+        if keyval == Gdk.KEY_space and status.state not in {"untracked", "missing"}:
             focused_key = self._status_key(status)
             checked = focused_key not in self.checked_paths
             selected = [
                 selected_status
                 for selected_status in self.selected_statuses()
-                if selected_status.state != "untracked"
+                if selected_status.state not in {"untracked", "missing"}
             ]
             selected_keys = {
                 self._status_key(selected_status) for selected_status in selected
@@ -1631,7 +1648,7 @@ class SCMPanel(Gtk.Box):
         if keyval == Gdk.KEY_d:
             if multiple:
                 return True
-            if status.state not in {"untracked", "added", "removed"}:
+            if status.state not in {"untracked", "added", "missing", "removed"}:
                 self.on_diff(
                     RepositoryRef(status.repository, status.scm_type),
                     status.operation_paths(),
@@ -1678,7 +1695,7 @@ class SCMPanel(Gtk.Box):
         # decisione atomica alla selezione, senza invertire separatamente gli
         # stati misti né coinvolgere righe prive di checkbox.
         for status in statuses:
-            if status.state == "untracked":
+            if status.state in {"untracked", "missing"}:
                 continue
             key = self._status_key(status)
             if checked:
@@ -1723,7 +1740,8 @@ class SCMPanel(Gtk.Box):
 
         if (
             self.context_status is not None
-            and self.context_status.state not in {"untracked", "added", "removed"}
+            and self.context_status.state
+            not in {"untracked", "added", "missing", "removed"}
         ):
             status = self.context_status
             self.on_diff(
@@ -1880,7 +1898,12 @@ class SCMPanel(Gtk.Box):
             )
             key = self._status_key(self._status_from_row(file_path, repository))
             status = self.status_by_path.get(key)
-            if status and status.state in {"untracked", "added", "removed"}:
+            if status and status.state in {
+                "untracked",
+                "added",
+                "missing",
+                "removed",
+            }:
                 self.on_preview(status)
             elif status:
                 self.on_diff(

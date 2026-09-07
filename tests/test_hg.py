@@ -42,7 +42,7 @@ class MercurialSCMTest(unittest.TestCase):
             [
                 FileStatus("dir/file name.py", "modified"),
                 FileStatus("à capo\nfile.txt", "untracked"),
-                FileStatus("missing.txt", "removed"),
+                FileStatus("missing.txt", "missing"),
                 FileStatus(
                     "new name.txt", "added", source_path="old name.txt"
                 ),
@@ -79,7 +79,9 @@ class MercurialSCMTest(unittest.TestCase):
 
         command = self.scm.diff_argv(["file.txt"])
         self.assertEqual(command[:4], ["hg", "--config", "extensions.extdiff=", "extdiff"])
+        self.assertIn("--option=--newtab", command)
         self.assertEqual(command[-2:], ["--", "file.txt"])
+        self.assertNotIn("--newtab", self.scm.merge_tool_argv())
 
     def test_preview_add_and_revert_are_explicit_path_commands(self) -> None:
         """Preview and mutations cannot reinterpret filenames as options."""

@@ -264,6 +264,38 @@ class SCMPanelTest(unittest.TestCase):
             tree_iter = self.panel.filtered_store.iter_next(tree_iter)
         self.assertEqual(names, ["Alpha.py", "beta.py", "zeta.py"])
 
+    def test_missing_and_recorded_removals_have_distinct_groups(self) -> None:
+        """Only SCM-recorded removals are selectable for an explicit commit."""
+
+        missing = FileStatus("missing.py", "missing")
+        removed = FileStatus("removed.py", "removed")
+        self.panel.set_supported(True)
+        self.panel.update_status([missing, removed], "default")
+
+        missing_iter = self.panel.iter_by_path["missing.py"]
+        removed_iter = self.panel.iter_by_path["removed.py"]
+        self.assertFalse(
+            self.panel.store.get_value(missing_iter, self.panel.COL_CHECKABLE)
+        )
+        self.assertTrue(
+            self.panel.store.get_value(removed_iter, self.panel.COL_CHECKABLE)
+        )
+        repository = RepositoryRef(".", "hg")
+        self.assertEqual(
+            self.panel.store.get_value(
+                self.panel.group_iters[(repository, "missing")],
+                self.panel.COL_TEXT,
+            ),
+            "Missing (1)",
+        )
+        self.assertEqual(
+            self.panel.store.get_value(
+                self.panel.group_iters[(repository, "removed")],
+                self.panel.COL_TEXT,
+            ),
+            "Removed (1)",
+        )
+
     def test_revision_font_size_updates_renderer(self) -> None:
         """Revision settings change the shared group and file text renderer."""
 
@@ -720,6 +752,23 @@ class SCMPanelTest(unittest.TestCase):
             content = button.get_child()
             self.assertEqual(content.get_spacing(), 4)
             self.assertIsInstance(content.get_children()[0], Gtk.Image)
+
+    def test_unsupported_state_can_repeat_repository_scan(self) -> None:
+        """The empty repository page exposes the normal manual discovery action."""
+
+        on_scan = mock.Mock()
+        self.panel.on_scan = on_scan
+        self.panel.set_repositories([])
+
+        self.assertEqual(
+            self.panel.state_stack.get_visible_child_name(), "unsupported"
+        )
+        self.assertTrue(self.panel.unsupported_scan_button.get_visible())
+        self.assertEqual(
+            self.panel.unsupported_scan_button.get_halign(), Gtk.Align.CENTER
+        )
+        self.panel.unsupported_scan_button.clicked()
+        on_scan.assert_called_once_with()
 
     def test_checkboxes_define_commit_and_revert_targets(self) -> None:
         """Tracked operations ignore row focus and use only explicit checkboxes."""

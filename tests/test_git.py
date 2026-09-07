@@ -29,6 +29,7 @@ class GitSCMTest(unittest.TestCase):
             "1 .M N... 100644 100644 100644 aaa bbb file one.py\0"
             "1 M. N... 100644 100644 100644 aaa bbb staged.py\0"
             "1 D. N... 100644 000000 000000 aaa 000 removed.py\0"
+            "1 .D N... 100644 100644 000000 aaa bbb missing.py\0"
             "u UU N... 100644 100644 100644 100644 a b c conflict.py\0"
             "? nuovo file.txt\0"
         )
@@ -38,6 +39,7 @@ class GitSCMTest(unittest.TestCase):
                 FileStatus("file one.py", "modified", scm_type="git"),
                 FileStatus("staged.py", "modified", scm_type="git"),
                 FileStatus("removed.py", "removed", scm_type="git"),
+                FileStatus("missing.py", "missing", scm_type="git"),
                 FileStatus("conflict.py", "conflict", scm_type="git"),
                 FileStatus("nuovo file.txt", "untracked", scm_type="git"),
             ],
@@ -91,6 +93,10 @@ class GitSCMTest(unittest.TestCase):
             ["git", "add", "-u", "--", "rimosso.py"],
         )
         self.assertEqual(self.scm.environment["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertIn(
+            "--extcmd=meld --newtab", self.scm.diff_argv(("a b.py",))
+        )
+        self.assertNotIn("--newtab", self.scm.merge_tool_argv())
         self.assertEqual(
             self.scm.diff_argv(("a b.py",))[-3:], ["HEAD", "--", "a b.py"]
         )

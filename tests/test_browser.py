@@ -153,7 +153,7 @@ class BrowserTest(unittest.TestCase):
             self.assertFalse(manager.context.is_ephemeral())
             self.assertTrue(manager.data_directory.is_dir())
             self.assertTrue(manager.cache_directory.is_dir())
-            self.assertTrue(
+            self.assertFalse(
                 manager.data_manager.get_persistent_credential_storage_enabled()
             )
             self.assertIs(first.page.web_view.get_context(), manager.context)
@@ -672,7 +672,12 @@ class BrowserTest(unittest.TestCase):
     def test_auth_debug_preserves_the_native_dialog_without_exposing_realm(self) -> None:
         """Authentication diagnostics remain metadata-only and propagate WebKit."""
 
-        page = SimpleNamespace(project_name="repo", identifier="browser-1")
+        on_authenticate = MagicMock(return_value=True)
+        page = SimpleNamespace(
+            project_name="repo",
+            identifier="browser-1",
+            on_authenticate=on_authenticate,
+        )
         request = MagicMock()
         request.get_host.return_value = "protected.example"
         request.is_retry.return_value = True
@@ -685,10 +690,68 @@ class BrowserTest(unittest.TestCase):
         ):
             handled = BrowserPage._on_authenticate(page, object(), request)
 
-        self.assertFalse(handled)
+        self.assertTrue(handled)
+        on_authenticate.assert_called_once_with(page, request)
         self.assertIn("host='protected.example'", stderr.getvalue())
         self.assertIn("retry=True can-save=True", stderr.getvalue())
         self.assertNotIn("realm", stderr.getvalue())
+
+    def test_http_auth_credentials_are_reused_from_process_memory(self) -> None:
+        """A repeated non-retry challenge avoids another credential dialog."""
+
+        manager = BrowserManager(
+            _BrowserStack(), MagicMock(), MagicMock(), MagicMock()
+        )
+        entry = BrowserEntry("repo", "browser-1", "Browser")
+        page = SimpleNamespace(
+            entry=entry,
+            project_name="repo",
+            identifier="browser-1",
+        )
+        request = MagicMock()
+        request.get_host.return_value = "protected.example"
+        request.get_port.return_value = 443
+        request.get_realm.return_value = "Private"
+        request.get_scheme.return_value = 2
+        request.is_for_proxy.return_value = False
+        request.is_retry.return_value = False
+        key = manager._authentication_key(page, request)
+        manager.authentication_credentials[key] = ("user", "secret")
+
+        with patch("slate.browser.WebKit2.Credential.new") as credential_new:
+            credential = credential_new.return_value
+            self.assertTrue(manager._authenticate(page, request))
+
+        credential_new.assert_called_once_with(
+            "user", "secret", WebKit2.CredentialPersistence.NONE
+        )
+        request.authenticate.assert_called_once_with(credential)
+
+    def test_rejected_http_auth_credential_is_removed_before_prompt(self) -> None:
+        """A retry never loops with a credential already rejected by the server."""
+
+        manager = BrowserManager(
+            _BrowserStack(), MagicMock(), MagicMock(), MagicMock()
+        )
+        entry = BrowserEntry("repo", "browser-1", "Browser")
+        page = SimpleNamespace(entry=entry)
+        request = MagicMock()
+        request.get_host.return_value = "protected.example"
+        request.get_port.return_value = 443
+        request.get_realm.return_value = "Private"
+        request.get_scheme.return_value = 2
+        request.is_for_proxy.return_value = False
+        request.is_retry.return_value = True
+        key = manager._authentication_key(page, request)
+        manager.authentication_credentials[key] = ("wrong", "secret")
+
+        with patch.object(
+            manager, "_prompt_authentication", return_value=True
+        ) as prompt:
+            self.assertTrue(manager._authenticate(page, request))
+
+        self.assertNotIn(key, manager.authentication_credentials)
+        prompt.assert_called_once_with(page, request, key)
 
     def test_cookie_debug_reports_only_the_aggregate_count(self) -> None:
         """Cookie changes expose their total count without cookie contents."""

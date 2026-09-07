@@ -495,6 +495,46 @@ class ProjectFileManagerTest(unittest.TestCase):
             self.manager.tree.row_expanded(self.manager.store.get_path(restored_iter))
         )
 
+    def test_file_click_focuses_tree_for_all_single_key_actions(self) -> None:
+        """A file preview cannot steal V/E/M/R/Delete from the file tree."""
+
+        window = Gtk.Window()
+        window.add(self.manager)
+        window.show_all()
+        self.addCleanup(window.destroy)
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+        file_iter = next(
+            tree_iter
+            for name, tree_iter in self._root_rows()
+            if name == "normal.txt"
+        )
+        file_path = self.manager.store.get_path(file_iter)
+        column = self.manager.tree.get_columns()[0]
+        area = self.manager.tree.get_cell_area(file_path, column)
+        event = SimpleNamespace(
+            button=1,
+            type=Gdk.EventType.BUTTON_PRESS,
+            x=area.x + max(area.width // 2, 1),
+            y=area.y + max(area.height // 2, 1),
+        )
+
+        self.assertFalse(self.manager._on_button_press(self.manager.tree, event))
+        self.assertIs(window.get_focus(), self.manager.tree)
+        for keyval in (
+            Gdk.KEY_v,
+            Gdk.KEY_e,
+            Gdk.KEY_m,
+            Gdk.KEY_r,
+            Gdk.KEY_Delete,
+        ):
+            self.assertTrue(self._press(keyval))
+        self.assertEqual(self.viewed, "normal.txt")
+        self.assertEqual(self.edited_internal, "normal.txt")
+        self.assertEqual(self.edited_external, "normal.txt")
+        self.assertEqual(self.renamed, "normal.txt")
+        self.assertEqual(self.deleted, "normal.txt")
+
     def test_activation_restores_tree_page_after_show_all_side_effect(self) -> None:
         """An already configured project cannot remain on the inactive empty page."""
 

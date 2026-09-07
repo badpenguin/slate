@@ -190,6 +190,35 @@ class WindowActionTest(unittest.TestCase):
         SlateWindow._open_search_result_meld(owner, "new.py")
         owner._open_diff.assert_called_once_with(repository, ("old.py", "new.py"))
 
+    def test_missing_definition_falls_back_to_project_text_search(self) -> None:
+        """An unresolved symbol opens the reusable Find surface with that text."""
+
+        owner = SimpleNamespace(
+            active_project_name="workspace",
+            definition_search=object(),
+            project_search=MagicMock(),
+            _close_preview=MagicMock(),
+            _show_error=MagicMock(),
+        )
+        completion = SimpleNamespace(error="")
+
+        SlateWindow._on_definition_search_complete(
+            owner,
+            "workspace",
+            "/tmp/workspace",
+            "src/app.py",
+            "go",
+            (),
+            completion,
+        )
+
+        self.assertIsNone(owner.definition_search)
+        owner._close_preview.assert_called_once_with()
+        owner.project_search.search_for.assert_called_once_with(
+            "workspace", "/tmp/workspace", "go"
+        )
+        owner._show_error.assert_not_called()
+
     def test_sequence_move_rejects_invalid_and_unchanged_positions(self) -> None:
         """The shared reorder primitive returns only effective stable moves."""
 
