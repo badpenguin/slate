@@ -279,7 +279,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.outer_paned.set_position(self.config.data["pane_positions"][0])
         self.inner_paned.set_position(self.config.data["pane_positions"][1])
         self.preview = FilePreview(
-            self._close_preview, self._start_definition_search
+            self._close_preview,
+            self._start_definition_search,
+            self._handle_file_preview_action,
         )
         self.preview.set_halign(Gtk.Align.START)
         self.preview.set_valign(Gtk.Align.FILL)
@@ -3455,6 +3457,40 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.preview.set_no_show_all(False)
         self.preview.show_all()
         self.preview.set_no_show_all(True)
+
+    def _handle_file_preview_action(self, action: str) -> None:
+        """Apply a focused shared-preview shortcut to its exact current file."""
+
+        path = self.preview.current_path
+        if path is None:
+            return
+        status = getattr(self, "preview_status", None)
+        if status is not None:
+            if action == "view":
+                self._view_status(status)
+            elif action == "edit-internal":
+                self._edit_status_internal(status)
+            elif action == "edit-external":
+                self._edit_status_external(status)
+            elif action == "meld" and status.state not in {
+                "untracked",
+                "added",
+                "missing",
+                "removed",
+            }:
+                self._open_diff(
+                    RepositoryRef(status.repository, status.scm_type),
+                    status.operation_paths(),
+                )
+            return
+        if action == "view":
+            self._view_project_file(path)
+        elif action == "edit-internal":
+            self._edit_project_file_internal(path)
+        elif action == "edit-external":
+            self._edit_project_file_external(path)
+        elif action == "meld":
+            self._open_search_result_meld(path)
 
     def _refresh_visible_preview(
         self,

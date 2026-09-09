@@ -758,7 +758,10 @@ class EditorDocument(Gtk.Box):
     def goto_line_number(self, line_number: int) -> None:
         """Move to a one-based line now or immediately after initial loading."""
 
-        if self.loading:
+        # 2026-09-09: l'apertura registra il documento prima di avviare la
+        # lettura nell'idle; conservare la riga anche in quella breve finestra
+        # evita che il caricamento successivo riporti Ctrl+B alla prima riga.
+        if self.loading or self.initial_load_id is not None:
             self.pending_line = max(1, line_number)
             return
         line = min(max(1, line_number), self.buffer.get_line_count()) - 1

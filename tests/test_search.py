@@ -274,6 +274,29 @@ class ProjectSearchTest(unittest.TestCase):
         self.assertEqual(self.melded, ["src/app.py"])
         self.assertEqual(self.close_count, 1)
 
+    def test_preview_shortcuts_target_the_rendered_search_result(self) -> None:
+        """Preview focus dispatches V, E, M and D without consulting tree focus."""
+
+        result = SearchResult("src/app.py", 4, "needle", ((0, 6),))
+        self.search.preview_result = result
+
+        def press(keyval: int) -> bool:
+            """Dispatch one unmodified key to the search preview."""
+
+            event = SimpleNamespace(keyval=keyval, state=Gdk.ModifierType(0))
+            return self.search._on_preview_key_press(
+                self.search.preview_view, event
+            )
+
+        self.assertTrue(press(Gdk.KEY_v))
+        self.assertTrue(press(Gdk.KEY_e))
+        self.assertTrue(press(Gdk.KEY_m))
+        self.assertTrue(press(Gdk.KEY_d))
+        self.assertEqual(self.viewed, ["src/app.py"])
+        self.assertEqual(self.edited_internal, [("src/app.py", 4)])
+        self.assertEqual(self.edited_external, ["src/app.py"])
+        self.assertEqual(self.melded, ["src/app.py"])
+
     def test_result_columns_show_match_left_and_file_location_right(self) -> None:
         """The result hierarchy keeps source text before the compact file location."""
 

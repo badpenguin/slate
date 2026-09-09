@@ -372,6 +372,34 @@ class EditorTest(unittest.TestCase):
         requested.assert_called_once_with(str(self.root), "TODO.md", "deploy")
         workspace.shutdown()
 
+    def test_definition_line_waits_for_scheduled_initial_load(self) -> None:
+        """A newly opened definition applies its line after content is loaded."""
+
+        self.path.write_text("first\nsecond\ntarget\n", encoding="utf-8")
+        workspace = EditorWorkspace(
+            Gtk.Box(),
+            10,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
+        editor = workspace.open_file("project", str(self.root), "TODO.md")
+        editor.goto_line_number(3)
+
+        self.assertEqual(editor.pending_line, 3)
+
+        def initial_load_finished() -> bool:
+            """Report when both the scheduled and asynchronous load have ended."""
+
+            return editor.initial_load_id is None and not editor.loading
+
+        self._wait_until(initial_load_finished)
+        cursor = editor.buffer.get_iter_at_mark(editor.buffer.get_insert())
+        self.assertEqual(cursor.get_line(), 2)
+        self.assertIsNone(editor.pending_line)
+        workspace.shutdown()
+
     def test_workspace_rekeys_dirty_editor_after_file_rename(self) -> None:
         """A renamed open file keeps its buffer and receives the new identity."""
 

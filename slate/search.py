@@ -594,6 +594,9 @@ class ProjectSearch(Gtk.Box):
         self.preview_view.set_show_line_numbers(True)
         self.preview_view.set_highlight_current_line(False)
         self.preview_view.set_wrap_mode(Gtk.WrapMode.NONE)
+        # 2026-09-08: la preview mantiene l'identità del risultato visualizzato,
+        # quindi può offrire le stesse azioni anche dopo aver ricevuto il focus.
+        self.preview_view.connect("key-press-event", self._on_preview_key_press)
         preview_scroller = Gtk.ScrolledWindow()
         preview_scroller.set_policy(
             Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC
@@ -1027,6 +1030,24 @@ class ProjectSearch(Gtk.Box):
             return False
         result = self._focused_result()
         if result is None:
+            return False
+        return self._dispatch_result_key(result, event)
+
+    def _on_preview_key_press(
+        self, _view: Gtk.TextView, event: Gdk.EventKey
+    ) -> bool:
+        """Dispatch result shortcuts for the file rendered in the focused preview."""
+
+        if self.preview_result is None:
+            return False
+        return self._dispatch_result_key(self.preview_result, event)
+
+    def _dispatch_result_key(
+        self, result: SearchResult, event: Gdk.EventKey
+    ) -> bool:
+        """Run one search-result shortcut against an explicit result identity."""
+
+        if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
             return False
         keyval = Gdk.keyval_to_lower(event.keyval)
         if keyval == Gdk.KEY_v:

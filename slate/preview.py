@@ -9,10 +9,11 @@ from typing import Callable
 import gi
 
 gi.require_version("Gio", "2.0")
+gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
-from gi.repository import GdkPixbuf, Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
 
 from .processes import AsyncCommand, CommandResult, run_async
 from .search import source_symbol_at_cursor
@@ -30,12 +31,14 @@ class FilePreview(Gtk.Box):
         self,
         on_close: Callable[[], None],
         on_definition: Callable[[str, str, str], None] | None = None,
+        on_action: Callable[[str], None] | None = None,
     ) -> None:
         """Build a header and GtkSourceView suitable for diff and source content."""
 
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.on_close = on_close
         self.on_definition = on_definition
+        self.on_action = on_action
         self.current_path: str | None = None
         self.current_root: str | None = None
         self.command: AsyncCommand | None = None
@@ -88,6 +91,9 @@ class FilePreview(Gtk.Box):
         self.view.set_highlight_current_line(False)
         self.view.set_tab_width(4)
         self.view.connect("populate-popup", self._on_populate_popup)
+        # 2026-09-08: il focus nella preview non deve disattivare le azioni
+        # pubblicizzate dagli alberi Revisioni e Files.
+        self.view.connect("key-press-event", self._on_key_press)
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.view)
@@ -526,3 +532,21 @@ class FilePreview(Gtk.Box):
         """Run contextual Go to Definition for the preview cursor."""
 
         self.go_to_definition()
+
+    def _on_key_press(self, _view: Gtk.TextView, event: Gdk.EventKey) -> bool:
+        """Forward unmodified file-action shortcuts from the focused preview."""
+
+        if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
+            return False
+        keyval = Gdk.keyval_to_lower(event.keyval)
+        actions = {
+            Gdk.KEY_v: "view",
+            Gdk.KEY_e: "edit-internal",
+            Gdk.KEY_m: "edit-external",
+            Gdk.KEY_d: "meld",
+        }
+        action = actions.get(keyval)
+        if action is None or self.on_action is None or self.current_path is None:
+            return False
+        self.on_action(action)
+        return True

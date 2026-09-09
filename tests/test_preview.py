@@ -11,8 +11,9 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
+gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import GdkPixbuf, GLib, Gtk
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
 from slate.preview import FilePreview
 from slate.scm.base import FileStatus
@@ -66,6 +67,21 @@ class FilePreviewTest(unittest.TestCase):
         self.assertTrue(preview.go_to_definition())
         requested.assert_called_once_with(
             "/tmp/project", "src/app.php", "deploy"
+        )
+
+    def test_focused_preview_forwards_all_file_action_shortcuts(self) -> None:
+        """V, E, M and D remain available after the preview receives focus."""
+
+        actions: list[str] = []
+        preview = FilePreview(self._ignore_close, on_action=actions.append)
+        preview.current_path = "src/app.php"
+        for keyval in (Gdk.KEY_v, Gdk.KEY_e, Gdk.KEY_m, Gdk.KEY_d):
+            event = SimpleNamespace(
+                keyval=keyval, state=Gdk.ModifierType(0)
+            )
+            self.assertTrue(preview._on_key_press(preview.view, event))
+        self.assertEqual(
+            actions, ["view", "edit-internal", "edit-external", "meld"]
         )
 
     def test_new_python_file_uses_syntax_highlighting(self) -> None:

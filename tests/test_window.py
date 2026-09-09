@@ -60,6 +60,39 @@ class WindowActionTest(unittest.TestCase):
 
         owner._preview_file.assert_called_once_with(status, force=True)
 
+    def test_shared_preview_routes_revision_and_file_actions(self) -> None:
+        """The shared preview resolves shortcuts from its originating surface."""
+
+        status = FileStatus("tracked.py", "modified")
+        owner = SimpleNamespace(
+            preview=SimpleNamespace(current_path="tracked.py"),
+            preview_status=status,
+            _view_status=MagicMock(),
+            _edit_status_internal=MagicMock(),
+            _edit_status_external=MagicMock(),
+            _open_diff=MagicMock(),
+            _view_project_file=MagicMock(),
+            _edit_project_file_internal=MagicMock(),
+            _edit_project_file_external=MagicMock(),
+            _open_search_result_meld=MagicMock(),
+        )
+        for action in ("view", "edit-internal", "edit-external", "meld"):
+            SlateWindow._handle_file_preview_action(owner, action)
+        owner._view_status.assert_called_once_with(status)
+        owner._edit_status_internal.assert_called_once_with(status)
+        owner._edit_status_external.assert_called_once_with(status)
+        owner._open_diff.assert_called_once_with(
+            RepositoryRef(".", "hg"), ("tracked.py",)
+        )
+
+        owner.preview_status = None
+        for action in ("view", "edit-internal", "edit-external", "meld"):
+            SlateWindow._handle_file_preview_action(owner, action)
+        owner._view_project_file.assert_called_once_with("tracked.py")
+        owner._edit_project_file_internal.assert_called_once_with("tracked.py")
+        owner._edit_project_file_external.assert_called_once_with("tracked.py")
+        owner._open_search_result_meld.assert_called_once_with("tracked.py")
+
     def test_extra_command_closes_popover_and_creates_named_terminal(self) -> None:
         """Configured command buttons preserve their shell line, label and icon."""
 
