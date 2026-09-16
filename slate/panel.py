@@ -86,6 +86,7 @@ class SCMPanel(Gtk.Box):
         on_edit_internal: Callable[[FileStatus], None],
         on_edit_external: Callable[[FileStatus], None],
         on_delete: Callable[[FileStatus], None],
+        on_delete_missing: Callable[[list[FileStatus]], None] | None = None,
     ) -> None:
         """Build repository header, state pages, commit editor and action bar."""
 
@@ -107,6 +108,7 @@ class SCMPanel(Gtk.Box):
         self.on_edit_internal = on_edit_internal
         self.on_edit_external = on_edit_external
         self.on_delete = on_delete
+        self.on_delete_missing = on_delete_missing
         self.status_by_path: dict[str, FileStatus] = {}
         self.iter_by_path: dict[str, Gtk.TreeIter] = {}
         self.checked_paths: set[str] = set()
@@ -1495,10 +1497,21 @@ class SCMPanel(Gtk.Box):
             forget_item = self._menu_item("Undo add", "list-remove", None)
             forget_item.connect("activate", self._on_context_forget)
             menu.append(forget_item)
-        if not multiple:
-            delete_item = self._menu_item("Delete", "edit-delete", Gdk.KEY_Delete)
+        missing_selection = bool(self.context_selected_statuses) and all(
+            status.state == "missing" for status in self.context_selected_statuses
+        )
+        if not multiple or (missing_selection and self.on_delete_missing is not None):
+            delete_label = (
+                f"Delete ({len(self.context_selected_statuses)})"
+                if multiple
+                else "Delete"
+            )
+            delete_item = self._menu_item(
+                delete_label, "edit-delete", Gdk.KEY_Delete
+            )
             delete_item.connect("activate", self._on_context_delete)
-            menu.append(Gtk.SeparatorMenuItem())
+            if menu.get_children():
+                menu.append(Gtk.SeparatorMenuItem())
             menu.append(delete_item)
         return menu
 
@@ -1661,6 +1674,13 @@ class SCMPanel(Gtk.Box):
                 return True
         if event.keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete):
             if multiple:
+                selected = self.selected_statuses()
+                if (
+                    self.on_delete_missing is not None
+                    and selected
+                    and all(item.state == "missing" for item in selected)
+                ):
+                    self.on_delete_missing(selected)
                 return True
             self.on_delete(status)
             return True
@@ -1726,6 +1746,16 @@ class SCMPanel(Gtk.Box):
     def _on_context_delete(self, _item: Gtk.MenuItem) -> None:
         """Request confirmed deletion of the contextual working-copy file."""
 
+        if (
+            len(self.context_selected_statuses) > 1
+            and self.on_delete_missing is not None
+            and all(
+                status.state == "missing"
+                for status in self.context_selected_statuses
+            )
+        ):
+            self.on_delete_missing(list(self.context_selected_statuses))
+            return
         if self.context_status:
             self.on_delete(self.context_status)
 

@@ -1,13 +1,14 @@
 """Pure terminal naming and process-duration parser tests."""
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 from gi.repository import Gdk, Vte
 
 from slate.processes import CommandResult
-from slate.terminals import TerminalManager, session_name, slug
+from slate.terminals import TerminalManager, project_history, session_name, slug
 
 
 class TerminalHelpersTest(unittest.TestCase):
@@ -33,6 +34,15 @@ class TerminalHelpersTest(unittest.TestCase):
         encoded = TerminalManager._encode_metadata(value)
         self.assertNotIn("|", encoded)
         self.assertEqual(TerminalManager._decode_metadata(encoded), value)
+
+    def test_project_history_is_shared_by_all_project_terminals(self) -> None:
+        """History identity depends on the canonical project path, not a terminal."""
+
+        with patch.dict("os.environ", {"XDG_STATE_HOME": "/tmp/slate-state"}):
+            history_path, fish_history_name = project_history("/tmp/repo/../repo")
+
+        self.assertEqual(history_path.parent, Path("/tmp/slate-state/slate/history"))
+        self.assertEqual(history_path.name, fish_history_name.removeprefix("slate_"))
 
     def test_status_labels_cannot_break_layout_or_inject_tmux_style(self) -> None:
         """Status metadata flattens whitespace, separators and style openers."""

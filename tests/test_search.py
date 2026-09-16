@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import gi
 
@@ -296,6 +296,30 @@ class ProjectSearchTest(unittest.TestCase):
         self.assertEqual(self.edited_internal, [("src/app.py", 4)])
         self.assertEqual(self.edited_external, ["src/app.py"])
         self.assertEqual(self.melded, ["src/app.py"])
+
+    def test_ctrl_b_in_search_preview_resolves_symbol_in_rendered_file(self) -> None:
+        """The focused search preview forwards its symbol and source identity."""
+
+        requested = MagicMock()
+        result = SearchResult("src/app.py", 4, "deploy();", ((0, 6),))
+        self.search.on_definition = requested
+        self.search.root = "/tmp/project"
+        self.search.preview_result = result
+        self.search.preview_buffer.set_text("function deploy() {}\n")
+        self.search.preview_buffer.place_cursor(
+            self.search.preview_buffer.get_iter_at_offset(12)
+        )
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_b,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+
+        self.assertTrue(
+            self.search._on_preview_key_press(self.search.preview_view, event)
+        )
+        requested.assert_called_once_with(
+            "/tmp/project", "src/app.py", "deploy"
+        )
 
     def test_result_columns_show_match_left_and_file_location_right(self) -> None:
         """The result hierarchy keeps source text before the compact file location."""

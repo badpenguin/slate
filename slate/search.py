@@ -437,6 +437,7 @@ class ProjectSearch(Gtk.Box):
         on_edit_external: Callable[[str], None],
         can_open_meld: Callable[[str], bool],
         on_open_meld: Callable[[str], None],
+        on_definition: Callable[[str, str, str], None] | None = None,
     ) -> None:
         """Build the three-row search surface and contextual action dispatchers."""
 
@@ -447,6 +448,7 @@ class ProjectSearch(Gtk.Box):
         self.on_edit_external = on_edit_external
         self.can_open_meld = can_open_meld
         self.on_open_meld = on_open_meld
+        self.on_definition = on_definition
         self.project_name: str | None = None
         self.root: str | None = None
         self.debounce_id: int | None = None
@@ -589,7 +591,7 @@ class ProjectSearch(Gtk.Box):
         self._configure_preview_tags()
         self.preview_view = GtkSource.View.new_with_buffer(self.preview_buffer)
         self.preview_view.set_editable(False)
-        self.preview_view.set_cursor_visible(False)
+        self.preview_view.set_cursor_visible(True)
         self.preview_view.set_monospace(True)
         self.preview_view.set_show_line_numbers(True)
         self.preview_view.set_highlight_current_line(False)
@@ -597,6 +599,7 @@ class ProjectSearch(Gtk.Box):
         # 2026-09-08: la preview mantiene l'identità del risultato visualizzato,
         # quindi può offrire le stesse azioni anche dopo aver ricevuto il focus.
         self.preview_view.connect("key-press-event", self._on_preview_key_press)
+        self.preview_view.connect("populate-popup", self._on_preview_populate_popup)
         preview_scroller = Gtk.ScrolledWindow()
         preview_scroller.set_policy(
             Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC
@@ -1040,7 +1043,54 @@ class ProjectSearch(Gtk.Box):
 
         if self.preview_result is None:
             return False
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        # 2026-09-12: la preview di Find possiede un buffer distinto da quella
+        # globale, quindi Ctrl+B deve partire dalla sua identità e dal suo cursore.
+        if (
+            Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b
+            and modifiers == Gdk.ModifierType.CONTROL_MASK
+        ):
+            return self._preview_go_to_definition()
         return self._dispatch_result_key(self.preview_result, event)
+
+    def _preview_go_to_definition(self) -> bool:
+        """Resolve the symbol under the search-preview cursor in its source file."""
+
+        if (
+            self.preview_result is None
+            or self.root is None
+            or self.on_definition is None
+        ):
+            return False
+        symbol = source_symbol_at_cursor(self.preview_buffer)
+        if symbol is None:
+            return False
+        self.on_definition(self.root, self.preview_result.path, symbol)
+        return True
+
+    def _on_preview_populate_popup(
+        self, _view: Gtk.TextView, menu: Gtk.Menu
+    ) -> None:
+        """Append Go to Definition to the search preview's native context menu."""
+
+        separator = Gtk.SeparatorMenuItem()
+        item = Gtk.MenuItem(label="Go to Definition")
+        item.set_sensitive(
+            self.preview_result is not None
+            and self.root is not None
+            and self.on_definition is not None
+            and source_symbol_at_cursor(self.preview_buffer) is not None
+        )
+        item.connect("activate", self._on_preview_definition_activate)
+        menu.append(separator)
+        menu.append(item)
+        separator.show()
+        item.show()
+
+    def _on_preview_definition_activate(self, _item: Gtk.MenuItem) -> None:
+        """Run contextual Go to Definition from the search preview."""
+
+        self._preview_go_to_definition()
 
     def _dispatch_result_key(
         self, result: SearchResult, event: Gdk.EventKey

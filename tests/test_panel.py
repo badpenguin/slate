@@ -36,6 +36,7 @@ class SCMPanelTest(unittest.TestCase):
         self.edited_internal: FileStatus | None = None
         self.edited_external: FileStatus | None = None
         self.deleted: FileStatus | None = None
+        self.deleted_missing: list[FileStatus] = []
         self.diffed_repository: RepositoryRef | None = None
         self.diffed_paths: tuple[str, ...] = ()
         self.external_repository: RepositoryRef | None = None
@@ -59,6 +60,7 @@ class SCMPanelTest(unittest.TestCase):
             self._record_edit_internal,
             self._record_edit_external,
             self._record_delete,
+            self._record_delete_missing,
         )
 
     def _record_commit(self, message: str, statuses: list[FileStatus]) -> None:
@@ -136,6 +138,11 @@ class SCMPanelTest(unittest.TestCase):
         """Record confirmed-delete requests forwarded to the window."""
 
         self.deleted = status
+
+    def _record_delete_missing(self, statuses: list[FileStatus]) -> None:
+        """Record a contextual batch of already absent tracked paths."""
+
+        self.deleted_missing = statuses
 
     def test_repository_roots_use_distinct_colored_scm_badges(self) -> None:
         """Git and HG roots render their bundled badges instead of folder icons."""
@@ -1072,6 +1079,40 @@ class SCMPanelTest(unittest.TestCase):
 
         self.assertEqual(self.diffed_repository, RepositoryRef(".", "hg"))
         self.assertEqual(self.diffed_paths, ("tracked.py",))
+
+    def test_missing_file_menu_exposes_delete(self) -> None:
+        """A physically absent tracked path retains its contextual removal action."""
+
+        status = FileStatus("missing.py", "missing")
+        self.panel.context_status = status
+        self.panel.context_selected_statuses = [status]
+        menu = self.panel._build_file_menu()
+        labels = [
+            child.get_child().get_children()[1].get_text()
+            for child in menu.get_children()
+            if isinstance(child.get_child(), Gtk.Box)
+        ]
+
+        self.assertIn("Delete", labels)
+
+    def test_multiple_missing_files_share_one_contextual_delete(self) -> None:
+        """Several missing paths expose and dispatch one batch removal action."""
+
+        first = FileStatus("first.py", "missing")
+        second = FileStatus("second.py", "missing")
+        self.panel.context_status = first
+        self.panel.context_selected_statuses = [first, second]
+        menu = self.panel._build_file_menu()
+        delete_item = next(
+            child
+            for child in menu.get_children()
+            if isinstance(child.get_child(), Gtk.Box)
+            and child.get_child().get_children()[1].get_text() == "Delete (2)"
+        )
+
+        delete_item.activate()
+
+        self.assertEqual(self.deleted_missing, [first, second])
 
     def test_context_menu_items_always_have_icons(self) -> None:
         """Every contextual file action exposes an icon with the required gap."""

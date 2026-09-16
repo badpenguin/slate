@@ -77,6 +77,7 @@ class EditorDocument(Gtk.Box):
         self.mute_monitor_until = 0
         self.initial_load_id: int | None = None
         self.pending_line: int | None = None
+        self.line_navigation_id: int | None = None
 
         self._build_info_bar()
         self._build_toolbar()
@@ -289,7 +290,11 @@ class EditorDocument(Gtk.Box):
                 else:
                     self._show_deleted_conflict()
                 return
-            self._show_notice(f"Unable to read the file: {error}", Gtk.MessageType.ERROR)
+            message = f"Unable to read the file: {error}"
+            if reason == "initial":
+                self.on_removed(self, message)
+            else:
+                self._show_notice(message, Gtk.MessageType.ERROR)
             return
         if reason == "external" and self.etag is not None and etag == self.etag:
             # 2026-08-23: gli eventi prodotti dal salvataggio interno vengono
@@ -314,21 +319,21 @@ class EditorDocument(Gtk.Box):
             return
         data = bytes(contents)
         if len(data) > self.MAX_TEXT_BYTES:
-            self.loading = False
-            self.view.set_editable(False)
-            self._show_notice("File over 5 MiB: internal editing is unavailable.", Gtk.MessageType.ERROR)
+            self._reject_loaded_file(
+                reason, "File over 5 MiB: internal editing is unavailable."
+            )
             return
         if b"\0" in data:
-            self.loading = False
-            self.view.set_editable(False)
-            self._show_notice("Binary file: internal editing is unavailable.", Gtk.MessageType.ERROR)
+            self._reject_loaded_file(
+                reason, "Binary file: internal editing is unavailable."
+            )
             return
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
-            self.loading = False
-            self.view.set_editable(False)
-            self._show_notice("The file is not UTF-8: use gVim to edit it.", Gtk.MessageType.ERROR)
+            self._reject_loaded_file(
+                reason, "The file is not UTF-8: use gVim to edit it."
+            )
             return
         cursor_line = self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line()
         # 2026-08-16: il contenuto letto dal disco è lo stato iniziale, non una
@@ -363,6 +368,18 @@ class EditorDocument(Gtk.Box):
             line = self.pending_line
             self.pending_line = None
             self.goto_line_number(line)
+
+    def _reject_loaded_file(self, reason: str, message: str) -> None:
+        """Remove an unsupported new tab or retain an existing editor with notice."""
+
+        self.loading = False
+        self.view.set_editable(False)
+        # 2026-09-16: il caricamento iniziale fallito non deve lasciare una
+        # scheda vuota persistita; un reload esterno invece conserva il buffer.
+        if reason == "initial":
+            self.on_removed(self, message)
+        else:
+            self._show_notice(message, Gtk.MessageType.ERROR)
 
     def _configure_language(self) -> None:
         """Select syntax and theme from the file name and current GTK theme."""
@@ -769,6 +786,24 @@ class EditorDocument(Gtk.Box):
         self.buffer.place_cursor(cursor)
         self.view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
         self.view.grab_focus()
+        if self.line_navigation_id is not None:
+            GLib.source_remove(self.line_navigation_id)
+        # 2026-09-12: uno stack appena rimappato può ignorare lo scroll prima
+        # dell'allocazione; confermarlo nel prossimo idle mantiene visibile la riga.
+        self.line_navigation_id = GLib.idle_add(
+            self._finish_line_navigation, line_number
+        )
+
+    def _finish_line_navigation(self, line_number: int) -> bool:
+        """Confirm cursor and scroll after GTK has mapped the activated editor."""
+
+        self.line_navigation_id = None
+        line = min(max(1, line_number), self.buffer.get_line_count()) - 1
+        cursor = self.buffer.get_iter_at_line(line)
+        self.buffer.place_cursor(cursor)
+        self.view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
+        self.view.grab_focus()
+        return GLib.SOURCE_REMOVE
 
     def go_to_definition(self) -> bool:
         """Request a project definition search for the symbol at the cursor."""
@@ -824,6 +859,9 @@ class EditorDocument(Gtk.Box):
         if self.initial_load_id is not None:
             GLib.source_remove(self.initial_load_id)
             self.initial_load_id = None
+        if self.line_navigation_id is not None:
+            GLib.source_remove(self.line_navigation_id)
+            self.line_navigation_id = None
         if self.monitor_source_id is not None:
             GLib.source_remove(self.monitor_source_id)
             self.monitor_source_id = None

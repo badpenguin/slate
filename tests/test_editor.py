@@ -392,7 +392,11 @@ class EditorTest(unittest.TestCase):
         def initial_load_finished() -> bool:
             """Report when both the scheduled and asynchronous load have ended."""
 
-            return editor.initial_load_id is None and not editor.loading
+            return (
+                editor.initial_load_id is None
+                and not editor.loading
+                and editor.line_navigation_id is None
+            )
 
         self._wait_until(initial_load_finished)
         cursor = editor.buffer.get_iter_at_mark(editor.buffer.get_insert())
@@ -486,6 +490,30 @@ class EditorTest(unittest.TestCase):
         self.assertTrue(workspace.show_editor(*reference))
         self._wait_until(lambda: reference not in workspace.editors)
         error.assert_called_once()
+        workspace.shutdown()
+
+    def test_binary_file_is_not_left_open_in_editor_sidebar(self) -> None:
+        """A rejected WebP-like initial load removes its editor identity."""
+
+        (self.root / "image.webp").write_bytes(b"RIFF\x00\x00\x00\x00WEBP\x00")
+        error = MagicMock()
+        persisted = MagicMock()
+        workspace = EditorWorkspace(
+            Gtk.Box(),
+            10,
+            persisted,
+            error,
+            MagicMock(),
+            MagicMock(),
+        )
+        reference = ("project", "image.webp")
+
+        workspace.open_file(reference[0], str(self.root), reference[1])
+        self._wait_until(lambda: reference not in workspace.editors)
+
+        error.assert_called_once_with("Binary file: internal editing is unavailable.")
+        self.assertIsNone(workspace.active_ref)
+        self.assertIs(workspace.get_visible_child(), workspace.terminal_page)
         workspace.shutdown()
 
     def test_unloaded_editor_closes_and_relocates_without_materialization(self) -> None:

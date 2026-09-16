@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import os
 import re
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 import gi
@@ -42,6 +44,17 @@ def terminal_key(project_name: str, terminal_name: str) -> str:
     """Build the Gtk.Stack name used for a configured terminal."""
 
     return f"{project_name}/{terminal_name}"
+
+
+def project_history(project_path: str) -> tuple[Path, str]:
+    """Return the shared shell-history path and Fish name for one project."""
+
+    canonical_path = os.path.realpath(project_path)
+    identifier = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()[:24]
+    state_home = Path(
+        os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    )
+    return state_home / "slate" / "history" / identifier, f"slate_{identifier}"
 
 
 @dataclass(frozen=True)
@@ -258,6 +271,11 @@ class TerminalManager:
         if initial_command:
             self.initial_commands[key] = initial_command
         tmux_session = session_name(project_name, terminal_name_value)
+        history_path, fish_history_name = project_history(project_path)
+        # 2026-09-15: una sola history per progetto evita che, dopo un riavvio,
+        # ogni terminale rilegga la cronologia globale salvata per ultima. La
+        # directory resta esterna alla working copy e non cresce per sessione.
+        history_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         argv = [
             *self.tmux,
             "new-session",
@@ -267,6 +285,10 @@ class TerminalManager:
             tmux_session,
             "-c",
             spawn_directory,
+            "-e",
+            f"HISTFILE={history_path}",
+            "-e",
+            f"fish_history={fish_history_name}",
         ]
         cancellable = Gio.Cancellable()
         self.spawn_cancellables[key] = cancellable

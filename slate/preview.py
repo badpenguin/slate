@@ -133,7 +133,13 @@ class FilePreview(Gtk.Box):
         self.title.set_text(title)
         self.title.set_tooltip_text(title)
         self._set_plain_text("Loading preview…")
-        if status.state != "removed" and self._is_image_path(status.path):
+        if status.state == "missing":
+            self._set_plain_text("The file is missing from the working copy.")
+            return
+        if (
+            status.state != "removed"
+            and self._is_image_path(status.path)
+        ):
             # 2026-09-02: i diff binari non aiutano a valutare una modifica;
             # Revisioni mostra quindi l'immagine corrente con lo stesso loader
             # confinato e limitato usato dalla vista File.
@@ -152,7 +158,7 @@ class FilePreview(Gtk.Box):
         if status.state in {"untracked", "added"}:
             self._load_working_file(root, status.path, request_serial)
             return
-        if status.state in {"missing", "removed"}:
+        if status.state == "removed":
             self.command = run_async(
                 scm.base_argv(status.path),
                 partial(self._on_base_loaded, request_serial, status.path),
@@ -227,7 +233,7 @@ class FilePreview(Gtk.Box):
                 str(candidate),
                 self.file_cancellable,
                 self._on_image_info_loaded,
-                (request_serial, relative_path, str(candidate)),
+                (request_serial, relative_path, str(candidate), size),
             )
             return
         Gio.File.new_for_path(str(candidate)).load_contents_async(
@@ -269,11 +275,11 @@ class FilePreview(Gtk.Box):
         self,
         _source: object,
         result: Gio.AsyncResult,
-        request: tuple[int, str, str],
+        request: tuple[int, str, str, int],
     ) -> None:
-        """Read image dimensions asynchronously and choose a non-enlarging size."""
+        """Read image dimensions and show its geometry and disk size."""
 
-        request_serial, relative_path, path = request
+        request_serial, relative_path, path, file_size = request
         if request_serial != self.request_serial or relative_path != self.current_path:
             return
         try:
@@ -293,6 +299,14 @@ class FilePreview(Gtk.Box):
                 f"Image dimensions are too large to preview ({width}×{height})."
             )
             return
+        # 2026-09-15: le dimensioni già ottenute dal controllo preliminare
+        # completano il titolo senza aggiungere letture o decodifiche dell'immagine.
+        title = (
+            f"{self.title.get_text()} — {width}×{height} px — "
+            f"{GLib.format_size(file_size)}"
+        )
+        self.title.set_text(title)
+        self.title.set_tooltip_text(title)
         Gio.File.new_for_path(path).read_async(
             GLib.PRIORITY_DEFAULT,
             self.file_cancellable,
@@ -517,21 +531,34 @@ class FilePreview(Gtk.Box):
         return True
 
     def _on_populate_popup(self, _view: Gtk.TextView, menu: Gtk.Menu) -> None:
-        """Append Go to Definition to the preview's existing context menu."""
+        """Append source and file actions to the preview's context menu."""
 
         separator = Gtk.SeparatorMenuItem()
         menu.append(separator)
-        item = Gtk.MenuItem(label="Go to Definition")
-        item.set_sensitive(source_symbol_at_cursor(self.buffer) is not None)
-        item.connect("activate", self._on_definition_activate)
-        menu.append(item)
+        definition_item = Gtk.MenuItem(label="Go to Definition")
+        definition_item.set_sensitive(source_symbol_at_cursor(self.buffer) is not None)
+        definition_item.connect("activate", self._on_definition_activate)
+        menu.append(definition_item)
+        delete_item = Gtk.MenuItem(label="Delete")
+        delete_item.set_sensitive(
+            self.current_path is not None and self.on_action is not None
+        )
+        delete_item.connect("activate", self._on_delete_activate)
+        menu.append(delete_item)
         separator.show()
-        item.show()
+        definition_item.show()
+        delete_item.show()
 
     def _on_definition_activate(self, _item: Gtk.MenuItem) -> None:
         """Run contextual Go to Definition for the preview cursor."""
 
         self.go_to_definition()
+
+    def _on_delete_activate(self, _item: Gtk.MenuItem) -> None:
+        """Forward deletion of the exact file currently shown in preview."""
+
+        if self.on_action is not None and self.current_path is not None:
+            self.on_action("delete")
 
     def _on_key_press(self, _view: Gtk.TextView, event: Gdk.EventKey) -> bool:
         """Forward unmodified file-action shortcuts from the focused preview."""

@@ -60,6 +60,21 @@ class WindowActionTest(unittest.TestCase):
 
         owner._preview_file.assert_called_once_with(status, force=True)
 
+    def test_missing_revision_closes_preview_without_loading_content(self) -> None:
+        """Selecting a physically absent path leaves Revision actions exposed."""
+
+        status = FileStatus("missing.png", "missing")
+        owner = SimpleNamespace(
+            preview=MagicMock(),
+            _repository_scm=MagicMock(return_value=object()),
+            _close_preview=MagicMock(),
+        )
+
+        SlateWindow._preview_file(owner, status)
+
+        owner._close_preview.assert_called_once_with()
+        owner.preview.show_status.assert_not_called()
+
     def test_shared_preview_routes_revision_and_file_actions(self) -> None:
         """The shared preview resolves shortcuts from its originating surface."""
 
@@ -70,27 +85,31 @@ class WindowActionTest(unittest.TestCase):
             _view_status=MagicMock(),
             _edit_status_internal=MagicMock(),
             _edit_status_external=MagicMock(),
+            _delete_status=MagicMock(),
             _open_diff=MagicMock(),
             _view_project_file=MagicMock(),
             _edit_project_file_internal=MagicMock(),
             _edit_project_file_external=MagicMock(),
+            _delete_project_file=MagicMock(),
             _open_search_result_meld=MagicMock(),
         )
-        for action in ("view", "edit-internal", "edit-external", "meld"):
+        for action in ("view", "edit-internal", "edit-external", "delete", "meld"):
             SlateWindow._handle_file_preview_action(owner, action)
         owner._view_status.assert_called_once_with(status)
         owner._edit_status_internal.assert_called_once_with(status)
         owner._edit_status_external.assert_called_once_with(status)
+        owner._delete_status.assert_called_once_with(status)
         owner._open_diff.assert_called_once_with(
             RepositoryRef(".", "hg"), ("tracked.py",)
         )
 
         owner.preview_status = None
-        for action in ("view", "edit-internal", "edit-external", "meld"):
+        for action in ("view", "edit-internal", "edit-external", "delete", "meld"):
             SlateWindow._handle_file_preview_action(owner, action)
         owner._view_project_file.assert_called_once_with("tracked.py")
         owner._edit_project_file_internal.assert_called_once_with("tracked.py")
         owner._edit_project_file_external.assert_called_once_with("tracked.py")
+        owner._delete_project_file.assert_called_once_with("tracked.py")
         owner._open_search_result_meld.assert_called_once_with("tracked.py")
 
     def test_extra_command_closes_popover_and_creates_named_terminal(self) -> None:
@@ -1177,6 +1196,35 @@ class WindowActionTest(unittest.TestCase):
             cwd="/tmp/repo",
         )
 
+    def test_definition_line_is_applied_after_final_editor_activation(self) -> None:
+        """Sidebar remapping completes before Go to Definition positions the view."""
+
+        project = {"name": "repo", "path": "/tmp/repo"}
+        editor = MagicMock()
+        owner = SimpleNamespace(
+            active_project_name="repo",
+            config=SimpleNamespace(
+                find_project=MagicMock(return_value=project),
+                save=MagicMock(),
+            ),
+            editor_workspace=SimpleNamespace(open_file=MagicMock(return_value=editor)),
+            _project_file_path=MagicMock(return_value="/tmp/repo/target.py"),
+            _close_preview=MagicMock(),
+            _append_project_item=MagicMock(return_value=False),
+            _select_tree_row=MagicMock(),
+        )
+        calls = MagicMock()
+        calls.attach_mock(owner._select_tree_row, "activate")
+        calls.attach_mock(editor.goto_line_number, "goto")
+
+        with patch("slate.window.os.path.isfile", return_value=True):
+            SlateWindow._edit_project_file_internal(owner, "target.py", 37)
+
+        self.assertEqual(
+            calls.mock_calls,
+            [call.activate("repo", "target.py", "editor"), call.goto(37)],
+        )
+
     def test_editor_state_persists_only_when_it_changes(self) -> None:
         """Editor-row references update config without redundant writes."""
 
@@ -1434,6 +1482,46 @@ class WindowActionTest(unittest.TestCase):
         owner.project_file_operations.delete_entry.assert_not_called()
         scm.record_removal_argv.assert_called_once_with(["missing.py"])
         owner._run_scm_mutations.assert_called_once()
+
+    def test_multiple_missing_paths_are_confirmed_and_recorded_together(self) -> None:
+        """Batch deletion groups absent paths into one confirmed SCM operation."""
+
+        scm = SimpleNamespace(
+            display_name="Mercurial",
+            record_removal_argv=MagicMock(return_value=["hg", "remove", "--after"]),
+        )
+
+        def workspace_path(_repository: str, path: str) -> str:
+            """Return root-repository paths unchanged for this batch test."""
+
+            return path
+
+        owner = SimpleNamespace(
+            panel=MagicMock(),
+            _workspace_repository_path=MagicMock(side_effect=workspace_path),
+            _repository_scm=MagicMock(return_value=scm),
+            _confirm_scm_paths=MagicMock(return_value=True),
+            _run_scm_mutations=MagicMock(),
+        )
+        statuses = [
+            FileStatus("first.py", "missing"),
+            FileStatus("second.py", "missing"),
+        ]
+
+        SlateWindow._delete_missing_statuses(owner, statuses)
+
+        scm.record_removal_argv.assert_called_once_with(["first.py", "second.py"])
+        owner._confirm_scm_paths.assert_called_once()
+        owner._run_scm_mutations.assert_called_once_with(
+            [
+                (
+                    RepositoryRef(".", "hg"),
+                    ["hg", "remove", "--after"],
+                    ["first.py", "second.py"],
+                )
+            ],
+            "Record removal",
+        )
 
     def test_add_starts_immediately_for_selected_new_files(self) -> None:
         """Contextual and keyboard additions do not insert a confirmation dialog."""
@@ -1953,6 +2041,12 @@ class WindowActionTest(unittest.TestCase):
                 pages={("repo", "browser-1"): SimpleNamespace(private=True)}
             ),
             incognito_icon=incognito_icon,
+            codex_icon=GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                str(Path(__file__).parents[1] / "slate" / "codex.svg"),
+                16,
+                16,
+                True,
+            ),
             config=SimpleNamespace(
                 find_project=MagicMock(
                     return_value={"terminal_icons": {"main": "text-x-script"}}
@@ -1986,6 +2080,49 @@ class WindowActionTest(unittest.TestCase):
         )
         self.assertIsNone(renderer.get_property("icon-name"))
         self.assertEqual(renderer.get_property("pixbuf"), incognito_icon)
+
+    def test_codex_terminal_uses_headerbar_icon_in_project_tree(self) -> None:
+        """Persisted Codex launchers render the bundled icon, not a terminal."""
+
+        store = Gtk.TreeStore(str, str, str, str, bool, str, bool)
+        project_iter = store.append(
+            None, ["repo", "project", "repo", "", False, "repo", False]
+        )
+        terminal_iter = store.append(
+            project_iter,
+            ["codex-1", "terminal", "repo", "codex-1", False, "codex-1", False],
+        )
+        codex_icon = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            str(Path(__file__).parents[1] / "slate" / "codex.svg"),
+            16,
+            16,
+            True,
+        )
+        owner = SimpleNamespace(
+            COL_KIND=SlateWindow.COL_KIND,
+            COL_PROJECT=SlateWindow.COL_PROJECT,
+            COL_ITEM=SlateWindow.COL_ITEM,
+            codex_icon=codex_icon,
+            config=SimpleNamespace(
+                find_project=MagicMock(
+                    return_value={
+                        "terminal_commands": {
+                            "codex-1": "codex resume -c 'notify=[]'"
+                        },
+                        "terminal_icons": {},
+                    }
+                )
+            ),
+            _set_project_row_background=MagicMock(),
+        )
+        renderer = Gtk.CellRendererPixbuf()
+
+        SlateWindow._render_tree_icon(
+            owner, MagicMock(), renderer, store, terminal_iter
+        )
+
+        self.assertIs(renderer.get_property("pixbuf"), codex_icon)
+        self.assertIsNone(renderer.get_property("icon-name"))
 
     def test_project_expander_cell_toggles_at_button_icon_size(self) -> None:
         """The shaded custom indicator remains readable and owns project toggling."""

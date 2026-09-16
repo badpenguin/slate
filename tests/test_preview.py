@@ -84,6 +84,24 @@ class FilePreviewTest(unittest.TestCase):
             actions, ["view", "edit-internal", "edit-external", "meld"]
         )
 
+    def test_preview_context_delete_forwards_the_current_file(self) -> None:
+        """The preview menu exposes deletion through the owner's confirmed flow."""
+
+        actions: list[str] = []
+        preview = FilePreview(self._ignore_close, on_action=actions.append)
+        preview.current_path = "missing.php"
+        menu = Gtk.Menu()
+
+        preview._on_populate_popup(preview.view, menu)
+        delete_item = next(
+            child
+            for child in menu.get_children()
+            if isinstance(child, Gtk.MenuItem) and child.get_label() == "Delete"
+        )
+        delete_item.activate()
+
+        self.assertEqual(actions, ["delete"])
+
     def test_new_python_file_uses_syntax_highlighting(self) -> None:
         """A recognizable new-file extension selects a GtkSource language."""
 
@@ -149,6 +167,10 @@ class FilePreviewTest(unittest.TestCase):
             self.assertEqual(
                 self.preview.content_stack.get_visible_child_name(), "image"
             )
+            self.assertEqual(
+                self.preview.title.get_text(),
+                f"preview.png — 32×16 px — {GLib.format_size(path.stat().st_size)}",
+            )
 
     def test_large_image_refits_when_the_preview_area_changes(self) -> None:
         """Image rendering follows the current viewport rather than a fixed cap."""
@@ -175,6 +197,31 @@ class FilePreviewTest(unittest.TestCase):
 
         load.assert_called_once_with(
             "/tmp/repo", "assets/logo.png", self.preview.request_serial
+        )
+
+    def test_missing_image_does_not_start_any_preview_read(self) -> None:
+        """A missing image never reads either its absent path or an SCM base."""
+
+        status = FileStatus("assets/missing.png", "missing")
+        scm = SimpleNamespace(
+            root="/tmp/repo",
+            environment={},
+            base_argv=MagicMock(return_value=["hg", "cat", "assets/missing.png"]),
+        )
+        with patch.object(self.preview, "_load_working_file") as load:
+            with patch("slate.preview.run_async", return_value=MagicMock()) as run:
+                self.preview.show_status("/tmp/repo", scm, status)
+
+        load.assert_not_called()
+        scm.base_argv.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual(
+            self.preview.buffer.get_text(
+                self.preview.buffer.get_start_iter(),
+                self.preview.buffer.get_end_iter(),
+                True,
+            ),
+            "The file is missing from the working copy.",
         )
 
     def test_moved_file_uses_one_rename_aware_diff(self) -> None:

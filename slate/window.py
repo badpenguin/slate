@@ -213,6 +213,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._edit_status_internal,
             self._edit_status_external,
             self._delete_status,
+            self._delete_missing_statuses,
         )
         self.file_manager = ProjectFileManager(
             self._preview_project_file,
@@ -295,6 +296,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._edit_project_file_external,
             self._can_open_search_result_meld,
             self._open_search_result_meld,
+            self._start_definition_search,
         )
         self.project_search.set_halign(Gtk.Align.FILL)
         self.project_search.set_valign(Gtk.Align.FILL)
@@ -969,6 +971,11 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.project_row_background.parse("#e8e8e8")
 
         icon_renderer = Gtk.CellRendererPixbuf()
+        # 2026-09-16: il launcher Codex e i suoi terminali condividono l'asset
+        # ufficiale; il pixbuf resta in cache invece di ricaricarlo a ogni riga.
+        self.codex_icon = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            str(Path(__file__).with_name("codex.svg")), 16, 16, True
+        )
         self.name_renderer = Gtk.CellRendererText()
         self.name_renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
         activity_renderer = Gtk.CellRendererPixbuf()
@@ -1901,8 +1908,19 @@ class SlateWindow(Gtk.ApplicationWindow):
                 else None
             )
             if project is not None:
+                terminal_name_value = model.get_value(tree_iter, self.COL_ITEM)
+                initial_command = project.get("terminal_commands", {}).get(
+                    terminal_name_value, ""
+                )
+                if initial_command == "codex resume" or initial_command.startswith(
+                    "codex resume "
+                ):
+                    renderer.set_property("gicon", None)
+                    renderer.set_property("icon-name", None)
+                    renderer.set_property("pixbuf", self.codex_icon)
+                    return
                 configured_icon = project.get("terminal_icons", {}).get(
-                    model.get_value(tree_iter, self.COL_ITEM),
+                    terminal_name_value,
                     DEFAULT_EXTRA_COMMAND_ICON,
                 )
                 theme = Gtk.IconTheme.get_default()
@@ -3421,6 +3439,11 @@ class SlateWindow(Gtk.ApplicationWindow):
         if status is None or scm is None:
             self._close_preview()
             return
+        if status.state == "missing":
+            # Un path fisicamente assente non ha contenuto corrente da mostrare;
+            # chiudere l'overlay lascia inoltre accessibile il menu Revisioni.
+            self._close_preview()
+            return
         # 2026-08-21: un secondo clic sulla stessa riga, inclusa la sua checkbox,
         # non deve cancellare e rilanciare la preview asincrona già visibile.
         if (
@@ -3472,6 +3495,8 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self._edit_status_internal(status)
             elif action == "edit-external":
                 self._edit_status_external(status)
+            elif action == "delete":
+                self._delete_status(status)
             elif action == "meld" and status.state not in {
                 "untracked",
                 "added",
@@ -3489,6 +3514,8 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._edit_project_file_internal(path)
         elif action == "edit-external":
             self._edit_project_file_external(path)
+        elif action == "delete":
+            self._delete_project_file(path)
         elif action == "meld":
             self._open_search_result_meld(path)
 
@@ -3760,13 +3787,15 @@ class SlateWindow(Gtk.ApplicationWindow):
         editor = self.editor_workspace.open_file(
             project["name"], project["path"], relative_path
         )
-        if line is not None:
-            editor.goto_line_number(line)
         if order_changed:
             self.config.save()
         # 2026-08-16: la riga creata nell'albero, non il contenitore centrale,
         # governa sempre il cambio di vista e il focus del documento aperto.
         self._select_tree_row(project["name"], relative_path, "editor")
+        # 2026-09-12: applicare la destinazione dopo la riattivazione finale
+        # impedisce al remap della vista di riportare lo scroll a inizio file.
+        if line is not None:
+            editor.goto_line_number(line)
 
     def _edit_project_file_external(self, relative_path: str) -> None:
         """Open one safe project file with the configured external editor."""
@@ -3833,6 +3862,42 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.project_file_operations.delete_entry(absolute_path, callback)
         else:
             callback(None)
+
+    def _delete_missing_statuses(self, statuses: list[FileStatus]) -> None:
+        """Confirm and record several already absent paths in their repositories."""
+
+        missing = [status for status in statuses if status.state == "missing"]
+        if len(missing) != len(statuses) or not missing:
+            return
+        # 2026-09-15: i file sono già assenti, quindi una selezione multipla può
+        # diventare direttamente un'operazione SCM senza cancellazioni seriali.
+        groups = SlateWindow._group_statuses_by_repository(missing)
+        display_paths = [
+            self._workspace_repository_path(repository.path, status.path)
+            for repository, items in groups
+            for status in items
+        ]
+        operations: list[tuple[RepositoryRef, list[str], list[str]]] = []
+        for repository, items in groups:
+            scm = self._repository_scm(repository)
+            paths = sorted({status.path for status in items})
+            if scm is None:
+                self.panel.show_error(
+                    f"Repository unavailable: {repository.path}"
+                )
+                return
+            operations.append(
+                (repository, scm.record_removal_argv(paths), paths)
+            )
+        if not self._confirm_scm_paths(
+            "Delete the selected files?",
+            "The files are already missing from disk and their removal will be recorded.",
+            "Delete",
+            display_paths,
+            Gtk.MessageType.WARNING,
+        ):
+            return
+        self._run_scm_mutations(operations, "Record removal")
 
     def _on_status_entry_deleted(
         self,
