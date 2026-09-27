@@ -25,8 +25,28 @@ class DetachedLauncherTest(unittest.TestCase):
             with patch.object(
                 launcher.shutil, "which", side_effect=_find_tmux_only
             ) as which:
-                self.assertTrue(launcher._preflight_application())
+                with patch.object(
+                    launcher.importlib.util,
+                    "find_spec",
+                    return_value=object(),
+                ):
+                    self.assertTrue(launcher._preflight_application())
         which.assert_called_once_with("tmux")
+
+    def test_preflight_requires_markdown_renderer(self) -> None:
+        """The detached launcher reports the mandatory cmark-gfm binding."""
+
+        error_stream = io.StringIO()
+        with patch.object(launcher, "_missing_gi_dependencies", return_value=[]):
+            with patch.object(launcher.shutil, "which", return_value="/usr/bin/tmux"):
+                with patch.object(
+                    launcher.importlib.util,
+                    "find_spec",
+                    return_value=None,
+                ):
+                    with patch.object(sys, "stderr", error_stream):
+                        self.assertFalse(launcher._preflight_application())
+        self.assertIn("python3-cmarkgfm", error_stream.getvalue())
 
     def test_typelib_preflight_reports_every_missing_namespace(self) -> None:
         """GI availability is validated without importing or initializing GTK."""

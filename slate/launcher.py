@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import faulthandler
+import importlib.util
 import os
 import shutil
 import sys
@@ -38,6 +39,8 @@ def _preflight_application() -> bool:
 
     missing = _missing_gi_dependencies()
     missing.extend(name for name in ("tmux",) if shutil.which(name) is None)
+    if importlib.util.find_spec("cmarkgfm") is None:
+        missing.append("python3-cmarkgfm")
     if not missing:
         return True
     print("Missing dependencies: " + ", ".join(missing), file=sys.stderr)

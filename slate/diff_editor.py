@@ -99,9 +99,10 @@ class DiffEditorSurface(Gtk.Box):
             "key-press-event", self._on_key_press
         )
 
-        # 2026-09-27: nella sessione assistita le azioni dell'editor restano
-        # accanto al path, mentre navigazione e chiusura occupano il lato destro
-        # della stessa toolbar senza duplicare il normale pulsante Save.
+        # 2026-09-27: la toolbar è divisa in tre settori reali: i controlli
+        # preesistenti dell'editor restano a sinistra, la navigazione occupa e
+        # centra lo spazio elastico, mentre salvataggio e chiusura restano a
+        # destra. Questo evita sia overlay sia spostamenti dovuti ai path lunghi.
         self.editor_path_packing = editor.toolbar.query_child_packing(
             editor.path_label
         )
@@ -147,7 +148,13 @@ class DiffEditorSurface(Gtk.Box):
             self.position_label, False, False, 4
         )
         self.navigation_box.pack_start(self.next_button, False, False, 0)
-        editor.toolbar_container.add_overlay(self.navigation_box)
+        self.navigation_sector = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=0
+        )
+        self.navigation_sector.set_halign(Gtk.Align.FILL)
+        self.navigation_sector.pack_start(
+            self.navigation_box, True, False, 0
+        )
         self.diff_action_box = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL, spacing=6
         )
@@ -157,6 +164,7 @@ class DiffEditorSurface(Gtk.Box):
         ):
             self.diff_action_box.pack_start(button, False, False, 0)
         editor.toolbar.pack_end(self.diff_action_box, False, False, 0)
+        editor.toolbar.pack_start(self.navigation_sector, True, True, 0)
 
         self.split = Gtk.Paned.new(Gtk.Orientation.VERTICAL)
         # 2026-09-27: il diff cambia altezza a ogni hunk; shrink=True permette
@@ -446,14 +454,13 @@ class DiffEditorSurface(Gtk.Box):
                 path_packing = getattr(self, "editor_path_packing", None)
                 if path_packing is not None:
                     toolbar.set_child_packing(editor.path_label, *path_packing)
-            toolbar_container = getattr(editor, "toolbar_container", None)
-            navigation_box = getattr(self, "navigation_box", None)
+            navigation_sector = getattr(self, "navigation_sector", None)
             if (
-                toolbar_container is not None
-                and navigation_box is not None
-                and navigation_box.get_parent() is toolbar_container
+                toolbar is not None
+                and navigation_sector is not None
+                and navigation_sector.get_parent() is toolbar
             ):
-                toolbar_container.remove(navigation_box)
+                toolbar.remove(navigation_sector)
             editor.save_button.show()
         if (
             editor is not None

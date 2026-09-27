@@ -8,7 +8,7 @@ import gi
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
-from gi.repository import Gdk, Gtk, GtkSource  # noqa: E402
+from gi.repository import Gdk, Gtk, GtkSource, Pango  # noqa: E402
 
 from slate.diff_editor import DiffEditorSurface
 
@@ -28,6 +28,7 @@ class _EditorStub(Gtk.Box):
         self.toolbar_container = Gtk.Overlay()
         self.toolbar_container.add(self.toolbar)
         self.path_label = Gtk.Label(label="file.py")
+        self.path_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.save_button = Gtk.Button()
         self.toolbar.pack_start(self.path_label, True, True, 0)
         self.toolbar.pack_start(self.save_button, False, False, 0)
@@ -152,13 +153,41 @@ class DiffEditorSurfaceTest(unittest.TestCase):
         self.assertEqual(surface.hunk_index, 1)
         self.assertEqual(surface.diff_action_box.get_spacing(), 6)
         self.assertIs(
-            surface.navigation_box.get_parent(), editor.toolbar_container
+            surface.navigation_sector.get_parent(), editor.toolbar
         )
+        self.assertIs(surface.navigation_box.get_parent(), surface.navigation_sector)
         self.assertIn(
             "diff-change-position",
             surface.position_label.get_style_context().list_classes(),
         )
         self.assertEqual(len(surface.close_button.get_child().get_children()), 1)
+        surface.destroy()
+
+    def test_navigation_shares_toolbar_layout_with_long_path(self) -> None:
+        """Long paths yield horizontal space without overlaying navigation."""
+
+        editor = _EditorStub()
+        editor.path_label.set_text("public/" + "very-long-directory/" * 8 + "file.php")
+        surface = DiffEditorSurface(
+            editor,
+            editor.path_label.get_text(),
+            "@@ -1 +1 @@\n-old\n+new\n",
+            (1, 1, 1),
+            0,
+        )
+
+        self.assertIs(surface.navigation_sector.get_parent(), editor.toolbar)
+        self.assertIs(surface.navigation_box.get_parent(), surface.navigation_sector)
+        self.assertIs(surface.diff_action_box.get_parent(), editor.toolbar)
+        self.assertTrue(
+            editor.toolbar.query_child_packing(surface.navigation_sector)[0]
+        )
+        self.assertFalse(
+            editor.toolbar.query_child_packing(surface.diff_action_box)[0]
+        )
+        self.assertEqual(
+            editor.path_label.get_ellipsize(), Pango.EllipsizeMode.MIDDLE
+        )
         surface.destroy()
 
     def test_diff_height_fits_content_without_exceeding_forty_percent(self) -> None:

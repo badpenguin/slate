@@ -31,7 +31,8 @@ class AgentDebugBootstrapTest(unittest.TestCase):
             return "/usr/bin/tmux" if name == "tmux" else None
 
         with patch("slate.main.shutil.which", side_effect=executable) as which:
-            self.assertTrue(slate_main.validate_dependencies())
+            with patch.object(slate_main, "CMARK_DEPENDENCY_ERROR", None):
+                self.assertTrue(slate_main.validate_dependencies())
         which.assert_called_once_with("tmux")
 
     def test_agent_debug_copies_config_and_changes_process_namespaces(self) -> None:

@@ -16,7 +16,7 @@ files inside working directories.
 - quick launch of Codex or any shell command;
 - status and essential operations for Git and Mercurial repositories;
 - file browsing with previews and context actions;
-- an integrated GtkSourceView editor;
+- an integrated GtkSourceView editor and cmark-gfm Markdown preview;
 - a WebKitGTK browser with regular, incognito, and responsive preview modes;
 - on-demand loading: no terminals, editors, or web pages are opened at startup
   until they are selected.
@@ -41,7 +41,7 @@ install the required components with:
 ```console
 sudo apt update
 sudo apt install git gir1.2-gtk-3.0 gir1.2-gtksource-4 \
-    gir1.2-vte-2.91 gir1.2-webkit2-4.1 python3 python3-gi tmux
+    gir1.2-vte-2.91 gir1.2-webkit2-4.1 python3 python3-cmarkgfm python3-gi tmux
 ```
 
 #### Fedora

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+import html
 from pathlib import Path
 import re
 from typing import Callable
@@ -17,9 +18,20 @@ gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
 
 from .processes import AsyncCommand, CommandResult, run_async
+from .browser import WebKit2
 from .search import source_symbol_at_cursor
 from .scm.base import FileStatus, SCM
 from .text_search import TextSearchBar
+
+
+CMARK_DEPENDENCY_ERROR: str | None = None
+try:
+    from cmarkgfm import github_flavored_markdown_to_html
+except ImportError as error:
+    # 2026-09-27: l'import tollerante consente al preflight di mostrare una
+    # dipendenza mancante leggibile invece di interrompere l'avvio con traceback.
+    github_flavored_markdown_to_html = None  # type: ignore[assignment]
+    CMARK_DEPENDENCY_ERROR = str(error)
 
 
 def map_diff_lines(text: str) -> tuple[int | None, ...]:
@@ -81,6 +93,7 @@ class FilePreview(Gtk.Box):
         self.image_source_pixbuf: GdkPixbuf.Pixbuf | None = None
         self.image_fit_size: tuple[int, int] | None = None
         self.diff_edit_lines: list[int | None] = []
+        self.markdown_view: object | None = None
         self.get_style_context().add_class("file-preview")
         self.set_no_show_all(True)
         self.set_can_focus(True)
@@ -176,13 +189,13 @@ class FilePreview(Gtk.Box):
         if status.state == "missing":
             self._set_plain_text("The file is missing from the working copy.")
             return
-        if (
-            status.state != "removed"
-            and self._is_image_path(status.path)
+        if status.state != "removed" and (
+            self._is_image_path(status.path)
+            or Path(status.path).suffix.casefold() in {".md", ".markdown"}
         ):
-            # 2026-09-02: i diff binari non aiutano a valutare una modifica;
-            # Revisioni mostra quindi l'immagine corrente con lo stesso loader
-            # confinato e limitato usato dalla vista File.
+            # 2026-09-27: immagini e Markdown sono formati visuali; Revisioni
+            # mostra il file corrente con il renderer dedicato, mentre il diff
+            # resta raggiungibile tramite le azioni esplicite della revisione.
             self._load_working_file(root, status.path, request_serial)
             return
         if status.state == "moved" and status.source_path:
@@ -239,6 +252,8 @@ class FilePreview(Gtk.Box):
         if self.file_cancellable is not None:
             self.file_cancellable.cancel()
             self.file_cancellable = None
+        if self.markdown_view is not None:
+            self.markdown_view.stop_loading()
         self.image_source_pixbuf = None
         self.image_fit_size = None
         self.image.clear()
@@ -309,7 +324,107 @@ class FilePreview(Gtk.Box):
         if b"\0" in data:
             self._set_plain_text("Binary file: text preview is unavailable.")
             return
-        self._set_source_text(data.decode("utf-8", "replace"), relative_path)
+        text = data.decode("utf-8", "replace")
+        if Path(relative_path).suffix.casefold() in {".md", ".markdown"}:
+            self._set_markdown_text(text, relative_path)
+        else:
+            self._set_source_text(text, relative_path)
+
+    def _ensure_markdown_view(self) -> None:
+        """Create the isolated Markdown WebView only for the first rendered file."""
+
+        if self.markdown_view is not None:
+            return
+        if WebKit2 is None:
+            raise RuntimeError("WebKit2 is unavailable")
+        context = WebKit2.WebContext.new_ephemeral()
+        view = WebKit2.WebView.new_with_context(context)
+        settings = view.get_settings()
+        settings.set_enable_javascript(False)
+        settings.set_enable_developer_extras(False)
+        view.connect("decide-policy", self._on_markdown_policy)
+        view.connect("key-press-event", self._on_key_press)
+        self.content_stack.add_named(view, "markdown")
+        self.markdown_view = view
+        view.show()
+
+    def _set_markdown_text(self, text: str, path: str) -> None:
+        """Render safe GitHub-flavored Markdown in the isolated preview WebView."""
+
+        if github_flavored_markdown_to_html is None:
+            self._set_plain_text("Markdown preview requires python3-cmarkgfm.")
+            return
+        self.diff_edit_lines = []
+        self.image_source_pixbuf = None
+        self.image_fit_size = None
+        self.image.clear()
+        rendered = github_flavored_markdown_to_html(text)
+        # 2026-09-27: la prima versione non carica alcuna risorsa; rimuovere gli
+        # img generati da cmark impedisce richieste remote e letture file://.
+        rendered = re.sub(
+            r"<img\b[^>]*>",
+            '<span class="blocked-image">[Image omitted]</span>',
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        # 2026-09-27: cmark-gfm produce correttamente gli input disabilitati ma
+        # non aggiunge le classi CSS usate da GitHub; marcare le relative righe
+        # elimina il doppio indicatore pallino/checkbox senza rendere editabile
+        # una preview che non deve modificare il documento sorgente.
+        rendered = re.sub(
+            r"<li>(\s*<input\s+type=\"checkbox\")",
+            r'<li class="task-list-item">\1',
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        rendered = re.sub(
+            r"<ul>(\s*<li class=\"task-list-item\">)",
+            r'<ul class="task-list">\1',
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        document = (
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width\">"
+            "<style>"
+            "body{max-width:980px;margin:0 auto;padding:28px 36px;"
+            "font:16px/1.55 sans-serif;color:#202124;background:#fff}"
+            "h1,h2{border-bottom:1px solid #d8dee4;padding-bottom:.3em}"
+            "pre,code{font-family:monospace;background:#f3f4f6}"
+            "code{padding:.15em .3em;border-radius:3px}"
+            "pre{padding:14px;overflow:auto;border-radius:5px}"
+            "pre code{padding:0;background:transparent}"
+            "body>ul,body>ol{padding-left:1.4em}li{margin-bottom:.5rem}"
+            "table{border-collapse:collapse}th,td{border:1px solid #d0d7de;"
+            "padding:6px 12px}blockquote{margin-left:0;padding-left:16px;"
+            "border-left:4px solid #d0d7de;color:#57606a}"
+            ".task-list{padding-left:0}.task-list-item{list-style:none;position:relative;"
+            "padding-left:1.45em}.task-list-item input{position:absolute;left:0;top:.4em;"
+            "margin:0;accent-color:#1f883d}"
+            "a{color:#0969da}.blocked-image{color:#6e7781;font-style:italic}"
+            "</style><title>"
+            + html.escape(path)
+            + "</title></head><body>"
+            + rendered
+            + "</body></html>"
+        )
+        self._ensure_markdown_view()
+        self.content_stack.set_visible_child_name("markdown")
+        self.markdown_view.load_html(document, "about:blank")
+
+    def _on_markdown_policy(
+        self, _view: object, decision: object, decision_type: object
+    ) -> bool:
+        """Keep every Markdown navigation inside the inert generated document."""
+
+        if WebKit2 is None or decision_type != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+            return False
+        request = decision.get_request()
+        uri = request.get_uri() if request is not None else ""
+        if uri == "about:blank":
+            return False
+        decision.ignore()
+        return True
 
     def _on_image_info_loaded(
         self,
@@ -459,7 +574,10 @@ class FilePreview(Gtk.Box):
         if "\0" in result.stdout:
             self._set_plain_text("Binary file: text preview is unavailable.")
             return
-        self._set_source_text(result.stdout, relative_path)
+        if Path(relative_path).suffix.casefold() in {".md", ".markdown"}:
+            self._set_markdown_text(result.stdout, relative_path)
+        else:
+            self._set_source_text(result.stdout, relative_path)
 
     def _on_diff_loaded(
         self, request_serial: int, relative_path: str, result: CommandResult
@@ -682,7 +800,10 @@ class FilePreview(Gtk.Box):
     def _on_key_press(self, _view: Gtk.TextView, event: Gdk.EventKey) -> bool:
         """Forward unmodified file-action shortcuts from the focused preview."""
 
-        if self.search_bar.handle_key(event):
+        if (
+            self.content_stack.get_visible_child_name() != "markdown"
+            and self.search_bar.handle_key(event)
+        ):
             return True
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
         if modifiers != Gdk.ModifierType(0):

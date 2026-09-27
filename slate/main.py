@@ -19,6 +19,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 from .browser import WEBKIT_DEPENDENCY_ERROR
 from .config import ConfigStore
 from .instance import AlreadyRunningError, InstanceLock
+from .preview import CMARK_DEPENDENCY_ERROR
 from .window import SlateWindow
 
 
@@ -92,6 +93,8 @@ def validate_dependencies() -> bool:
     missing = [name for name in ("tmux",) if shutil.which(name) is None]
     if WEBKIT_DEPENDENCY_ERROR is not None:
         missing.append("typelib WebKit2 4.1")
+    if CMARK_DEPENDENCY_ERROR is not None:
+        missing.append("python3-cmarkgfm")
     if not missing:
         return True
     print(

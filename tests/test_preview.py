@@ -206,6 +206,45 @@ class FilePreviewTest(unittest.TestCase):
         self.assertIsNotNone(buffer.get_language())
         self.assertTrue(buffer.get_highlight_syntax())
 
+    def test_markdown_uses_gfm_html_without_remote_images(self) -> None:
+        """Markdown rendering keeps GFM tables while omitting every image source."""
+
+        markdown_page = Gtk.Box()
+        markdown_view = MagicMock()
+
+        def ensure_markdown_view() -> None:
+            """Install an inert stack child instead of starting a WebKit process."""
+
+            self.preview.content_stack.add_named(markdown_page, "markdown")
+            markdown_page.show()
+            self.preview.markdown_view = markdown_view
+
+        with patch.object(
+            self.preview,
+            "_ensure_markdown_view",
+            side_effect=ensure_markdown_view,
+        ):
+            self.preview._set_markdown_text(
+                "# Title\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+                "- [ ] Pending\n- [x] Done\n\n"
+                "![remote](https://example.invalid/image.png)\n",
+                "README.md",
+            )
+
+        document = markdown_view.load_html.call_args.args[0]
+        self.assertIn("<table>", document)
+        self.assertEqual(document.count('class="task-list-item"'), 2)
+        self.assertIn('<ul class="task-list">', document)
+        self.assertIn('checked="" disabled=""', document)
+        self.assertIn("body>ul,body>ol{padding-left:1.4em}", document)
+        self.assertIn("li{margin-bottom:.5rem}", document)
+        self.assertIn("padding-left:1.45em", document)
+        self.assertIn("[Image omitted]", document)
+        self.assertNotIn("example.invalid", document)
+        self.assertEqual(
+            self.preview.content_stack.get_visible_child_name(), "markdown"
+        )
+
     def test_render_modes_keep_one_view_buffer(self) -> None:
         """Preview refreshes never replace the buffer owned by the text layout."""
 
@@ -294,6 +333,29 @@ class FilePreviewTest(unittest.TestCase):
         load.assert_called_once_with(
             "/tmp/repo", "assets/logo.png", self.preview.request_serial
         )
+
+    def test_modified_markdown_uses_rendered_working_file(self) -> None:
+        """Revision Markdown rows bypass the textual diff for visual rendering."""
+
+        status = FileStatus("README.md", "modified")
+        scm = SimpleNamespace(root="/tmp/repo", environment={})
+        with patch.object(self.preview, "_load_working_file") as load:
+            self.preview.show_status("/tmp/repo", scm, status)
+
+        load.assert_called_once_with(
+            "/tmp/repo", "README.md", self.preview.request_serial
+        )
+
+    def test_removed_markdown_renders_parent_revision(self) -> None:
+        """A removed Markdown file renders the completed parent-revision content."""
+
+        result = SimpleNamespace(ok=True, stdout="# Removed\n", stderr="")
+        self.preview.current_path = "removed.md"
+        self.preview.request_serial = 7
+        with patch.object(self.preview, "_set_markdown_text") as render:
+            self.preview._on_base_loaded(7, "removed.md", result)
+
+        render.assert_called_once_with("# Removed\n", "removed.md")
 
     def test_missing_image_does_not_start_any_preview_read(self) -> None:
         """A missing image never reads either its absent path or an SCM base."""
