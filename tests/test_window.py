@@ -2190,7 +2190,31 @@ class WindowActionTest(unittest.TestCase):
         owner.preview.show_file.assert_called_once_with(
             "/tmp/repo", "src/app.py"
         )
+        self.assertIsNone(owner.preview_status)
         owner._edit_project_file_internal.assert_not_called()
+
+    def test_files_preview_edit_ignores_previous_revision_status(self) -> None:
+        """E on a Files preview targets its path, never a stale Revision row."""
+
+        project = {"name": "repo", "path": "/tmp/repo"}
+        stale_status = FileStatus("old.php", "modified")
+        owner = SimpleNamespace(
+            active_project_name="repo",
+            config=SimpleNamespace(find_project=MagicMock(return_value=project)),
+            editor_workspace=SimpleNamespace(editors={}),
+            preview=MagicMock(current_path="src/app.php"),
+            preview_status=stale_status,
+            _edit_project_file_internal=MagicMock(),
+            _edit_status_internal=MagicMock(),
+            _close_preview=MagicMock(),
+            _update_preview_geometry=MagicMock(),
+        )
+
+        SlateWindow._preview_project_file(owner, "src/app.php")
+        SlateWindow._handle_file_preview_action(owner, "edit-internal")
+
+        owner._edit_project_file_internal.assert_called_once_with("src/app.php")
+        owner._edit_status_internal.assert_not_called()
 
     def test_exited_active_terminal_selects_configured_fallback(self) -> None:
         """Removing an ended shell updates config and activates its sibling."""

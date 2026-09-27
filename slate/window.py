@@ -3475,6 +3475,9 @@ class SlateWindow(Gtk.ApplicationWindow):
             # invece di sovrapporre una seconda rappresentazione in preview.
             self._edit_project_file_internal(relative_path)
             return
+        # 2026-09-23: la preview è condivisa con Revisioni; azzerarne l'origine
+        # impedisce a E/V/M/Delete di colpire lo status SCM mostrato in precedenza.
+        self.preview_status = None
         self.preview.show_file(project["path"], relative_path)
         self._update_preview_geometry()
         self.preview.set_no_show_all(False)
