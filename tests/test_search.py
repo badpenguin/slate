@@ -321,6 +321,29 @@ class ProjectSearchTest(unittest.TestCase):
             "/tmp/project", "src/app.py", "deploy"
         )
 
+    def test_search_preview_menu_does_not_grab_global_shortcuts(self) -> None:
+        """The mouse context menu leaves keyboard and XF86 shortcuts available."""
+
+        menu = Gtk.Menu()
+        self.search._on_preview_populate_popup(self.search.preview_view, menu)
+        self.assertFalse(menu.get_take_focus())
+
+    def test_search_preview_ctrl_f_uses_local_buffer_search(self) -> None:
+        """Ctrl+F in a rendered result searches its preview rather than the project."""
+
+        self.search.preview_result = SearchResult(
+            "src/app.py", 1, "needle", ((0, 6),)
+        )
+        self.search.preview_buffer.set_text("needle elsewhere needle\n")
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_f,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+        self.assertTrue(
+            self.search._on_preview_key_press(self.search.preview_view, event)
+        )
+        self.assertTrue(self.search.preview_search.get_reveal_child())
+
     def test_result_columns_show_match_left_and_file_location_right(self) -> None:
         """The result hierarchy keeps source text before the compact file location."""
 

@@ -136,6 +136,13 @@ class MercurialSCMTest(unittest.TestCase):
                 "new.py",
             ],
         )
+        self.assertIn("3", self.scm.editor_move_diff_argv("old.py", "new.py"))
+
+    def test_editor_diff_uses_less_context_than_preview(self) -> None:
+        """Assisted editing requests three lines without changing preview context."""
+
+        self.assertIn("8", self.scm.preview_diff_argv("file.py"))
+        self.assertIn("3", self.scm.editor_diff_argv("file.py"))
 
     def test_lock_is_read_from_working_copy_metadata(self) -> None:
         """The adapter treats the Mercurial wlock as a transaction semaphore."""

@@ -80,7 +80,11 @@ class WindowActionTest(unittest.TestCase):
 
         status = FileStatus("tracked.py", "modified")
         owner = SimpleNamespace(
-            preview=SimpleNamespace(current_path="tracked.py"),
+            preview=SimpleNamespace(
+                current_path="tracked.py",
+                diff_edit_lines=[],
+                edit_line_at_cursor=MagicMock(return_value=None),
+            ),
             preview_status=status,
             _view_status=MagicMock(),
             _edit_status_internal=MagicMock(),
@@ -111,6 +115,80 @@ class WindowActionTest(unittest.TestCase):
         owner._edit_project_file_external.assert_called_once_with("tracked.py")
         owner._delete_project_file.assert_called_once_with("tracked.py")
         owner._open_search_result_meld.assert_called_once_with("tracked.py")
+
+    def test_revision_preview_edit_forwards_the_mapped_diff_line(self) -> None:
+        """Editing a diff row opens its persistent editor at the current line."""
+
+        status = FileStatus("tracked.py", "modified")
+        owner = SimpleNamespace(
+            preview=SimpleNamespace(
+                current_path="tracked.py",
+                diff_edit_lines=[37],
+                edit_line_at_cursor=MagicMock(return_value=37),
+            ),
+            preview_status=status,
+            _edit_status_internal=MagicMock(),
+        )
+
+        SlateWindow._handle_file_preview_action(owner, "edit-internal")
+
+        owner._edit_status_internal.assert_called_once_with(status, 37)
+
+    @patch("slate.window.run_async")
+    def test_diff_editor_loads_a_separate_compact_patch(
+        self, run_async_mock: MagicMock
+    ) -> None:
+        """Edit with diff uses the SCM's compact command and preserves target line."""
+
+        status = FileStatus("tracked.py", "modified")
+        scm = MagicMock(
+            root="/repo",
+            environment={"LC_ALL": "C"},
+        )
+        scm.editor_diff_argv.return_value = ["scm", "diff", "-U3"]
+        owner = SimpleNamespace(
+            _repository_scm=MagicMock(return_value=scm),
+            _on_direct_diff_editor_loaded=MagicMock(),
+        )
+
+        SlateWindow._load_diff_editor_patch(owner, status, 37)
+
+        scm.editor_diff_argv.assert_called_once_with("tracked.py")
+        run_async_mock.assert_called_once()
+        self.assertEqual(run_async_mock.call_args.args[0], ["scm", "diff", "-U3"])
+        callback = run_async_mock.call_args.args[1]
+        result = CommandResult(
+            ("scm", "diff", "-U3"),
+            0,
+            "@@ -1 +1 @@\n-old\n+new\n",
+            "",
+        )
+        callback(result)
+        owner._on_direct_diff_editor_loaded.assert_called_once_with(
+            status, 37, result
+        )
+
+    def test_direct_diff_editor_targets_first_changed_line(self) -> None:
+        """Opening from Revision skips hunk context when positioning the editor."""
+
+        status = FileStatus("tracked.py", "modified")
+        result = CommandResult(
+            ("scm", "diff", "-U3"),
+            0,
+            "@@ -3,3 +3,4 @@\n context\n+changed\n tail\n",
+            "",
+        )
+        owner = SimpleNamespace(
+            _show_diff_editor=MagicMock(),
+            _show_file_error=MagicMock(),
+        )
+
+        SlateWindow._on_direct_diff_editor_loaded(owner, status, None, result)
+
+        owner._show_diff_editor.assert_called_once()
+        arguments = owner._show_diff_editor.call_args.args
+        self.assertEqual(arguments[3], 2)
+        self.assertEqual(arguments[4], 4)
 
     def test_extra_command_closes_popover_and_creates_named_terminal(self) -> None:
         """Configured command buttons preserve their shell line, label and icon."""

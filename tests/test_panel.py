@@ -34,6 +34,7 @@ class SCMPanelTest(unittest.TestCase):
         self.previewed: FileStatus | None = None
         self.viewed: FileStatus | None = None
         self.edited_internal: FileStatus | None = None
+        self.edited_with_diff: FileStatus | None = None
         self.edited_external: FileStatus | None = None
         self.deleted: FileStatus | None = None
         self.deleted_missing: list[FileStatus] = []
@@ -58,6 +59,7 @@ class SCMPanelTest(unittest.TestCase):
             self._record_revert,
             self._record_view,
             self._record_edit_internal,
+            self._record_edit_with_diff,
             self._record_edit_external,
             self._record_delete,
             self._record_delete_missing,
@@ -128,6 +130,11 @@ class SCMPanelTest(unittest.TestCase):
         """Record internal-editor requests from menus and keyboard shortcuts."""
 
         self.edited_internal = status
+
+    def _record_edit_with_diff(self, status: FileStatus) -> None:
+        """Record compact diff-editor requests from the Revision context menu."""
+
+        self.edited_with_diff = status
 
     def _record_edit_external(self, status: FileStatus) -> None:
         """Record gVim requests from menus and keyboard shortcuts."""
@@ -1039,8 +1046,8 @@ class SCMPanelTest(unittest.TestCase):
         self.assertEqual(timeout_callback(), GLib.SOURCE_REMOVE)
         self.assertEqual(self.previewed, status)
 
-    def test_double_click_cancels_preview_before_opening_meld(self) -> None:
-        """Activating a tracked row opens Meld without an intermediate preview."""
+    def test_double_click_cancels_preview_before_opening_diff_editor(self) -> None:
+        """Activating a tracked row opens assisted editing without preview."""
 
         status = FileStatus("tracked.py", "modified")
         self.panel.set_supported(True)
@@ -1059,8 +1066,19 @@ class SCMPanelTest(unittest.TestCase):
 
         source_remove.assert_called_once_with(73)
         self.assertIsNone(self.previewed)
-        self.assertEqual(self.diffed_repository, RepositoryRef(".", "hg"))
-        self.assertEqual(self.diffed_paths, ("tracked.py",))
+        self.assertEqual(self.edited_with_diff, status)
+        self.assertIsNone(self.diffed_repository)
+
+    def test_double_click_new_file_opens_normal_internal_editor(self) -> None:
+        """A New row bypasses diff editing and opens its working file directly."""
+
+        status = FileStatus("new.py", "untracked")
+
+        self.panel._activate_file_status(status)
+
+        self.assertEqual(self.edited_internal, status)
+        self.assertIsNone(self.previewed)
+        self.assertIsNone(self.edited_with_diff)
 
     def test_modified_file_menu_exposes_meld_with_d(self) -> None:
         """The contextual tracked-file action displays the shared D shortcut."""
@@ -1079,6 +1097,24 @@ class SCMPanelTest(unittest.TestCase):
 
         self.assertEqual(self.diffed_repository, RepositoryRef(".", "hg"))
         self.assertEqual(self.diffed_paths, ("tracked.py",))
+
+    def test_modified_file_menu_opens_compact_diff_editor_directly(self) -> None:
+        """Revision context actions reach Edit with diff without opening preview."""
+
+        status = FileStatus("tracked.py", "modified")
+        self.panel.context_status = status
+        self.panel.context_selected_statuses = [status]
+        menu = self.panel._build_file_menu()
+        item = next(
+            child
+            for child in menu.get_children()
+            if isinstance(child.get_child(), Gtk.Box)
+            and child.get_child().get_children()[1].get_text() == "Edit with diff…"
+        )
+
+        item.activate()
+
+        self.assertEqual(self.edited_with_diff, status)
 
     def test_missing_file_menu_exposes_delete(self) -> None:
         """A physically absent tracked path retains its contextual removal action."""

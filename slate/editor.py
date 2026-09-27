@@ -140,8 +140,12 @@ class EditorDocument(Gtk.Box):
     def _build_toolbar(self) -> None:
         """Create compact native controls for common editor operations."""
 
+        toolbar_container = Gtk.Overlay()
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         toolbar.get_style_context().add_class("editor-toolbar")
+        toolbar_container.add(toolbar)
+        self.toolbar_container = toolbar_container
+        self.toolbar = toolbar
         self.path_label = Gtk.Label(label=self.relative_path)
         self.path_label.set_xalign(0)
         self.path_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
@@ -169,7 +173,7 @@ class EditorDocument(Gtk.Box):
             ("go-jump", "Go to line (Ctrl+G)", self._on_goto_clicked),
         ):
             toolbar.pack_start(self._tool_button(icon, tooltip, callback), False, False, 0)
-        self.pack_start(toolbar, False, False, 0)
+        self.pack_start(toolbar_container, False, False, 0)
 
     @staticmethod
     def _tool_button(

@@ -323,6 +323,27 @@ class MercurialSCM(SCM):
             destination,
         ]
 
+    def editor_diff_argv(self, path: str) -> list[str]:
+        """Return a compact unified diff for assisted editing."""
+
+        return ["hg", "diff", "-p", "-U", "3", "--nodates", "--", path]
+
+    def editor_move_diff_argv(self, source: str, destination: str) -> list[str]:
+        """Return a compact rename-aware unified diff for assisted editing."""
+
+        return [
+            "hg",
+            "diff",
+            "--git",
+            "-p",
+            "-U",
+            "3",
+            "--nodates",
+            "--",
+            source,
+            destination,
+        ]
+
     def diff_argv(self, paths: Sequence[str] = ()) -> list[str]:
         """Return one Meld directory comparison, optionally path-limited."""
 

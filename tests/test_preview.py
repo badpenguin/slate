@@ -54,6 +54,63 @@ class FilePreviewTest(unittest.TestCase):
         self.assertIn("diff-removed", removed_tags)
         self.assertIn("diff-added", added_tags)
 
+    def test_diff_rows_map_to_current_working_file_lines(self) -> None:
+        """Context, additions and removals resolve without another SCM command."""
+
+        self.preview._set_diff_text(
+            "diff --git a/file.py b/file.py\n"
+            "--- a/file.py\n"
+            "+++ b/file.py\n"
+            "@@ -10,3 +20,4 @@ function\n"
+            " context\n"
+            "-removed\n"
+            "+replacement\n"
+            "+extra\n"
+            " tail\n"
+        )
+        expected = (None, None, None, 20, 20, 21, 21, 22, 23)
+        for line_index, target in enumerate(expected):
+            self.preview.buffer.place_cursor(
+                self.preview.buffer.get_iter_at_line(line_index)
+            )
+            self.assertEqual(self.preview.edit_line_at_cursor(), target)
+
+    def test_edit_change_action_forwards_only_mappable_diff_rows(self) -> None:
+        """The contextual action cannot open metadata lines at an arbitrary row."""
+
+        actions: list[str] = []
+        preview = FilePreview(self._ignore_close, on_action=actions.append)
+        preview._set_diff_text("--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n")
+        preview.buffer.place_cursor(preview.buffer.get_iter_at_line(0))
+        preview._on_edit_change_activate(Gtk.MenuItem())
+        preview.buffer.place_cursor(preview.buffer.get_iter_at_line(4))
+        preview._on_edit_change_activate(Gtk.MenuItem())
+        self.assertEqual(actions, ["edit-internal"])
+
+    def test_preview_search_uses_shared_ctrl_f_and_f3_shortcuts(self) -> None:
+        """Local preview search opens, finds and closes without reloading content."""
+
+        self.preview._set_source_text("first needle\nsecond needle\n", "sample.txt")
+        open_event = SimpleNamespace(
+            keyval=Gdk.KEY_f,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+        self.assertTrue(self.preview._on_key_press(self.preview.view, open_event))
+        self.assertTrue(self.preview.search_bar.get_reveal_child())
+        self.preview.search_bar.entry.set_text("needle")
+        self.preview.search_bar._on_search_changed(self.preview.search_bar.entry)
+        next_event = SimpleNamespace(keyval=Gdk.KEY_F3, state=Gdk.ModifierType(0))
+        self.assertTrue(self.preview._on_key_press(self.preview.view, next_event))
+        bounds = self.preview.buffer.get_selection_bounds()
+        self.assertEqual(
+            self.preview.buffer.get_text(bounds[0], bounds[1], True), "needle"
+        )
+        close_event = SimpleNamespace(
+            keyval=Gdk.KEY_Escape, state=Gdk.ModifierType(0)
+        )
+        self.assertTrue(self.preview._on_key_press(self.preview.view, close_event))
+        self.assertFalse(self.preview.search_bar.get_reveal_child())
+
     def test_preview_definition_uses_clicked_symbol_and_source_context(self) -> None:
         """Read-only previews can dispatch the same definition lookup as editors."""
 
@@ -84,6 +141,44 @@ class FilePreviewTest(unittest.TestCase):
             actions, ["view", "edit-internal", "edit-external", "meld"]
         )
 
+    def test_modified_preview_exposes_both_editor_modes(self) -> None:
+        """A diff context menu offers direct editing and the companion dialog."""
+
+        self.preview._set_diff_text("@@ -1 +1 @@\n-old\n+new\n")
+        menu = Gtk.Menu()
+        self.preview._on_populate_popup(self.preview.view, menu)
+        labels = [
+            item.get_label()
+            for item in menu.get_children()
+            if isinstance(item, Gtk.MenuItem)
+        ]
+        self.assertIn("Edit this change", labels)
+        self.assertIn("Edit with diff…", labels)
+
+    def test_modified_preview_does_not_consume_shifted_global_shortcuts(self) -> None:
+        """Shift-modified keys remain available to GTK and desktop accelerators."""
+
+        actions: list[str] = []
+        preview = FilePreview(self._ignore_close, on_action=actions.append)
+        preview.current_path = "src/app.py"
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_e,
+            state=Gdk.ModifierType.SHIFT_MASK,
+        )
+        self.assertFalse(preview._on_key_press(preview.view, event))
+        self.assertEqual(actions, [])
+
+    def test_preview_uses_a_passive_focus_owner_for_special_keys(self) -> None:
+        """GtkSourceView cannot consume unhandled XF86 keys after a preview click."""
+
+        self.assertTrue(self.preview.get_can_focus())
+        self.assertFalse(self.preview.view.get_can_focus())
+        event = SimpleNamespace(
+            keyval=Gdk.keyval_from_name("XF86Launch5"),
+            state=Gdk.ModifierType.MOD2_MASK,
+        )
+        self.assertFalse(self.preview._on_key_press(self.preview, event))
+
     def test_preview_context_delete_forwards_the_current_file(self) -> None:
         """The preview menu exposes deletion through the owner's confirmed flow."""
 
@@ -93,6 +188,7 @@ class FilePreviewTest(unittest.TestCase):
         menu = Gtk.Menu()
 
         preview._on_populate_popup(preview.view, menu)
+        self.assertFalse(menu.get_take_focus())
         delete_item = next(
             child
             for child in menu.get_children()

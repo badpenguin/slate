@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import shutil
 import sys
 import tempfile
@@ -19,6 +20,36 @@ from .browser import WEBKIT_DEPENDENCY_ERROR
 from .config import ConfigStore
 from .instance import AlreadyRunningError, InstanceLock
 from .window import SlateWindow
+
+
+def _quit_on_unix_signal(application: Gtk.Application) -> bool:
+    """Release the GTK application promptly after terminal INT or TERM."""
+
+    application.quit()
+    return GLib.SOURCE_REMOVE
+
+
+def _run_application(argv: list[str]) -> int:
+    """Run one application with GLib-integrated terminal signal handling."""
+
+    application = SlateApplication()
+    # 2026-09-27: integrare i segnali Unix nel main loop evita che gli handler
+    # Python restino in attesa quando GTK sta gestendo una lunga sequenza eventi.
+    signal_sources = [
+        GLib.unix_signal_add(
+            GLib.PRIORITY_DEFAULT,
+            signum,
+            _quit_on_unix_signal,
+            application,
+        )
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    ]
+    try:
+        return application.run(argv)
+    finally:
+        for source_id in signal_sources:
+            if GLib.MainContext.default().find_source_by_id(source_id) is not None:
+                GLib.source_remove(source_id)
 
 
 class SlateApplication(Gtk.Application):
@@ -141,11 +172,9 @@ def main(argv: list[str] | None = None) -> int:
         except AlreadyRunningError:
             # 2026-08-16: g_application_run gestisce anche unregister e cleanup
             # del client remoto; register()+activate() lasciava D-Bus registrato.
-            application = SlateApplication()
-            return application.run(clean_argv)
+            return _run_application(clean_argv)
     try:
-        application = SlateApplication()
-        return application.run(clean_argv)
+        return _run_application(clean_argv)
     finally:
         if instance_lock is not None:
             instance_lock.close()

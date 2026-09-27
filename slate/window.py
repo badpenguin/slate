@@ -23,10 +23,11 @@ from .config import (
     is_extra_command_icon,
     new_project_config,
 )
+from .diff_editor import DiffEditorSurface
 from .editor import EditorDocument, EditorWorkspace
 from .file_manager import ProjectFileManager
 from .panel import SCMPanel
-from .preview import FilePreview
+from .preview import FilePreview, map_diff_lines
 from .processes import CommandResult, run_async, spawn_detached
 from .project_files import DirectoryInspection, ProjectFileOperations
 from .repository_actions import (
@@ -211,6 +212,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._revert_statuses,
             self._view_status,
             self._edit_status_internal,
+            self._open_diff_editor_from_status,
             self._edit_status_external,
             self._delete_status,
             self._delete_missing_statuses,
@@ -284,6 +286,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._start_definition_search,
             self._handle_file_preview_action,
         )
+        self.diff_editor_surface: DiffEditorSurface | None = None
         self.preview.set_halign(Gtk.Align.START)
         self.preview.set_valign(Gtk.Align.FILL)
         self.content_overlay.add_overlay(self.preview)
@@ -2636,6 +2639,12 @@ class SlateWindow(Gtk.ApplicationWindow):
             return False
         if self.browser_manager.handle_key(event):
             return True
+        surface = getattr(self, "diff_editor_surface", None)
+        if event.keyval == Gdk.KEY_Escape and surface is not None:
+            surface.close_if_clean()
+            return True
+        if self.preview.get_visible() and self.preview.search_bar.handle_key(event):
+            return True
         if (
             Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b
             and event.state & Gdk.ModifierType.CONTROL_MASK
@@ -3439,6 +3448,15 @@ class SlateWindow(Gtk.ApplicationWindow):
         if status is None or scm is None:
             self._close_preview()
             return
+        surface = getattr(self, "diff_editor_surface", None)
+        if surface is not None:
+            relative_path = self._workspace_repository_path(
+                status.repository, status.path
+            )
+            if relative_path != surface.path:
+                continuation = partial(self._preview_file, status, force)
+                if surface.finish_before_navigation(continuation):
+                    return
         if status.state == "missing":
             # Un path fisicamente assente non ha contenuto corrente da mostrare;
             # chiudere l'overlay lascia inoltre accessibile il menu Revisioni.
@@ -3495,7 +3513,15 @@ class SlateWindow(Gtk.ApplicationWindow):
             if action == "view":
                 self._view_status(status)
             elif action == "edit-internal":
-                self._edit_status_internal(status)
+                line = self.preview.edit_line_at_cursor()
+                if self.preview.diff_edit_lines and line is None:
+                    return
+                if line is None:
+                    self._edit_status_internal(status)
+                else:
+                    self._edit_status_internal(status, line)
+            elif action == "edit-with-diff":
+                self._open_diff_editor(status)
             elif action == "edit-external":
                 self._edit_status_external(status)
             elif action == "delete":
@@ -3576,6 +3602,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         # the outer divider position yields the right edge of column two.
         width = self.outer_paned.get_position() + self.inner_paned.get_position()
         self.preview.set_size_request(max(320, width), -1)
+        surface = getattr(self, "diff_editor_surface", None)
+        if surface is not None:
+            surface.set_size_request(max(320, width), -1)
 
     def _on_window_button_press(
         self, _window: Gtk.Widget, event: Gdk.EventButton
@@ -3760,12 +3789,168 @@ class SlateWindow(Gtk.ApplicationWindow):
                 f"Unable to view {relative_path}: {error}"
             )
 
-    def _edit_status_internal(self, status: FileStatus) -> None:
+    def _open_diff_editor(self, status: FileStatus) -> None:
+        """Load a compact patch for the persistent sidebar editor surface."""
+
+        if not self.preview.diff_edit_lines:
+            return
+        target_line = self.preview.edit_line_at_cursor()
+        self._load_diff_editor_patch(status, target_line)
+
+    def _open_diff_editor_from_status(self, status: FileStatus) -> None:
+        """Load a tracked patch requested directly by the Revision context menu."""
+
+        self._load_diff_editor_patch(status, None)
+
+    def _load_diff_editor_patch(
+        self, status: FileStatus, target_line: int | None
+    ) -> None:
+        """Request one three-context-line patch without changing normal preview."""
+
+        if status.state in {"untracked", "added", "missing", "removed"}:
+            return
+        repository = RepositoryRef(status.repository, status.scm_type)
+        scm = self._repository_scm(repository)
+        if scm is None:
+            return
+        # 2026-09-27: la preview conserva otto righe per la revisione, mentre
+        # l'editor richiede un nuovo diff -U3 per ottenere hunk realmente compatti
+        # senza tentare di ricostruirli in modo ambiguo dal testo già caricato.
+        argv = (
+            scm.editor_move_diff_argv(status.source_path, status.path)
+            if status.state == "moved" and status.source_path
+            else scm.editor_diff_argv(status.path)
+        )
+        run_async(
+            argv,
+            partial(self._on_direct_diff_editor_loaded, status, target_line),
+            cwd=scm.root,
+            env=scm.environment,
+        )
+
+    def _on_direct_diff_editor_loaded(
+        self,
+        status: FileStatus,
+        target_line: int | None,
+        result: CommandResult,
+    ) -> None:
+        """Validate a compact diff and open its persistent editor view."""
+
+        if not result.ok:
+            self._show_file_error(
+                result.stderr.strip() or "Unable to generate the diff."
+            )
+            return
+        if len(result.stdout.encode("utf-8", "replace")) > FilePreview.MAX_TEXT_BYTES:
+            self._show_file_error("Diff too large for Edit with diff.")
+            return
+        edit_lines = map_diff_lines(result.stdout)
+        hunk_line = 0
+        if target_line is not None and target_line in edit_lines:
+            hunk_line = next(
+                (
+                    index
+                    for index, line in enumerate(result.stdout.splitlines())
+                    if edit_lines[index] == target_line
+                    and line.startswith(("+", "-"))
+                    and not line.startswith(("+++", "---"))
+                ),
+                edit_lines.index(target_line),
+            )
+        else:
+            first_hunk = next(
+                (
+                    index
+                    for index, line in enumerate(result.stdout.splitlines())
+                    if line.startswith("@@")
+                ),
+                0,
+            )
+            hunk_line = next(
+                (
+                    index
+                    for index, line in enumerate(result.stdout.splitlines())
+                    if index > first_hunk
+                    and line.startswith(("+", "-"))
+                    and not line.startswith(("+++", "---"))
+                ),
+                first_hunk,
+            )
+            target_line = edit_lines[hunk_line] if edit_lines else None
+        self._show_diff_editor(
+            status, result.stdout, edit_lines, hunk_line, target_line
+        )
+
+    def _show_diff_editor(
+        self,
+        status: FileStatus,
+        diff_text: str,
+        edit_lines: tuple[int | None, ...],
+        diff_line: int,
+        target_line: int | None,
+    ) -> None:
+        """Create the two-column diff session from already validated text."""
+
+        if not edit_lines or not any(
+            line.startswith("@@") for line in diff_text.splitlines()
+        ):
+            self._show_file_error("No textual changes available for Edit with diff.")
+            return
+        relative_path = self._workspace_repository_path(
+            status.repository, status.path
+        )
+        existing = getattr(self, "diff_editor_surface", None)
+        if existing is not None:
+            if existing.path != relative_path:
+                continuation = partial(
+                    self._show_diff_editor,
+                    status,
+                    diff_text,
+                    edit_lines,
+                    diff_line,
+                    target_line,
+                )
+                if existing.finish_before_navigation(continuation):
+                    return
+            else:
+                existing.destroy()
+        editor = self._edit_status_internal(status, target_line)
+        if editor is None:
+            return
+        # 2026-09-27: la superficie copre soltanto le prime due colonne, così
+        # Revisioni resta visibile per cambiare file senza duplicare il documento.
+        surface = DiffEditorSurface(
+            editor,
+            relative_path,
+            diff_text,
+            edit_lines,
+            diff_line,
+        )
+        surface.set_halign(Gtk.Align.START)
+        surface.set_valign(Gtk.Align.FILL)
+        surface.connect("destroy", self._on_diff_editor_destroyed)
+        self.content_overlay.add_overlay(surface)
+        self.diff_editor_surface = surface
+        self._update_preview_geometry()
+        surface.show_all()
+
+    def _on_diff_editor_destroyed(self, surface: Gtk.Widget) -> None:
+        """Forget only the internal diff-editor surface that has just closed."""
+
+        if getattr(self, "diff_editor_surface", None) is surface:
+            self.diff_editor_surface = None
+
+    def _edit_status_internal(
+        self, status: FileStatus, line: int | None = None
+    ) -> EditorDocument | None:
         """Open a working-copy status file as a project editor row."""
 
-        self._edit_project_file_internal(
-            self._workspace_repository_path(status.repository, status.path)
+        relative_path = self._workspace_repository_path(
+            status.repository, status.path
         )
+        if line is None:
+            return self._edit_project_file_internal(relative_path)
+        return self._edit_project_file_internal(relative_path, line)
 
     def _edit_status_external(self, status: FileStatus) -> None:
         """Open a working-copy status file in a new default gVim window."""
@@ -3776,13 +3961,13 @@ class SlateWindow(Gtk.ApplicationWindow):
 
     def _edit_project_file_internal(
         self, relative_path: str, line: int | None = None
-    ) -> None:
+    ) -> EditorDocument | None:
         """Open one safe active-project file in the persistent internal editor."""
 
         path = self._project_file_path(relative_path)
         project = self.config.find_project(self.active_project_name or "")
         if path is None or project is None or not os.path.isfile(path):
-            return
+            return None
         self._close_preview()
         order_changed = self._append_project_item(
             project, "editor", relative_path
@@ -3799,6 +3984,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         # impedisce al remap della vista di riportare lo scroll a inizio file.
         if line is not None:
             editor.goto_line_number(line)
+        return editor
 
     def _edit_project_file_external(self, relative_path: str) -> None:
         """Open one safe project file with the configured external editor."""

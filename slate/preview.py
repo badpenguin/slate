@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
+import re
 from typing import Callable
 
 import gi
@@ -18,6 +19,39 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkSource, Pango  # no
 from .processes import AsyncCommand, CommandResult, run_async
 from .search import source_symbol_at_cursor
 from .scm.base import FileStatus, SCM
+from .text_search import TextSearchBar
+
+
+def map_diff_lines(text: str) -> tuple[int | None, ...]:
+    """Map every unified-diff row to its one-based working-file line."""
+
+    mapped: list[int | None] = []
+    current_line: int | None = None
+    # 2026-09-27: la mappa pura può essere riusata sia dalla preview sia
+    # dall'apertura diretta di Edit with diff dal pannello Revisioni.
+    for line in text.splitlines(keepends=True):
+        if line.startswith("@@"):
+            match = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            current_line = max(1, int(match.group(1))) if match else None
+            edit_line = current_line
+        elif line.startswith(("diff ", "index ", "--- ", "+++ ")):
+            edit_line = None
+        elif line.startswith("+"):
+            edit_line = current_line
+            if current_line is not None:
+                current_line += 1
+        elif line.startswith("-"):
+            edit_line = current_line
+        elif line.startswith("\\ No newline"):
+            edit_line = None
+        elif line.startswith(" "):
+            edit_line = current_line
+            if current_line is not None:
+                current_line += 1
+        else:
+            edit_line = None
+        mapped.append(edit_line)
+    return tuple(mapped)
 
 
 class FilePreview(Gtk.Box):
@@ -46,8 +80,11 @@ class FilePreview(Gtk.Box):
         self.request_serial = 0
         self.image_source_pixbuf: GdkPixbuf.Pixbuf | None = None
         self.image_fit_size: tuple[int, int] | None = None
+        self.diff_edit_lines: list[int | None] = []
         self.get_style_context().add_class("file-preview")
         self.set_no_show_all(True)
+        self.set_can_focus(True)
+        self.connect("key-press-event", self._on_key_press)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         header.get_style_context().add_class("preview-header")
@@ -90,10 +127,11 @@ class FilePreview(Gtk.Box):
         self.view.set_show_line_numbers(True)
         self.view.set_highlight_current_line(False)
         self.view.set_tab_width(4)
+        # 2026-09-27: il focus sul contenitore passivo impedisce ai binding
+        # interni di GtkSourceView di trattenere tasti XF86 o macro non gestiti.
+        self.view.set_can_focus(False)
         self.view.connect("populate-popup", self._on_populate_popup)
-        # 2026-09-08: il focus nella preview non deve disattivare le azioni
-        # pubblicizzate dagli alberi Revisioni e Files.
-        self.view.connect("key-press-event", self._on_key_press)
+        self.view.connect("button-press-event", self._on_button_press)
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.view)
@@ -114,6 +152,8 @@ class FilePreview(Gtk.Box):
         self.content_stack.add_named(self.text_scroller, "text")
         self.content_stack.add_named(self.image_scroller, "image")
         self.pack_start(self.content_stack, True, True, 0)
+        self.search_bar = TextSearchBar(self.buffer, self.view, self)
+        self.pack_end(self.search_bar, False, False, 0)
         self._set_plain_text("Select a file to preview it.")
 
     def show_status(
@@ -442,6 +482,7 @@ class FilePreview(Gtk.Box):
     def _set_source_text(self, text: str, path: str) -> None:
         """Display an entire text file with language-aware highlighting."""
 
+        self.diff_edit_lines = []
         self.content_stack.set_visible_child_name("text")
         self.image_source_pixbuf = None
         self.image_fit_size = None
@@ -465,6 +506,7 @@ class FilePreview(Gtk.Box):
         self.buffer.set_language(None)
         self.buffer.set_highlight_syntax(False)
         self.buffer.set_text(text)
+        self.diff_edit_lines = list(map_diff_lines(text))
         offset = 0
         for line in text.splitlines(keepends=True):
             # 2026-08-17: impostare il testo una sola volta riduce le
@@ -489,6 +531,7 @@ class FilePreview(Gtk.Box):
     def _set_plain_text(self, text: str) -> None:
         """Display an informational or error message without syntax processing."""
 
+        self.diff_edit_lines = []
         self.content_stack.set_visible_child_name("text")
         self.image_source_pixbuf = None
         self.image_fit_size = None
@@ -533,12 +576,29 @@ class FilePreview(Gtk.Box):
     def _on_populate_popup(self, _view: Gtk.TextView, menu: Gtk.Menu) -> None:
         """Append source and file actions to the preview's context menu."""
 
+        # 2026-09-27: il menu usa soltanto il puntatore; evitare il keyboard
+        # grab lascia disponibili shortcut desktop e tasti XF86 mentre è aperto.
+        menu.set_take_focus(False)
         separator = Gtk.SeparatorMenuItem()
         menu.append(separator)
         definition_item = Gtk.MenuItem(label="Go to Definition")
         definition_item.set_sensitive(source_symbol_at_cursor(self.buffer) is not None)
         definition_item.connect("activate", self._on_definition_activate)
         menu.append(definition_item)
+        find_item = Gtk.MenuItem(label="Find")
+        find_item.connect("activate", self._on_find_activate)
+        menu.append(find_item)
+        edit_item = None
+        if self.diff_edit_lines:
+            edit_item = Gtk.MenuItem(label="Edit this change")
+            edit_item.set_sensitive(self.edit_line_at_cursor() is not None)
+            edit_item.connect("activate", self._on_edit_change_activate)
+            menu.append(edit_item)
+            diff_editor_item = Gtk.MenuItem(label="Edit with diff…")
+            diff_editor_item.connect("activate", self._on_edit_with_diff_activate)
+            menu.append(diff_editor_item)
+        else:
+            diff_editor_item = None
         delete_item = Gtk.MenuItem(label="Delete")
         delete_item.set_sensitive(
             self.current_path is not None and self.on_action is not None
@@ -547,7 +607,66 @@ class FilePreview(Gtk.Box):
         menu.append(delete_item)
         separator.show()
         definition_item.show()
+        find_item.show()
+        if edit_item is not None:
+            edit_item.show()
+        if diff_editor_item is not None:
+            diff_editor_item.show()
         delete_item.show()
+
+    def edit_line_at_cursor(self) -> int | None:
+        """Return the working-file line represented by the current diff row."""
+
+        line_index = self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line()
+        if line_index >= len(self.diff_edit_lines):
+            return None
+        return self.diff_edit_lines[line_index]
+
+    def current_diff_line(self) -> int:
+        """Return the zero-based diff row containing the insertion cursor."""
+
+        return self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line()
+
+    def diff_text(self) -> str:
+        """Return the unified diff currently rendered by the preview."""
+
+        return self.buffer.get_text(
+            self.buffer.get_start_iter(), self.buffer.get_end_iter(), True
+        )
+
+    def _on_edit_change_activate(self, _item: Gtk.MenuItem) -> None:
+        """Open the current mappable diff row in the persistent editor."""
+
+        if self.edit_line_at_cursor() is not None and self.on_action is not None:
+            self.on_action("edit-internal")
+
+    def _on_edit_with_diff_activate(self, _item: Gtk.MenuItem) -> None:
+        """Open the current diff in the persistent editor companion dialog."""
+
+        if self.on_action is not None:
+            self.on_action("edit-with-diff")
+
+    def _on_find_activate(self, _item: Gtk.MenuItem) -> None:
+        """Open local search from the preview context menu."""
+
+        self.search_bar.show_search()
+
+    def _on_button_press(
+        self, view: Gtk.TextView, event: Gdk.EventButton
+    ) -> bool:
+        """Focus the passive preview and open a double-clicked mappable diff row."""
+
+        self.grab_focus()
+        if event.button != 1 or event.type != Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            return False
+        window_type = view.get_window_type(event.window)
+        x, y = view.window_to_buffer_coords(window_type, int(event.x), int(event.y))
+        _inside_text, text_iter = view.get_iter_at_location(x, y)
+        self.buffer.place_cursor(text_iter)
+        if self.edit_line_at_cursor() is None or self.on_action is None:
+            return False
+        self.on_action("edit-internal")
+        return True
 
     def _on_definition_activate(self, _item: Gtk.MenuItem) -> None:
         """Run contextual Go to Definition for the preview cursor."""
@@ -563,7 +682,10 @@ class FilePreview(Gtk.Box):
     def _on_key_press(self, _view: Gtk.TextView, event: Gdk.EventKey) -> bool:
         """Forward unmodified file-action shortcuts from the focused preview."""
 
-        if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
+        if self.search_bar.handle_key(event):
+            return True
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if modifiers != Gdk.ModifierType(0):
             return False
         keyval = Gdk.keyval_to_lower(event.keyval)
         actions = {

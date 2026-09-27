@@ -84,6 +84,7 @@ class SCMPanel(Gtk.Box):
         on_revert: Callable[[list[FileStatus]], None],
         on_view: Callable[[FileStatus], None],
         on_edit_internal: Callable[[FileStatus], None],
+        on_edit_with_diff: Callable[[FileStatus], None],
         on_edit_external: Callable[[FileStatus], None],
         on_delete: Callable[[FileStatus], None],
         on_delete_missing: Callable[[list[FileStatus]], None] | None = None,
@@ -106,6 +107,7 @@ class SCMPanel(Gtk.Box):
         self.on_revert = on_revert
         self.on_view = on_view
         self.on_edit_internal = on_edit_internal
+        self.on_edit_with_diff = on_edit_with_diff
         self.on_edit_external = on_edit_external
         self.on_delete = on_delete
         self.on_delete_missing = on_delete_missing
@@ -1272,7 +1274,22 @@ class SCMPanel(Gtk.Box):
         if event.button == 1:
             if event.type == Gdk.EventType._2BUTTON_PRESS:
                 self._cancel_pending_preview()
-                return False
+                if hit:
+                    tree_iter = self.filtered_store.get_iter(hit[0])
+                    if self.filtered_store.get_value(
+                        tree_iter, self.COL_KIND
+                    ) == "file":
+                        path = self.filtered_store.get_value(
+                            tree_iter, self.COL_PATH
+                        )
+                        repository = self.filtered_store.get_value(
+                            tree_iter, self.COL_REPOSITORY
+                        )
+                        key = self._status_key(
+                            self._status_from_row(path, repository)
+                        )
+                        self._activate_file_status(self.status_by_path.get(key))
+                return True
             if not hit:
                 self._cancel_pending_preview()
                 self.on_preview(None)
@@ -1442,14 +1459,24 @@ class SCMPanel(Gtk.Box):
             internal_item = self._menu_item(
                 "Edit in SLATE", "accessories-text-editor", Gdk.KEY_e
             )
+            diff_editor_item = self._menu_item(
+                "Edit with diff…", "text-x-patch", None
+            )
             external_item = self._menu_item(
                 "Edit in gVim", "gvim", Gdk.KEY_m
             )
             view_item.connect("activate", self._on_context_view)
             internal_item.connect("activate", self._on_context_edit_internal)
+            diff_editor_item.connect("activate", self._on_context_edit_with_diff)
             external_item.connect("activate", self._on_context_edit_external)
             menu.append(view_item)
             menu.append(internal_item)
+            if (
+                self.context_status is not None
+                and self.context_status.state
+                not in {"untracked", "added", "missing", "removed"}
+            ):
+                menu.append(diff_editor_item)
             menu.append(external_item)
             # 2026-08-20: il menu del file espone lo stesso percorso Meld già
             # usato dal doppio clic, soltanto quando esiste una patch tracciata.
@@ -1737,6 +1764,12 @@ class SCMPanel(Gtk.Box):
         if self.context_status:
             self.on_edit_internal(self.context_status)
 
+    def _on_context_edit_with_diff(self, _item: Gtk.MenuItem) -> None:
+        """Open the contextual tracked patch in the compact diff editor."""
+
+        if self.context_status:
+            self.on_edit_with_diff(self.context_status)
+
     def _on_context_edit_external(self, _item: Gtk.MenuItem) -> None:
         """Open the contextual file in a separate gVim window."""
 
@@ -1917,7 +1950,7 @@ class SCMPanel(Gtk.Box):
     def _on_row_activated(
         self, _tree: Gtk.TreeView, path: Gtk.TreePath, _column: Gtk.TreeViewColumn
     ) -> None:
-        """Open Meld for tracked files and retain the internal view for new ones."""
+        """Open assisted diff editing for tracked files activated by keyboard."""
 
         self._cancel_pending_preview()
         tree_iter = self.filtered_store.get_iter(path)
@@ -1927,16 +1960,17 @@ class SCMPanel(Gtk.Box):
                 tree_iter, self.COL_REPOSITORY
             )
             key = self._status_key(self._status_from_row(file_path, repository))
-            status = self.status_by_path.get(key)
-            if status and status.state in {
-                "untracked",
-                "added",
-                "missing",
-                "removed",
-            }:
-                self.on_preview(status)
-            elif status:
-                self.on_diff(
-                    RepositoryRef(status.repository, status.scm_type),
-                    status.operation_paths(),
-                )
+            self._activate_file_status(self.status_by_path.get(key))
+
+    def _activate_file_status(self, status: FileStatus | None) -> None:
+        """Route one explicit activation without triggering a preliminary preview."""
+
+        if status is None:
+            return
+        if status.state == "untracked":
+            self.on_edit_internal(status)
+            return
+        if status.state in {"added", "missing", "removed"}:
+            self.on_preview(status)
+            return
+        self.on_edit_with_diff(status)

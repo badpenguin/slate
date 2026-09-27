@@ -114,6 +114,16 @@ class GitSCMTest(unittest.TestCase):
         (metadata / "index.lock").touch()
         self.assertTrue(self.scm.is_locked())
 
+    def test_editor_diff_uses_less_context_than_preview(self) -> None:
+        """Assisted editing requests three lines without changing preview context."""
+
+        self.assertIn("--unified=8", self.scm.preview_diff_argv("file.py"))
+        self.assertIn("--unified=3", self.scm.editor_diff_argv("file.py"))
+        self.assertIn(
+            "--unified=3",
+            self.scm.editor_move_diff_argv("old.py", "new.py"),
+        )
+
     def test_update_commands_allow_only_an_explicit_fast_forward(self) -> None:
         """Remote update inspects upstream history before a guarded merge."""
 

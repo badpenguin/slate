@@ -18,6 +18,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
 
+from .text_search import TextSearchBar
+
 
 SEARCH_EXCLUDED_DIRECTORIES = {
     "node_modules",
@@ -606,6 +608,8 @@ class ProjectSearch(Gtk.Box):
         )
         preview_scroller.add(self.preview_view)
         preview_box.pack_start(preview_scroller, True, True, 0)
+        self.preview_search = TextSearchBar(self.preview_buffer, self.preview_view)
+        preview_box.pack_end(self.preview_search, False, False, 0)
 
         split = Gtk.Paned.new(Gtk.Orientation.VERTICAL)
         split.pack1(results_scroller, resize=True, shrink=False)
@@ -1029,7 +1033,8 @@ class ProjectSearch(Gtk.Box):
     ) -> bool:
         """Dispatch V, E, M and D only for the explicitly focused result."""
 
-        if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if modifiers != Gdk.ModifierType(0):
             return False
         result = self._focused_result()
         if result is None:
@@ -1043,6 +1048,8 @@ class ProjectSearch(Gtk.Box):
 
         if self.preview_result is None:
             return False
+        if self.preview_search.handle_key(event):
+            return True
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
         # 2026-09-12: la preview di Find possiede un buffer distinto da quella
         # globale, quindi Ctrl+B deve partire dalla sua identità e dal suo cursore.
@@ -1073,6 +1080,9 @@ class ProjectSearch(Gtk.Box):
     ) -> None:
         """Append Go to Definition to the search preview's native context menu."""
 
+        # 2026-09-27: il popup non deve acquisire la tastiera e bloccare le
+        # scorciatoie globali mentre l'utente sceglie un'azione con il mouse.
+        menu.set_take_focus(False)
         separator = Gtk.SeparatorMenuItem()
         item = Gtk.MenuItem(label="Go to Definition")
         item.set_sensitive(
@@ -1084,20 +1094,30 @@ class ProjectSearch(Gtk.Box):
         item.connect("activate", self._on_preview_definition_activate)
         menu.append(separator)
         menu.append(item)
+        find_item = Gtk.MenuItem(label="Find")
+        find_item.connect("activate", self._on_preview_find_activate)
+        menu.append(find_item)
         separator.show()
         item.show()
+        find_item.show()
 
     def _on_preview_definition_activate(self, _item: Gtk.MenuItem) -> None:
         """Run contextual Go to Definition from the search preview."""
 
         self._preview_go_to_definition()
 
+    def _on_preview_find_activate(self, _item: Gtk.MenuItem) -> None:
+        """Open local search from the global-search preview menu."""
+
+        self.preview_search.show_search()
+
     def _dispatch_result_key(
         self, result: SearchResult, event: Gdk.EventKey
     ) -> bool:
         """Run one search-result shortcut against an explicit result identity."""
 
-        if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if modifiers != Gdk.ModifierType(0):
             return False
         keyval = Gdk.keyval_to_lower(event.keyval)
         if keyval == Gdk.KEY_v:

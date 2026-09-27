@@ -344,6 +344,36 @@ class GitSCM(SCM):
             destination,
         ]
 
+    def editor_diff_argv(self, path: str) -> list[str]:
+        """Return a compact unified diff for assisted editing."""
+
+        return [
+            "git",
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--unified=3",
+            "HEAD",
+            "--",
+            path,
+        ]
+
+    def editor_move_diff_argv(self, source: str, destination: str) -> list[str]:
+        """Return a compact rename-aware unified diff for assisted editing."""
+
+        return [
+            "git",
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--find-renames=50%",
+            "--unified=3",
+            "HEAD",
+            "--",
+            source,
+            destination,
+        ]
+
     def diff_argv(self, paths: Sequence[str] = ()) -> list[str]:
         """Return a non-interactive Meld directory-diff invocation."""
 
