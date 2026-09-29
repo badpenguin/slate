@@ -281,6 +281,7 @@ class ConfigStoreTest(unittest.TestCase):
             self.assertEqual(settings["revisions"]["font_size"], 17)
             self.assertEqual(settings["files"]["font_size"], 10)
             self.assertEqual(settings["editor"]["font_size"], 10)
+            self.assertTrue(settings["general"]["close_to_tray"])
             self.assertEqual(
                 settings["external_apps"]["editor_command"], ["gvim", "-f"]
             )

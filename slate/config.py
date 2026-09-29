@@ -59,6 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "pane_positions": [220, 900],
     "window": {"width": 1600, "height": 900, "maximized": False},
     "settings": {
+        "general": {"close_to_tray": True},
         "revisions": {"font_size": 10},
         "files": {"font_size": 10},
         "editor": {"font_size": 10},
@@ -252,6 +253,13 @@ class ConfigStore:
                 data["window"]["maximized"] = window["maximized"]
         raw_settings = raw.get("settings", {})
         if isinstance(raw_settings, dict):
+            raw_general = raw_settings.get("general", {})
+            if isinstance(raw_general, dict) and isinstance(
+                raw_general.get("close_to_tray"), bool
+            ):
+                data["settings"]["general"]["close_to_tray"] = raw_general[
+                    "close_to_tray"
+                ]
             # 2026-08-16: le preferenze sono globali perché descrivono due viste
             # dell'applicazione, non proprietà differenti dei singoli progetti.
             for section in ("revisions", "files", "editor"):

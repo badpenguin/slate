@@ -201,6 +201,7 @@ class SettingsDialog(Gtk.Dialog):
         parent: Gtk.Window,
         values: dict[str, dict[str, object]],
         on_change: Callable[[str, int], None],
+        on_close_to_tray_change: Callable[[bool], None],
         on_status_bar_change: Callable[[bool], None],
         on_external_editor_change: Callable[[list[str]], None],
         on_commands_change: Callable[[list[dict[str, str]]], None],
@@ -214,6 +215,7 @@ class SettingsDialog(Gtk.Dialog):
             destroy_with_parent=True,
         )
         self.on_change = on_change
+        self.on_close_to_tray_change = on_close_to_tray_change
         self.on_status_bar_change = on_status_bar_change
         self.on_external_editor_change = on_external_editor_change
         self.on_commands_change = on_commands_change
@@ -230,6 +232,11 @@ class SettingsDialog(Gtk.Dialog):
         stack = Gtk.Stack()
         stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         stack.set_transition_duration(120)
+        stack.add_titled(
+            self._build_general_page(bool(values["general"]["close_to_tray"])),
+            "general",
+            "General",
+        )
         stack.add_titled(
             self._build_font_page(
                 "revisions", int(values["revisions"]["font_size"])
@@ -275,6 +282,31 @@ class SettingsDialog(Gtk.Dialog):
         content.pack_start(stack, True, True, 0)
         self.get_content_area().pack_start(content, True, True, 0)
         self.connect("response", self._on_response)
+
+    def _build_general_page(self, close_to_tray: bool) -> Gtk.Widget:
+        """Create global application-lifecycle preferences."""
+
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        page.get_style_context().add_class("settings-page")
+        title = Gtk.Label(label="Window")
+        title.set_xalign(0)
+        title.get_style_context().add_class("settings-page-title")
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        label = Gtk.Label(label="Close to notification area")
+        label.set_xalign(0)
+        self.close_to_tray_switch = Gtk.Switch()
+        self.close_to_tray_switch.set_active(close_to_tray)
+        self.close_to_tray_switch.set_tooltip_text(
+            "Hide SLATE in the notification area when its window is closed"
+        )
+        self.close_to_tray_switch.connect(
+            "notify::active", self._on_close_to_tray_changed
+        )
+        row.pack_start(label, True, True, 0)
+        row.pack_end(self.close_to_tray_switch, False, False, 0)
+        page.pack_start(title, False, False, 0)
+        page.pack_start(row, False, False, 0)
+        return page
 
     def _build_font_page(
         self,
@@ -561,6 +593,13 @@ class SettingsDialog(Gtk.Dialog):
         """Publish the tmux status preference as soon as it changes."""
 
         self.on_status_bar_change(switch.get_active())
+
+    def _on_close_to_tray_changed(
+        self, switch: Gtk.Switch, _property: object
+    ) -> None:
+        """Publish the close-to-notification-area preference immediately."""
+
+        self.on_close_to_tray_change(switch.get_active())
 
     def _publish_external_editor(self) -> None:
         """Validate and publish the external-editor argument vector."""

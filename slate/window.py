@@ -16,6 +16,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
+from . import __version__
 from .browser import BrowserManager, BrowserPage
 from .config import (
     DEFAULT_EXTRA_COMMAND_ICON,
@@ -146,6 +147,8 @@ class SlateWindow(Gtk.ApplicationWindow):
         ] | None = None
         self.project_drag_source: _SidebarIdentity | None = None
         self.closing = False
+        self.tray_icon: Gtk.StatusIcon | None = None
+        self.tray_menu: Gtk.Menu | None = None
         self.repository_dialog: Gtk.Dialog | None = None
         self.unattended_verifier: UnattendedRepositoryVerifier | None = None
         self.unattended_verifier_key: tuple[str, RepositoryRef] | None = None
@@ -230,6 +233,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._save_file_manager_preferences,
         )
         settings = self.config.data["settings"]
+        self._update_tray_icon(bool(settings["general"]["close_to_tray"]))
         self.panel.set_font_size(settings["revisions"]["font_size"])
         self.file_manager.set_font_size(settings["files"]["font_size"])
         # 2026-08-16: lo stack centrale non espone tab; l'albero dei progetti è
@@ -431,10 +435,14 @@ class SlateWindow(Gtk.ApplicationWindow):
         overflow.set_tooltip_text("More actions")
         overflow.get_accessible().set_name("More actions")
         menu = Gtk.Menu()
+        version_item = Gtk.MenuItem(label=f"SLATE {__version__}")
+        version_item.set_sensitive(False)
         settings_item = Gtk.MenuItem(label="Settings")
         settings_item.connect("activate", self._on_settings)
         orphans = Gtk.MenuItem(label="Orphan Sessions")
         orphans.connect("activate", self._on_orphans)
+        menu.append(version_item)
+        menu.append(Gtk.SeparatorMenuItem())
         menu.append(settings_item)
         menu.append(Gtk.SeparatorMenuItem())
         menu.append(orphans)
@@ -513,11 +521,88 @@ class SlateWindow(Gtk.ApplicationWindow):
             self,
             self.config.data["settings"],
             self._update_font_setting,
+            self._update_close_to_tray_setting,
             self._update_tmux_status_setting,
             self._update_external_editor_setting,
             self._update_extra_commands_setting,
         )
         dialog.show_all()
+
+    def _update_close_to_tray_setting(self, enabled: bool) -> None:
+        """Persist close behavior and immediately synchronize the tray icon."""
+
+        self.config.data["settings"]["general"]["close_to_tray"] = enabled
+        self._update_tray_icon(enabled)
+        self.config.save()
+
+    def _update_tray_icon(self, enabled: bool) -> None:
+        """Create or hide the native GTK notification-area icon."""
+
+        if enabled and self.tray_icon is None:
+            # 2026-09-28: Gtk.StatusIcon uses Cinnamon's native legacy tray
+            # support and avoids adding an AppIndicator runtime dependency.
+            icon = Gtk.StatusIcon.new_from_file(
+                str(Path(__file__).with_name("slate.svg"))
+            )
+            application_label = f"SLATE {__version__}"
+            icon.set_title(application_label)
+            icon.set_tooltip_text(application_label)
+            icon.connect("activate", self._on_tray_activate)
+            icon.connect("popup-menu", self._on_tray_popup_menu)
+            self.tray_icon = icon
+            menu = Gtk.Menu()
+            version_item = Gtk.MenuItem(label=application_label)
+            version_item.set_sensitive(False)
+            show_item = Gtk.MenuItem(label="Show SLATE")
+            quit_item = Gtk.MenuItem(label="Quit")
+            show_item.connect("activate", self._on_tray_show)
+            quit_item.connect("activate", self._on_tray_quit)
+            menu.append(version_item)
+            menu.append(Gtk.SeparatorMenuItem())
+            menu.append(show_item)
+            menu.append(Gtk.SeparatorMenuItem())
+            menu.append(quit_item)
+            menu.show_all()
+            self.tray_menu = menu
+            return
+        if not enabled and self.tray_icon is not None:
+            self.tray_icon.set_visible(False)
+            self.tray_icon = None
+            if self.tray_menu is not None:
+                self.tray_menu.destroy()
+                self.tray_menu = None
+
+    def _on_tray_activate(self, _icon: Gtk.StatusIcon) -> None:
+        """Restore and focus the hidden SLATE window from its tray icon."""
+
+        self.show()
+        self.present()
+
+    def _on_tray_popup_menu(
+        self, icon: Gtk.StatusIcon, button: int, activate_time: int
+    ) -> None:
+        """Expose explicit restore and safe shutdown actions in the tray."""
+
+        if self.tray_menu is not None:
+            self.tray_menu.popup(
+                None,
+                None,
+                Gtk.StatusIcon.position_menu,
+                icon,
+                button,
+                activate_time,
+            )
+
+    def _on_tray_show(self, _item: Gtk.MenuItem) -> None:
+        """Restore SLATE from the tray menu."""
+
+        self.show()
+        self.present()
+
+    def _on_tray_quit(self, _item: Gtk.MenuItem) -> None:
+        """Start the existing protected shutdown flow from the tray menu."""
+
+        self._request_close()
 
     def _update_font_setting(self, section: str, font_size: int) -> None:
         """Apply and persist one supported list-font setting immediately."""
@@ -4655,6 +4740,11 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _on_delete_event(self, _window: Gtk.Window, _event: Gdk.Event) -> bool:
         """Intercept clean window closure to inspect tmux foreground processes."""
 
+        if self.config.data["settings"]["general"]["close_to_tray"]:
+            self._save_window_state()
+            self.terminals.set_activity_monitoring(False)
+            self.hide()
+            return True
         self._request_close()
         return True
 
@@ -4797,6 +4887,12 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _final_destroy(self) -> None:
         """Release monitors and timers, then destroy the sole window."""
 
+        if self.tray_icon is not None:
+            self.tray_icon.set_visible(False)
+            self.tray_icon = None
+        if self.tray_menu is not None:
+            self.tray_menu.destroy()
+            self.tray_menu = None
         self._close_preview()
         self._close_project_search()
         if self.definition_search is not None:

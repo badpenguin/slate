@@ -31,6 +31,7 @@ class SettingsDialogTest(unittest.TestCase):
         """Create a dialog with distinct persisted values for both sections."""
 
         self.changes: list[tuple[str, int]] = []
+        self.close_to_tray_changes: list[bool] = []
         self.status_changes: list[bool] = []
         self.external_editor_changes: list[list[str]] = []
         self.command_changes: list[list[dict[str, str]]] = []
@@ -38,6 +39,7 @@ class SettingsDialogTest(unittest.TestCase):
         self.dialog = SettingsDialog(
             self.parent,
             {
+                "general": {"close_to_tray": True},
                 "revisions": {"font_size": 11},
                 "files": {"font_size": 13},
                 "editor": {"font_size": 15},
@@ -54,6 +56,7 @@ class SettingsDialogTest(unittest.TestCase):
                 },
             },
             self._record_change,
+            self._record_close_to_tray_change,
             self._record_status_change,
             self._record_external_editor_change,
             self._record_command_change,
@@ -75,6 +78,11 @@ class SettingsDialogTest(unittest.TestCase):
 
         self.status_changes.append(enabled)
 
+    def _record_close_to_tray_change(self, enabled: bool) -> None:
+        """Record immediate close-behavior preference changes."""
+
+        self.close_to_tray_changes.append(enabled)
+
     def _record_external_editor_change(self, command: list[str]) -> None:
         """Record validated external-editor command changes."""
 
@@ -95,6 +103,9 @@ class SettingsDialogTest(unittest.TestCase):
         self.assertEqual(self.dialog.font_spins["editor"].get_value_as_int(), 15)
         self.dialog.font_spins["files"].set_value(16)
         self.assertEqual(self.changes, [("files", 16)])
+        self.assertTrue(self.dialog.close_to_tray_switch.get_active())
+        self.dialog.close_to_tray_switch.set_active(False)
+        self.assertEqual(self.close_to_tray_changes, [False])
         self.assertFalse(self.dialog.status_bar_switch.get_active())
         self.dialog.status_bar_switch.set_active(True)
         self.assertEqual(self.status_changes, [True])

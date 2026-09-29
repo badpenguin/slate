@@ -1226,6 +1226,41 @@ class WindowActionTest(unittest.TestCase):
         owner.terminals.set_status_bar_enabled.assert_called_once_with(True)
         config.save.assert_called_once_with()
 
+    def test_close_to_tray_setting_updates_icon_and_persists(self) -> None:
+        """The general switch synchronizes the tray icon and global config."""
+
+        config = SimpleNamespace(
+            data={"settings": {"general": {"close_to_tray": False}}},
+            save=MagicMock(),
+        )
+        owner = SimpleNamespace(config=config, _update_tray_icon=MagicMock())
+
+        SlateWindow._update_close_to_tray_setting(owner, True)
+
+        self.assertTrue(config.data["settings"]["general"]["close_to_tray"])
+        owner._update_tray_icon.assert_called_once_with(True)
+        config.save.assert_called_once_with()
+
+    def test_window_close_hides_to_tray_when_enabled(self) -> None:
+        """Closing an opted-in window hides it without starting shutdown."""
+
+        owner = SimpleNamespace(
+            config=SimpleNamespace(
+                data={"settings": {"general": {"close_to_tray": True}}}
+            ),
+            terminals=MagicMock(),
+            hide=MagicMock(),
+            _save_window_state=MagicMock(),
+            _request_close=MagicMock(),
+        )
+
+        self.assertTrue(SlateWindow._on_delete_event(owner, MagicMock(), MagicMock()))
+
+        owner._save_window_state.assert_called_once_with()
+        owner.terminals.set_activity_monitoring.assert_called_once_with(False)
+        owner.hide.assert_called_once_with()
+        owner._request_close.assert_not_called()
+
     def test_external_editor_setting_persists_only_valid_changed_argv(self) -> None:
         """The editor command remains shell-free and avoids redundant saves."""
 
