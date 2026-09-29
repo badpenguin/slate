@@ -864,9 +864,10 @@ class TerminalManager:
             )
             for tmux_session in sorted(set(self.sessions.values()))
         )
-        # 2026-08-18: il binding tmux predefinito inoltra WheelUp alle TUI che
-        # dichiarano il mouse; Codex finisce così per muovere il prompt invece
-        # di aprire lo storico persistente della sessione.
+        # 2026-09-29: Codex conserva la conversazione nell'alternate screen e
+        # dichiara il mouse; forzarlo nel copy-mode tmux mostra [0/0] perché non
+        # esiste scrollback. Le TUI mouse-aware ricevono quindi la rotellina,
+        # mentre le normali shell continuano ad aprire lo storico di tmux.
         commands.extend(
             (
                 (
@@ -876,7 +877,7 @@ class TerminalManager:
                     "WheelUpPane",
                     "if-shell",
                     "-F",
-                    "#{pane_in_mode}",
+                    "#{mouse_any_flag}",
                     "send-keys -M",
                     "copy-mode -e",
                 ),
@@ -885,6 +886,10 @@ class TerminalManager:
                     "-T",
                     "root",
                     "WheelDownPane",
+                    "if-shell",
+                    "-F",
+                    "#{mouse_any_flag}",
+                    "send-keys -M",
                     "select-pane",
                 ),
             )
