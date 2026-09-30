@@ -1,6 +1,7 @@
 """Tests for the internal compact diff-editor surface."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import gi
@@ -161,6 +162,48 @@ class DiffEditorSurfaceTest(unittest.TestCase):
             surface.position_label.get_style_context().list_classes(),
         )
         self.assertEqual(len(surface.close_button.get_child().get_children()), 1)
+        surface.destroy()
+
+    def test_diff_editor_keyboard_commands_route_without_implicit_save(self) -> None:
+        """Navigation, search and save shortcuts keep their separate effects."""
+
+        editor = _EditorStub()
+        surface = DiffEditorSurface(
+            editor,
+            "file.py",
+            "@@ -1 +1 @@\n-old\n+one\n@@ -5 +5 @@\n-before\n+after\n",
+            (1, 1, 1, 5, 5, 5),
+            0,
+        )
+        right = SimpleNamespace(
+            keyval=Gdk.KEY_Right,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+        left = SimpleNamespace(
+            keyval=Gdk.KEY_Left,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+        find = SimpleNamespace(
+            keyval=Gdk.KEY_f,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+        save = SimpleNamespace(
+            keyval=Gdk.KEY_s,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+
+        self.assertTrue(surface._on_key_press(surface.diff_view, right))
+        self.assertEqual(surface.hunk_index, 1)
+        editor.save.assert_not_called()
+        self.assertTrue(surface._on_key_press(surface.diff_view, left))
+        self.assertEqual(surface.hunk_index, 0)
+        editor.save.assert_not_called()
+        self.assertTrue(surface._on_key_press(surface.diff_view, find))
+        self.assertTrue(
+            surface.search_bars[surface.diff_view].get_reveal_child()
+        )
+        self.assertTrue(surface._on_key_press(editor.view, save))
+        editor.save.assert_called_once_with()
         surface.destroy()
 
     def test_navigation_shares_toolbar_layout_with_long_path(self) -> None:

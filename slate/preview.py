@@ -798,7 +798,7 @@ class FilePreview(Gtk.Box):
             self.on_action("delete")
 
     def _on_key_press(self, _view: Gtk.TextView, event: Gdk.EventKey) -> bool:
-        """Forward unmodified file-action shortcuts from the focused preview."""
+        """Handle preview copy/search and forward unmodified file actions."""
 
         if (
             self.content_stack.get_visible_child_name() != "markdown"
@@ -806,6 +806,20 @@ class FilePreview(Gtk.Box):
         ):
             return True
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if (
+            self.content_stack.get_visible_child_name() != "markdown"
+            and modifiers == Gdk.ModifierType.CONTROL_MASK
+            and Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_c
+        ):
+            bounds = self.buffer.get_selection_bounds()
+            if bounds:
+                # Il GtkSourceView è intenzionalmente passivo per lasciare al
+                # sistema i tasti speciali; la copia va quindi eseguita dal
+                # contenitore che possiede realmente il focus.
+                selected = self.buffer.get_text(bounds[0], bounds[1], True)
+                Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(selected, -1)
+                return True
+            return False
         if modifiers != Gdk.ModifierType(0):
             return False
         keyval = Gdk.keyval_to_lower(event.keyval)

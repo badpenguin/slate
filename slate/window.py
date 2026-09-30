@@ -51,6 +51,7 @@ from .terminals import (
     OrphanSession,
     PaneInfo,
     TerminalManager,
+    is_codex_launcher_command,
     session_name,
     slug,
     terminal_key,
@@ -63,7 +64,7 @@ _SidebarIdentity = tuple[str, str, str]
 # 2026-08-21: il launcher Codex applica le notifiche native alla sola sessione,
 # così SLATE riceve anche le richieste di input senza modifiche globali.
 _CODEX_RESUME_COMMAND = (
-    "codex resume"
+    "codex --no-alt-screen resume"
     " -c 'notify=[]'"
     " -c 'tui.notifications=true'"
     " -c 'tui.notification_method=\"bel\"'"
@@ -2000,9 +2001,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 initial_command = project.get("terminal_commands", {}).get(
                     terminal_name_value, ""
                 )
-                if initial_command == "codex resume" or initial_command.startswith(
-                    "codex resume "
-                ):
+                if is_codex_launcher_command(initial_command):
                     renderer.set_property("gicon", None)
                     renderer.set_property("icon-name", None)
                     renderer.set_property("pixbuf", self.codex_icon)

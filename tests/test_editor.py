@@ -147,6 +147,25 @@ class EditorTest(unittest.TestCase):
         self.assertFalse(editor.info_bar.get_visible())
         editor.close()
 
+    def test_editor_search_moves_next_and_previous_between_real_matches(self) -> None:
+        """Editor navigation advances by position rather than matching text alone."""
+
+        editor = self._document()
+        editor.buffer.set_text("needle first\nneedle second\n")
+        editor.search_settings.set_search_text("needle")
+        editor.buffer.place_cursor(editor.buffer.get_start_iter())
+
+        editor.search(False)
+        first = editor.buffer.get_selection_bounds()
+        self.assertEqual(first[0].get_line(), 0)
+        editor.search(False)
+        second = editor.buffer.get_selection_bounds()
+        self.assertEqual(second[0].get_line(), 1)
+        editor.search(True)
+        previous = editor.buffer.get_selection_bounds()
+        self.assertEqual(previous[0].get_line(), 0)
+        editor.close()
+
     def test_clean_external_deletion_keeps_the_editor_open(self) -> None:
         """A deleted clean file remains recoverable until the user chooses an action."""
 
@@ -240,6 +259,27 @@ class EditorTest(unittest.TestCase):
             self._wait_until(buffer_is_current)
             self.assertIsNotNone(editor.monitor)
 
+        editor.close()
+
+    def test_directory_monitor_survives_atomic_replacement_gap(self) -> None:
+        """The retained parent monitor observes replacements without inode gaps."""
+
+        editor = self._document()
+        original_monitor = editor.monitor
+        replacement = self.root / ".TODO.md.agent"
+        replacement.write_text("# Replaced atomically\n", encoding="utf-8")
+        replacement.replace(self.path)
+
+        def buffer_is_current() -> bool:
+            """Report when the directory event has reloaded the replacement."""
+
+            text = editor.buffer.get_text(
+                editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True
+            )
+            return not editor.loading and text == "# Replaced atomically\n"
+
+        self._wait_until(buffer_is_current)
+        self.assertIs(editor.monitor, original_monitor)
         editor.close()
 
     def test_dirty_external_change_requires_explicit_version_choice(self) -> None:
@@ -339,6 +379,44 @@ class EditorTest(unittest.TestCase):
         workspace.show_terminal()
         self.assertFalse(workspace.handle_key(save_event))
         workspace.shutdown()
+
+    def test_workspace_dispatches_every_documented_editor_shortcut(self) -> None:
+        """The complete Ctrl shortcut matrix reaches only its intended command."""
+
+        editor = MagicMock()
+        editor.go_to_definition.return_value = True
+        owner = SimpleNamespace(
+            current_editor=MagicMock(return_value=editor),
+            request_close=MagicMock(),
+        )
+
+        cases = (
+            (Gdk.KEY_s, Gdk.ModifierType.CONTROL_MASK, editor.save),
+            (Gdk.KEY_b, Gdk.ModifierType.CONTROL_MASK, editor.go_to_definition),
+            (Gdk.KEY_f, Gdk.ModifierType.CONTROL_MASK, editor.show_search),
+            (Gdk.KEY_g, Gdk.ModifierType.CONTROL_MASK, editor.goto_line),
+            (Gdk.KEY_w, Gdk.ModifierType.CONTROL_MASK, owner.request_close),
+            (Gdk.KEY_z, Gdk.ModifierType.CONTROL_MASK, editor.undo),
+            (
+                Gdk.KEY_z,
+                Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK,
+                editor.redo,
+            ),
+            (Gdk.KEY_y, Gdk.ModifierType.CONTROL_MASK, editor.redo),
+        )
+        for keyval, state, callback in cases:
+            before = callback.call_count
+            event = SimpleNamespace(keyval=keyval, state=state)
+            self.assertTrue(EditorWorkspace.handle_key(owner, event))
+            self.assertEqual(callback.call_count, before + 1)
+        owner.request_close.assert_called_once_with(editor)
+
+        plain = SimpleNamespace(keyval=Gdk.KEY_s, state=Gdk.ModifierType(0))
+        unknown = SimpleNamespace(
+            keyval=Gdk.KEY_x, state=Gdk.ModifierType.CONTROL_MASK
+        )
+        self.assertFalse(EditorWorkspace.handle_key(owner, plain))
+        self.assertFalse(EditorWorkspace.handle_key(owner, unknown))
 
     def test_ctrl_b_requests_definition_for_the_symbol_at_cursor(self) -> None:
         """The active editor forwards Ctrl+B with project source context."""

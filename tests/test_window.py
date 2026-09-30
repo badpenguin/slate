@@ -1917,7 +1917,9 @@ class WindowActionTest(unittest.TestCase):
             _CODEX_RESUME_COMMAND,
             name_prefix="codex",
         )
-        self.assertTrue(_CODEX_RESUME_COMMAND.startswith("codex resume "))
+        self.assertTrue(
+            _CODEX_RESUME_COMMAND.startswith("codex --no-alt-screen resume ")
+        )
         self.assertIn("-c 'notify=[]'", _CODEX_RESUME_COMMAND)
         self.assertIn("tui.notification_method=\"bel\"", _CODEX_RESUME_COMMAND)
         self.assertIn(

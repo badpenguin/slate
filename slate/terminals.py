@@ -27,6 +27,27 @@ _TERMINAL_URL_PATTERN = r"(?i)https?://[^\s<>\[\]{}\"']+"
 _PCRE2_MULTILINE = 0x00000400
 
 
+def is_codex_launcher_command(command: str) -> bool:
+    """Recognize supported normal and inline-screen Codex resume launchers."""
+
+    return any(
+        command == prefix or command.startswith(prefix + " ")
+        for prefix in ("codex resume", "codex --no-alt-screen resume")
+    )
+
+
+def codex_inline_command(command: str) -> str:
+    """Upgrade a persisted Codex resume command to inline terminal mode."""
+
+    prefix = "codex resume"
+    if command == prefix or command.startswith(prefix + " "):
+        # 2026-09-30: inline mode avoids mouse-release escape fragments and
+        # leaves the conversation in tmux scrollback. Old persisted launchers
+        # are upgraded only at execution time, without rewriting user config.
+        return "codex --no-alt-screen resume" + command[len(prefix) :]
+    return command
+
+
 def slug(value: str, maximum: int) -> str:
     """Convert a display name into a bounded tmux session-name component."""
 
@@ -795,14 +816,8 @@ class TerminalManager:
         self._configure_server()
         tmux_session = self.sessions.get(key)
         if tmux_session:
-            # 2026-08-21: gli override nativi seguono `codex resume`; il
-            # prefisso conserva quindi il marcatore Codex nel launcher standard.
             is_codex_launcher = bool(
-                initial_command
-                and (
-                    initial_command == "codex resume"
-                    or initial_command.startswith("codex resume ")
-                )
+                initial_command and is_codex_launcher_command(initial_command)
             )
             self._set_metadata(
                 tmux_session,
@@ -821,7 +836,7 @@ class TerminalManager:
 
         # 2026-08-16: feed_child usa il normale input terminale, così Codex gira
         # dentro la shell persistente e al termine lascia il terminale aperto.
-        terminal.feed_child((command + "\n").encode("utf-8"))
+        terminal.feed_child((codex_inline_command(command) + "\n").encode("utf-8"))
 
     def _configure_server(self) -> None:
         """Apply all global tmux options once for the current server lifetime."""

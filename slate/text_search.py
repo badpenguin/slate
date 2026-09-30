@@ -96,7 +96,14 @@ class TextSearchBar(Gtk.Revealer):
 
         if not self.settings.get_search_text():
             return
-        cursor = self.buffer.get_iter_at_mark(self.buffer.get_insert())
+        bounds = self.buffer.get_selection_bounds()
+        if bounds:
+            # La selezione GTK mantiene l'insert mark sul principio del match;
+            # riutilizzarlo nella ricerca forward ritroverebbe sempre la stessa
+            # occorrenza. Si parte invece dal lato coerente con la direzione.
+            cursor = bounds[0] if backwards else bounds[1]
+        else:
+            cursor = self.buffer.get_iter_at_mark(self.buffer.get_insert())
         match = (
             self.context.backward(cursor)
             if backwards

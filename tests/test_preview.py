@@ -105,11 +105,60 @@ class FilePreviewTest(unittest.TestCase):
         self.assertEqual(
             self.preview.buffer.get_text(bounds[0], bounds[1], True), "needle"
         )
+        self.assertEqual(bounds[0].get_line(), 0)
+        self.assertTrue(self.preview._on_key_press(self.preview.view, next_event))
+        bounds = self.preview.buffer.get_selection_bounds()
+        self.assertEqual(bounds[0].get_line(), 1)
+        previous_event = SimpleNamespace(
+            keyval=Gdk.KEY_F3,
+            state=Gdk.ModifierType.SHIFT_MASK,
+        )
+        self.assertTrue(
+            self.preview._on_key_press(self.preview.view, previous_event)
+        )
+        bounds = self.preview.buffer.get_selection_bounds()
+        self.assertEqual(bounds[0].get_line(), 0)
+        buttons = self.preview.search_bar.get_child().get_children()[1:3]
+        buttons[1].clicked()
+        bounds = self.preview.buffer.get_selection_bounds()
+        self.assertEqual(bounds[0].get_line(), 1)
+        buttons[0].clicked()
+        bounds = self.preview.buffer.get_selection_bounds()
+        self.assertEqual(bounds[0].get_line(), 0)
         close_event = SimpleNamespace(
             keyval=Gdk.KEY_Escape, state=Gdk.ModifierType(0)
         )
         self.assertTrue(self.preview._on_key_press(self.preview.view, close_event))
         self.assertFalse(self.preview.search_bar.get_reveal_child())
+
+    def test_preview_ctrl_c_copies_selected_text_from_passive_view(self) -> None:
+        """The focus-owning preview copies a GtkSource selection with Ctrl+C."""
+
+        self.preview._set_source_text("copy this text\n", "sample.txt")
+        start = self.preview.buffer.get_iter_at_offset(0)
+        end = self.preview.buffer.get_iter_at_offset(9)
+        self.preview.buffer.select_range(start, end)
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_c,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+        clipboard = MagicMock()
+
+        with patch.object(Gtk.Clipboard, "get", return_value=clipboard):
+            self.assertTrue(self.preview._on_key_press(self.preview, event))
+
+        clipboard.set_text.assert_called_once_with("copy this", -1)
+
+    def test_preview_ctrl_c_without_selection_remains_unhandled(self) -> None:
+        """Ctrl+C without selected preview text remains available upstream."""
+
+        self.preview._set_source_text("nothing selected\n", "sample.txt")
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_c,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+
+        self.assertFalse(self.preview._on_key_press(self.preview, event))
 
     def test_preview_definition_uses_clicked_symbol_and_source_context(self) -> None:
         """Read-only previews can dispatch the same definition lookup as editors."""

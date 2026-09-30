@@ -401,12 +401,22 @@ class EditorDocument(Gtk.Box):
             self.buffer.set_style_scheme(scheme)
 
     def _ensure_monitor(self) -> None:
-        """Create and retain exactly one Gio monitor for this open file."""
+        """Monitor the parent directory so atomic file replacements stay visible."""
 
         if self.monitor is not None or self.file is None:
             return
+        parent = self.file.get_parent()
+        if parent is None:
+            self._show_notice(
+                "File monitor unavailable: missing parent directory.",
+                Gtk.MessageType.WARNING,
+            )
+            return
         try:
-            self.monitor = self.file.monitor_file(
+            # 2026-09-29: gli agenti sostituiscono spesso il file con rename
+            # atomici. Il monitor della directory conserva la propria identità
+            # mentre cambiano gli inode e permette di osservare ogni sostituzione.
+            self.monitor = parent.monitor_directory(
                 Gio.FileMonitorFlags.WATCH_MOVES, None
             )
             self.monitor.connect("changed", self._on_file_changed)
@@ -443,6 +453,11 @@ class EditorDocument(Gtk.Box):
     ) -> None:
         """Debounce meaningful external writes, moves and deletions."""
 
+        if self.file is None or not (
+            self.file.equal(_file)
+            or (_other is not None and self.file.equal(_other))
+        ):
+            return
         if event_type not in {
             Gio.FileMonitorEvent.CHANGED,
             Gio.FileMonitorEvent.CHANGES_DONE_HINT,
@@ -454,17 +469,6 @@ class EditorDocument(Gtk.Box):
             Gio.FileMonitorEvent.RENAMED,
         }:
             return
-        if event_type in {
-            Gio.FileMonitorEvent.DELETED,
-            Gio.FileMonitorEvent.MOVED,
-            Gio.FileMonitorEvent.MOVED_OUT,
-            Gio.FileMonitorEvent.RENAMED,
-        } and self.monitor is _monitor:
-            # 2026-08-23: le sostituzioni atomiche usate dagli agenti possono
-            # invalidare il monitor legato al vecchio inode; il reload riuscito
-            # ne creerà uno nuovo sul path corrente.
-            self.monitor.cancel()
-            self.monitor = None
         if self.monitor_source_id is not None:
             GLib.source_remove(self.monitor_source_id)
         now = GLib.get_monotonic_time() // 1000
@@ -719,7 +723,11 @@ class EditorDocument(Gtk.Box):
 
         if not self.search_settings.get_search_text():
             return
-        cursor = self.buffer.get_iter_at_mark(self.buffer.get_insert())
+        bounds = self.buffer.get_selection_bounds()
+        if bounds:
+            cursor = bounds[0] if backwards else bounds[1]
+        else:
+            cursor = self.buffer.get_iter_at_mark(self.buffer.get_insert())
         match = (
             self.search_context.backward(cursor)
             if backwards

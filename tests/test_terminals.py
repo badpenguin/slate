@@ -8,7 +8,14 @@ from unittest.mock import MagicMock, call, patch
 from gi.repository import Gdk, Vte
 
 from slate.processes import CommandResult
-from slate.terminals import TerminalManager, project_history, session_name, slug
+from slate.terminals import (
+    TerminalManager,
+    codex_inline_command,
+    is_codex_launcher_command,
+    project_history,
+    session_name,
+    slug,
+)
 
 
 class TerminalHelpersTest(unittest.TestCase):
@@ -231,7 +238,20 @@ class TerminalHelpersTest(unittest.TestCase):
 
         terminal = MagicMock()
         TerminalManager._feed_initial_command(terminal, "codex resume")
-        terminal.feed_child.assert_called_once_with(b"codex resume\n")
+        terminal.feed_child.assert_called_once_with(
+            b"codex --no-alt-screen resume\n"
+        )
+
+    def test_codex_launchers_use_inline_screen_without_losing_overrides(self) -> None:
+        """Old persisted resume commands upgrade while new ones stay unchanged."""
+
+        old = "codex resume -c 'notify=[]'"
+        new = "codex --no-alt-screen resume -c 'notify=[]'"
+        self.assertEqual(codex_inline_command(old), new)
+        self.assertEqual(codex_inline_command(new), new)
+        self.assertTrue(is_codex_launcher_command(old))
+        self.assertTrue(is_codex_launcher_command(new))
+        self.assertFalse(is_codex_launcher_command("printf codex resume"))
 
     def test_codex_resume_overrides_keep_agent_metadata(self) -> None:
         """The configured Codex launcher remains labelled after VTE attachment."""
