@@ -54,6 +54,7 @@ def is_extra_command_icon(value: Any) -> bool:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "projects": [],
+    "pinned_projects": [],
     "active_terminal": None,
     "expanded_projects": [],
     "pane_positions": [220, 900],
@@ -232,6 +233,16 @@ class ConfigStore:
             self._normalize_project(item) for item in projects if isinstance(item, dict)
         ]
         self._validate_projects(data["projects"])
+        pinned = raw.get("pinned_projects", [])
+        if isinstance(pinned, list):
+            known_projects = {project["name"] for project in data["projects"]}
+            # 2026-10-01: una lista ordinata conserva il criterio FIFO dei pin;
+            # nomi duplicati o non più configurati non devono sopravvivere.
+            data["pinned_projects"] = list(
+                dict.fromkeys(
+                    str(item) for item in pinned if str(item) in known_projects
+                )
+            )
         if isinstance(raw.get("active_terminal"), (str, type(None))):
             data["active_terminal"] = raw.get("active_terminal")
         expanded = raw.get("expanded_projects", [])

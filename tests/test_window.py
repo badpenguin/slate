@@ -23,6 +23,148 @@ from slate.window import SlateWindow, _CODEX_RESUME_COMMAND, _moved_sequence
 class WindowActionTest(unittest.TestCase):
     """Verify high-level SCM actions independently from GTK window startup."""
 
+    def test_project_sort_keeps_fifo_pins_before_alphabetical_projects(self) -> None:
+        """Alphabetical sorting affects only the unpinned project band."""
+
+        projects = [{"name": name} for name in ("zeta", "beta", "alpha", "gamma")]
+        config = SimpleNamespace(
+            data={
+                "projects": projects,
+                "pinned_projects": ["gamma", "beta"],
+                "expanded_projects": [],
+            },
+            save=MagicMock(),
+        )
+        owner = SimpleNamespace(
+            config=config,
+            project_tree=MagicMock(),
+            COL_PROJECT=SlateWindow.COL_PROJECT,
+            COL_ITEM=SlateWindow.COL_ITEM,
+            COL_KIND=SlateWindow.COL_KIND,
+            _populate_projects=MagicMock(),
+            _select_tree_row=MagicMock(),
+        )
+        owner.project_tree.get_selection.return_value.get_selected.return_value = (
+            None,
+            None,
+        )
+        owner._ordered_top_level_projects = (
+            SlateWindow._ordered_top_level_projects.__get__(owner)
+        )
+        owner._apply_project_order = SlateWindow._apply_project_order.__get__(owner)
+
+        SlateWindow._on_sort_projects(owner, MagicMock())
+
+        self.assertEqual(
+            [project["name"] for project in config.data["projects"]],
+            ["gamma", "beta", "alpha", "zeta"],
+        )
+        config.save.assert_called_once_with()
+        owner._populate_projects.assert_called_once_with()
+
+    def test_active_sort_is_stable_below_fifo_pins(self) -> None:
+        """Expanded projects rise without changing relative order in either band."""
+
+        projects = [{"name": name} for name in ("closed", "pin", "open-2", "open-1")]
+        store = Gtk.TreeStore(str, str, str, str, bool, str, bool)
+        rows = {}
+        for project in projects:
+            row = store.append(
+                None,
+                [
+                    project["name"],
+                    "project",
+                    project["name"],
+                    "",
+                    False,
+                    project["name"],
+                    False,
+                ],
+            )
+            store.append(
+                row,
+                ["main", "terminal", project["name"], "main", False, "", False],
+            )
+            rows[project["name"]] = row
+        tree = Gtk.TreeView(model=store)
+        tree.expand_row(store.get_path(rows["open-2"]), False)
+        tree.expand_row(store.get_path(rows["open-1"]), False)
+        config = SimpleNamespace(
+            data={
+                "projects": projects,
+                "pinned_projects": ["pin"],
+                "expanded_projects": ["open-2", "open-1"],
+            },
+            save=MagicMock(),
+        )
+        owner = SimpleNamespace(
+            config=config,
+            project_tree=tree,
+            project_store=store,
+            COL_PROJECT=SlateWindow.COL_PROJECT,
+            COL_ITEM=SlateWindow.COL_ITEM,
+            COL_KIND=SlateWindow.COL_KIND,
+            _populate_projects=MagicMock(),
+            _select_tree_row=MagicMock(),
+        )
+        owner._ordered_top_level_projects = (
+            SlateWindow._ordered_top_level_projects.__get__(owner)
+        )
+        owner._apply_project_order = SlateWindow._apply_project_order.__get__(owner)
+
+        SlateWindow._on_active_projects_first(owner, MagicMock())
+
+        self.assertEqual(
+            [project["name"] for project in config.data["projects"]],
+            ["pin", "open-2", "open-1", "closed"],
+        )
+        self.assertEqual(
+            config.data["expanded_projects"], ["open-2", "open-1"]
+        )
+
+    def test_project_pin_toggle_preserves_assignment_order(self) -> None:
+        """Adding and removing pins updates the FIFO list through one reorder."""
+
+        project = {"name": "beta"}
+        config = SimpleNamespace(
+            data={"projects": [project], "pinned_projects": ["alpha"]}
+        )
+        owner = SimpleNamespace(
+            config=config,
+            _selected_project=MagicMock(return_value=project),
+            _apply_project_order=MagicMock(),
+        )
+
+        SlateWindow._on_toggle_project_pin(owner, Gtk.MenuItem())
+        self.assertEqual(config.data["pinned_projects"], ["alpha", "beta"])
+        owner._apply_project_order.assert_called_once_with([project])
+
+        owner._apply_project_order.reset_mock()
+        SlateWindow._on_toggle_project_pin(owner, Gtk.MenuItem())
+        self.assertEqual(config.data["pinned_projects"], ["alpha"])
+        owner._apply_project_order.assert_called_once_with([project])
+
+    def test_project_menu_separates_dangerous_removal_after_pin(self) -> None:
+        """Project removal remains the final action behind a separator."""
+
+        menu = MagicMock()
+        owner = SimpleNamespace(
+            config=SimpleNamespace(data={"pinned_projects": ["repo"]}),
+            project_tree=MagicMock(),
+            _selected_project=MagicMock(return_value={"name": "repo"}),
+            _on_add_terminal=MagicMock(),
+            _on_toggle_project_pin=MagicMock(),
+            _on_remove_project=MagicMock(),
+        )
+        with patch("slate.window.Gtk.Menu", return_value=menu):
+            SlateWindow._show_tree_menu(owner, "project", None)
+
+        appended = [call.args[0] for call in menu.append.call_args_list]
+        self.assertEqual(appended[0].get_label(), "Open Terminal")
+        self.assertEqual(appended[1].get_label(), "Remove Pin")
+        self.assertIsInstance(appended[2], Gtk.SeparatorMenuItem)
+        self.assertEqual(appended[3].get_label(), "Remove Project")
+
     def test_visible_revision_preview_ignores_repeated_same_file_request(self) -> None:
         """A second click on the current revision row must not reload its preview."""
 
@@ -995,11 +1137,16 @@ class WindowActionTest(unittest.TestCase):
         )
         SlateWindow._populate_projects(owner)
         terminals.add.assert_not_called()
-        self.assertEqual(owner.project_store.iter_n_children(None), 1)
+        self.assertEqual(owner.project_store.iter_n_children(None), 2)
         project_iter = owner.project_store.get_iter_first()
         self.assertEqual(
             owner.project_store.get_value(project_iter, SlateWindow.COL_TEXT),
             "repo (3)",
+        )
+        spacer_iter = owner.project_store.iter_next(project_iter)
+        self.assertEqual(
+            owner.project_store.get_value(spacer_iter, SlateWindow.COL_KIND),
+            "spacer",
         )
 
     def test_private_browser_rows_enter_persistent_item_order(self) -> None:
@@ -2012,7 +2159,7 @@ class WindowActionTest(unittest.TestCase):
         self.assertEqual(len(set(generated)), 2)
 
     def test_plain_terminal_creation_keeps_automatic_name(self) -> None:
-        """A manually created terminal does not open an unsolicited dialog."""
+        """A new terminal expands its project and needs no naming dialog."""
 
         project = {
             "name": "repo",
@@ -2022,7 +2169,7 @@ class WindowActionTest(unittest.TestCase):
         }
         owner = SimpleNamespace(
             config=SimpleNamespace(
-                data={"active_terminal": "repo/main"},
+                data={"active_terminal": "repo/main", "expanded_projects": []},
                 save=MagicMock(),
             ),
             terminals=MagicMock(),
@@ -2036,6 +2183,9 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._create_terminal(owner, None)
         idle_add.assert_not_called()
         owner._prompt_terminal_rename.assert_not_called()
+        self.assertEqual(owner.config.data["expanded_projects"], ["repo"])
+        owner._populate_projects.assert_called_once_with()
+        owner._select_tree_row.assert_called_once_with("repo", "term-2")
 
     def test_row_bells_track_each_ringing_terminal_independently(self) -> None:
         """Focusing one terminal preserves the bell raised by another terminal."""
@@ -2163,6 +2313,7 @@ class WindowActionTest(unittest.TestCase):
                 True,
             ),
             config=SimpleNamespace(
+                data={"pinned_projects": ["repo"]},
                 find_project=MagicMock(
                     return_value={"terminal_icons": {"main": "text-x-script"}}
                 )
@@ -2195,6 +2346,15 @@ class WindowActionTest(unittest.TestCase):
         )
         self.assertIsNone(renderer.get_property("icon-name"))
         self.assertEqual(renderer.get_property("pixbuf"), incognito_icon)
+        pin_renderer = Gtk.CellRendererPixbuf()
+        SlateWindow._render_pin_icon(
+            owner, MagicMock(), pin_renderer, store, project_iter
+        )
+        self.assertEqual(pin_renderer.get_property("icon-name"), "view-pin-symbolic")
+        SlateWindow._render_pin_icon(
+            owner, MagicMock(), pin_renderer, store, terminal_iter
+        )
+        self.assertIsNone(pin_renderer.get_property("icon-name"))
 
     def test_codex_terminal_uses_headerbar_icon_in_project_tree(self) -> None:
         """Persisted Codex launchers render the bundled icon, not a terminal."""

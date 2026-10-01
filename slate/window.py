@@ -89,6 +89,12 @@ def _moved_sequence(
     return reordered if reordered != original else None
 
 
+def _project_casefold_name(project: dict) -> str:
+    """Return a locale-independent case-insensitive project sorting key."""
+
+    return project["name"].casefold()
+
+
 class SlateWindow(Gtk.ApplicationWindow):
     """Coordinate projects, persistent terminals and local SCM status panels."""
 
@@ -1018,10 +1024,31 @@ class SlateWindow(Gtk.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.get_style_context().add_class("project-sidebar")
         box.set_size_request(190, -1)
+        title_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        title_bar.get_style_context().add_class("project-title-bar")
         sidebar_title = Gtk.Label(label="PROJECTS")
         sidebar_title.set_xalign(0)
         sidebar_title.get_style_context().add_class("sidebar-title")
-        box.pack_start(sidebar_title, False, False, 0)
+        title_bar.pack_start(sidebar_title, True, True, 0)
+        self.sort_projects_button = Gtk.Button()
+        self.sort_projects_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.sort_projects_button.set_tooltip_text("Sort projects alphabetically")
+        self.sort_projects_button.add(
+            Gtk.Image.new_from_icon_name(
+                "view-sort-ascending-symbolic", Gtk.IconSize.MENU
+            )
+        )
+        self.sort_projects_button.connect("clicked", self._on_sort_projects)
+        title_bar.pack_start(self.sort_projects_button, False, False, 0)
+        self.active_projects_button = Gtk.Button()
+        self.active_projects_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.active_projects_button.set_tooltip_text("Move expanded projects to the top")
+        self.active_projects_button.add(
+            Gtk.Image.new_from_icon_name("go-top-symbolic", Gtk.IconSize.MENU)
+        )
+        self.active_projects_button.connect("clicked", self._on_active_projects_first)
+        title_bar.pack_start(self.active_projects_button, False, False, 0)
+        box.pack_start(title_bar, False, False, 0)
         self.empty_label = Gtk.Label(label="Add a project to get started")
         self.empty_label.set_line_wrap(True)
         self.empty_label.get_style_context().add_class("sidebar-empty")
@@ -1069,6 +1096,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.name_renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
         activity_renderer = Gtk.CellRendererPixbuf()
         attention_renderer = Gtk.CellRendererPixbuf()
+        pin_renderer = Gtk.CellRendererPixbuf()
         expander_renderer = Gtk.CellRendererPixbuf()
         expander_renderer.set_property("stock-size", Gtk.IconSize.BUTTON)
         self.project_expander_column = Gtk.TreeViewColumn()
@@ -1083,10 +1111,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         column.pack_start(self.name_renderer, True)
         column.pack_end(activity_renderer, False)
         column.pack_end(attention_renderer, False)
+        column.pack_end(pin_renderer, False)
         column.set_cell_data_func(icon_renderer, self._render_tree_icon)
         column.set_cell_data_func(self.name_renderer, self._render_tree_name)
         column.set_cell_data_func(activity_renderer, self._render_activity_icon)
         column.set_cell_data_func(attention_renderer, self._render_attention_icon)
+        column.set_cell_data_func(pin_renderer, self._render_pin_icon)
         column.set_expand(True)
         self.project_tree.append_column(self.project_expander_column)
         self.project_tree.append_column(column)
@@ -1107,6 +1137,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         )
         self.project_tree.add_events(
             Gdk.EventMask.BUTTON1_MOTION_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
+        )
+        self.project_tree.get_selection().set_select_function(
+            self._can_select_project_row
         )
         self.project_tree.get_selection().connect("changed", self._on_tree_selection)
         self.project_tree.connect("row-expanded", self._on_row_expanded)
@@ -1203,11 +1236,15 @@ class SlateWindow(Gtk.ApplicationWindow):
         return True
 
     def _populate_projects(self) -> None:
-        """Rebuild project children for terminals and persistent work files."""
+        """Rebuild project rows while restoring, never deriving, expansion state."""
 
+        # 2026-10-01: `clear()` emette eventi e rende impossibile conoscere quali
+        # righe fossero aperte. Questa funzione deve soltanto leggere la lista
+        # persistita e ripristinarla: non deve mai ricavare né sovrascrivere
+        # `expanded_projects` osservando il TreeStore dopo averlo svuotato.
+        expanded = set(self.config.data["expanded_projects"])
         self.restoring_tree = True
         self.project_store.clear()
-        expanded = set(self.config.data["expanded_projects"])
         for project in self.config.data["projects"]:
             revision_count = getattr(self, "revision_counts", {}).get(
                 project["name"], 0
@@ -1275,7 +1312,91 @@ class SlateWindow(Gtk.ApplicationWindow):
                 )
             if project["name"] in expanded:
                 self.project_tree.expand_row(self.project_store.get_path(parent), False)
+        if self.config.data["projects"]:
+            # 2026-10-01: una riga vuota scorrevole lascia respiro dopo l'ultimo
+            # progetto senza creare una fascia esterna distinta dalla colonna.
+            self.project_store.append(
+                None, ["", "spacer", "", "", False, "", False]
+            )
         self.restoring_tree = False
+
+    def _ordered_top_level_projects(
+        self, remaining: list[dict]
+    ) -> list[dict]:
+        """Place FIFO-pinned projects before an already ordered remainder."""
+
+        pinned_names = self.config.data.get("pinned_projects", [])
+        projects_by_name = {
+            project["name"]: project for project in self.config.data["projects"]
+        }
+        pinned = [
+            projects_by_name[name] for name in pinned_names if name in projects_by_name
+        ]
+        pinned_set = set(pinned_names)
+        return pinned + [
+            project for project in remaining if project["name"] not in pinned_set
+        ]
+
+    def _apply_project_order(self, projects: list[dict]) -> None:
+        """Persist a top-level project order and rebuild only the sidebar model."""
+
+        model, tree_iter = self.project_tree.get_selection().get_selected()
+        selected_identity = (
+            (
+                model.get_value(tree_iter, self.COL_PROJECT),
+                model.get_value(tree_iter, self.COL_ITEM),
+                model.get_value(tree_iter, self.COL_KIND),
+            )
+            if tree_iter is not None
+            else None
+        )
+        self.config.data["projects"] = self._ordered_top_level_projects(projects)
+        self.config.save()
+        self._populate_projects()
+        if selected_identity is not None:
+            self._select_tree_row(*selected_identity)
+
+    def _on_sort_projects(self, _button: Gtk.Widget) -> None:
+        """Sort unpinned projects alphabetically while preserving FIFO pins."""
+
+        ordered = sorted(
+            self.config.data["projects"], key=_project_casefold_name
+        )
+        self._apply_project_order(ordered)
+
+    def _on_active_projects_first(self, _button: Gtk.Widget) -> None:
+        """Move expanded unpinned projects before collapsed ones, stably."""
+
+        expanded_names: list[str] = []
+        tree_iter = self.project_store.get_iter_first()
+        # 2026-10-01: la configurazione può ricordare come espanso un progetto
+        # rimasto senza figli, ma GTK lo mostra chiuso; il sort deve riflettere
+        # ciò che l'utente vede realmente nella sidebar.
+        while tree_iter is not None:
+            if (
+                self.project_store.get_value(tree_iter, self.COL_KIND) == "project"
+                and self.project_tree.row_expanded(
+                    self.project_store.get_path(tree_iter)
+                )
+            ):
+                expanded_names.append(
+                    self.project_store.get_value(tree_iter, self.COL_PROJECT)
+                )
+            tree_iter = self.project_store.iter_next(tree_iter)
+        self.config.data["expanded_projects"] = expanded_names
+        expanded = set(expanded_names)
+        # La partizione conserva l'ordine relativo sia degli aperti sia dei
+        # chiusi, evitando che questa azione diventi anche un sort implicito.
+        ordered = [
+            project
+            for project in self.config.data["projects"]
+            if project["name"] in expanded
+        ] + [
+            project
+            for project in self.config.data["projects"]
+            if project["name"] not in expanded
+        ]
+        self._apply_project_order(ordered)
 
     def _ensure_project_repositories(self, project: dict) -> list[RepositoryRef]:
         """Attach cached repositories immediately and start first-use discovery."""
@@ -1940,8 +2061,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Render row names without changing their searchable stored values."""
 
         name = model.get_value(tree_iter, self.COL_TEXT)
-        project_row = model.get_value(tree_iter, self.COL_KIND) == "project"
+        kind = model.get_value(tree_iter, self.COL_KIND)
+        project_row = kind == "project"
         renderer.set_property("text", name)
+        renderer.set_property("ypad", 12 if kind == "spacer" else 0)
         renderer.set_property("weight", Pango.Weight.BOLD if project_row else Pango.Weight.NORMAL)
         renderer.set_property("weight-set", True)
         self._set_project_row_background(renderer, project_row)
@@ -2077,6 +2200,24 @@ class SlateWindow(Gtk.ApplicationWindow):
         self._set_project_row_background(
             renderer, model.get_value(tree_iter, self.COL_KIND) == "project"
         )
+
+    def _render_pin_icon(
+        self,
+        _column: Gtk.TreeViewColumn,
+        renderer: Gtk.CellRendererPixbuf,
+        model: Gtk.TreeModel,
+        tree_iter: Gtk.TreeIter,
+        _data: object = None,
+    ) -> None:
+        """Show a pin at the right edge of pinned project rows only."""
+
+        project_row = model.get_value(tree_iter, self.COL_KIND) == "project"
+        project_name = model.get_value(tree_iter, self.COL_PROJECT)
+        pinned = project_name in self.config.data.get("pinned_projects", [])
+        renderer.set_property(
+            "icon-name", "view-pin-symbolic" if project_row and pinned else None
+        )
+        self._set_project_row_background(renderer, project_row)
 
     def _set_project_row_background(
         self, renderer: Gtk.CellRenderer, project_row: bool
@@ -2266,6 +2407,18 @@ class SlateWindow(Gtk.ApplicationWindow):
             expanded.append(name)
             self.config.save()
 
+    def _can_select_project_row(
+        self,
+        _selection: Gtk.TreeSelection,
+        model: Gtk.TreeModel,
+        path: Gtk.TreePath,
+        _currently_selected: bool,
+    ) -> bool:
+        """Keep the final spacing row inert while allowing every real item."""
+
+        tree_iter = model.get_iter(path)
+        return model.get_value(tree_iter, self.COL_KIND) != "spacer"
+
     def _on_row_collapsed(
         self, _tree: Gtk.TreeView, tree_iter: Gtk.TreeIter, _path: Gtk.TreePath
     ) -> None:
@@ -2288,6 +2441,8 @@ class SlateWindow(Gtk.ApplicationWindow):
             path = hit[0]
             tree_iter = self.project_store.get_iter(path)
             kind = self.project_store.get_value(tree_iter, self.COL_KIND)
+            if kind == "spacer":
+                return True
             if (
                 event.button == 1
                 and kind == "project"
@@ -2503,9 +2658,21 @@ class SlateWindow(Gtk.ApplicationWindow):
             projects_by_name = {
                 project["name"]: project for project in self.config.data["projects"]
             }
-            self.config.data["projects"] = [
+            requested_projects = [
                 projects_by_name[str(name)] for name in reordered
             ]
+            pinned_names = self.config.data.get("pinned_projects", [])
+            if pinned_names:
+                self.config.data["projects"] = self._ordered_top_level_projects(
+                    requested_projects
+                )
+                # 2026-10-01: il DnD può riordinare soltanto la fascia libera;
+                # ricostruire il modello impedisce di separare i pin FIFO.
+                self.config.save()
+                self._populate_projects()
+                self._select_tree_row(source[1], "", "project")
+                return True
+            self.config.data["projects"] = requested_projects
         else:
             project = self.config.find_project(source[1])
             if project is None:
@@ -2638,10 +2805,20 @@ class SlateWindow(Gtk.ApplicationWindow):
         menu = Gtk.Menu()
         if kind == "project":
             add_item = Gtk.MenuItem(label="Open Terminal")
+            project = self._selected_project()
+            pinned = bool(
+                project
+                and project["name"]
+                in self.config.data.get("pinned_projects", [])
+            )
+            pin_item = Gtk.MenuItem(label="Remove Pin" if pinned else "Pin Project")
             remove_item = Gtk.MenuItem(label="Remove Project")
             add_item.connect("activate", self._on_add_terminal)
+            pin_item.connect("activate", self._on_toggle_project_pin)
             remove_item.connect("activate", self._on_remove_project)
             menu.append(add_item)
+            menu.append(pin_item)
+            menu.append(Gtk.SeparatorMenuItem())
             menu.append(remove_item)
         elif kind == "terminal":
             rename_item = Gtk.MenuItem(label="Rename")
@@ -2669,6 +2846,19 @@ class SlateWindow(Gtk.ApplicationWindow):
                 Gdk.Gravity.CENTER,
                 None,
             )
+
+    def _on_toggle_project_pin(self, _item: Gtk.MenuItem) -> None:
+        """Add or remove the selected project from the persistent FIFO pin list."""
+
+        project = self._selected_project()
+        if project is None:
+            return
+        pinned = self.config.data.setdefault("pinned_projects", [])
+        if project["name"] in pinned:
+            pinned.remove(project["name"])
+        else:
+            pinned.append(project["name"])
+        self._apply_project_order(list(self.config.data["projects"]))
 
     def _on_close_editor(self, *_args: object) -> None:
         """Close the selected editor row while protecting unsaved changes."""
@@ -3068,6 +3258,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.file_manager.forget_project(project["name"])
         self.revision_counts.pop(project["name"], None)
         self.config.data["projects"].remove(project)
+        pinned = self.config.data.get("pinned_projects", [])
+        if project["name"] in pinned:
+            pinned.remove(project["name"])
         if project["name"] in self.config.data["expanded_projects"]:
             self.config.data["expanded_projects"].remove(project["name"])
         self.config.data["active_terminal"] = None
@@ -3206,6 +3399,11 @@ class SlateWindow(Gtk.ApplicationWindow):
         self._append_project_item(project, "terminal", name)
         project["last_terminal"] = name
         self.config.data["active_terminal"] = terminal_key(project["name"], name)
+        expanded_projects = self.config.data.setdefault("expanded_projects", [])
+        if project["name"] not in expanded_projects:
+            # 2026-10-01: creare un figlio invisibile sotto un progetto chiuso
+            # sembra un mancato click e induce a creare terminali duplicati.
+            expanded_projects.append(project["name"])
         self.config.save()
         if working_directory is None:
             self.terminals.add(

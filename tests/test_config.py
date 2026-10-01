@@ -129,6 +129,28 @@ class ConfigStoreTest(unittest.TestCase):
                 ],
             )
 
+    def test_pinned_projects_keep_fifo_order_and_known_names_only(self) -> None:
+        """Pin persistence drops duplicates and stale project references."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "projects": [
+                            {"name": "alpha", "path": "/tmp/alpha"},
+                            {"name": "beta", "path": "/tmp/beta"},
+                        ],
+                        "pinned_projects": ["beta", "missing", "alpha", "beta"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            store = ConfigStore(path)
+
+            self.assertEqual(store.data["pinned_projects"], ["beta", "alpha"])
+
     def test_terminal_commands_are_safe_and_reference_known_terminals(self) -> None:
         """Only single-line commands for configured terminals survive loading."""
 

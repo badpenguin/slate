@@ -35,6 +35,15 @@ headerbar.slate-header button.execute-command-main {
     font-weight: bold;
 }
 
+/* 2026-10-01: i due ordinamenti sono strumenti secondari della testata e
+ * restano grigi e compatti per non competere con i progetti. */
+.project-title-bar button {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 1px;
+    color: alpha(@theme_fg_color, 0.58);
+}
+
 .sidebar-empty {
     padding: 12px;
     color: alpha(@theme_fg_color, 0.65);
