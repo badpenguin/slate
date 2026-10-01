@@ -148,6 +148,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.active_editor_ref: tuple[str, str] | None = None
         self.restoring_tree = False
         self.restoring_selection = False
+        self.selecting_context_row = False
         self.startup_inactive = True
         self.project_drag_candidate: tuple[
             _SidebarIdentity, Gtk.TreePath, int, int
@@ -163,6 +164,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.verified_projects: set[str] = set()
         self._terminate_started_at = 0
         self.attention_terminals: set[Gtk.Widget] = set()
+        self.manual_attention: set[_SidebarIdentity] = set()
         self.browser_bell_timeout_id: int | None = None
         self.browser_bell_project_name: str | None = None
         # 2026-08-20: ripgrep abilita soltanto la ricerca progetto; la sua
@@ -306,7 +308,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.project_search = ProjectSearch(
             self._close_project_search,
             self._view_project_file,
-            self._edit_project_file_internal,
+            self._edit_search_result_internal,
             self._edit_project_file_external,
             self._can_open_search_result_meld,
             self._open_search_result_meld,
@@ -772,7 +774,9 @@ class SlateWindow(Gtk.ApplicationWindow):
                         self.COL_ACTIVITY,
                         editor.dirty,
                         self.COL_ATTENTION,
-                        editor.attention,
+                        editor.attention
+                        or ("editor", editor.project_name, editor.relative_path)
+                        in self.manual_attention,
                     )
                     return
                 child = self.project_store.iter_next(child)
@@ -935,7 +939,11 @@ class SlateWindow(Gtk.ApplicationWindow):
                 candidate = self.terminals.terminals.get(
                     terminal_key(project_name, terminal_name_value)
                 )
-                attention = candidate in self.attention_terminals
+                attention = (
+                    candidate in self.attention_terminals
+                    or ("terminal", project_name, terminal_name_value)
+                    in self.manual_attention
+                )
                 if (
                     self.project_store.get_value(
                         terminal_iter, self.COL_ATTENTION
@@ -1243,6 +1251,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         # persistita e ripristinarla: non deve mai ricavare né sovrascrivere
         # `expanded_projects` osservando il TreeStore dopo averlo svuotato.
         expanded = set(self.config.data["expanded_projects"])
+        valid_children: set[_SidebarIdentity] = set()
         self.restoring_tree = True
         self.project_store.clear()
         for project in self.config.data["projects"]:
@@ -1264,6 +1273,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 ],
             )
             for kind, value in self._ordered_project_items(project):
+                valid_children.add((kind, project["name"], value))
                 if kind == "terminal":
                     terminal = self.terminals.terminals.get(
                         terminal_key(project["name"], value)
@@ -1277,7 +1287,9 @@ class SlateWindow(Gtk.ApplicationWindow):
                             value,
                             False,
                             GLib.markup_escape_text(value),
-                            terminal in self.attention_terminals,
+                            terminal in self.attention_terminals
+                            or (kind, project["name"], value)
+                            in self.manual_attention,
                         ],
                     )
                     continue
@@ -1292,7 +1304,8 @@ class SlateWindow(Gtk.ApplicationWindow):
                             value,
                             False,
                             GLib.markup_escape_text(entry.display_title),
-                            False,
+                            (kind, project["name"], value)
+                            in self.manual_attention,
                         ],
                     )
                     continue
@@ -1307,7 +1320,9 @@ class SlateWindow(Gtk.ApplicationWindow):
                         value,
                         editor.dirty if editor is not None else False,
                         GLib.markup_escape_text(value),
-                        editor.attention if editor is not None else False,
+                        (editor.attention if editor is not None else False)
+                        or (kind, project["name"], value)
+                        in self.manual_attention,
                     ],
                 )
             if project["name"] in expanded:
@@ -1318,6 +1333,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.project_store.append(
                 None, ["", "spacer", "", "", False, "", False]
             )
+        self.manual_attention.intersection_update(valid_children)
         self.restoring_tree = False
 
     def _ordered_top_level_projects(
@@ -2201,6 +2217,42 @@ class SlateWindow(Gtk.ApplicationWindow):
             renderer, model.get_value(tree_iter, self.COL_KIND) == "project"
         )
 
+    def _native_row_attention(self, identity: _SidebarIdentity) -> bool:
+        """Return attention raised by a terminal or editor independently of manual bells."""
+
+        kind, project_name, item = identity
+        if kind == "terminal":
+            terminal = self.terminals.terminals.get(
+                terminal_key(project_name, item)
+            )
+            return terminal in self.attention_terminals
+        if kind == "editor":
+            entry = self.editor_workspace.editors.get((project_name, item))
+            return bool(
+                entry is not None
+                and entry.document is not None
+                and entry.document.attention
+            )
+        return False
+
+    def _clear_manual_attention(
+        self,
+        identity: _SidebarIdentity,
+        tree_iter: Gtk.TreeIter | None = None,
+    ) -> None:
+        """Consume one manual bell while preserving native terminal/editor attention."""
+
+        if identity not in self.manual_attention:
+            return
+        self.manual_attention.discard(identity)
+        target = tree_iter or self._find_sidebar_iter(identity)
+        if target is not None:
+            self.project_store.set_value(
+                target,
+                self.COL_ATTENTION,
+                self._native_row_attention(identity),
+            )
+
     def _render_pin_icon(
         self,
         _column: Gtk.TreeViewColumn,
@@ -2237,7 +2289,7 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         # 2026-08-17: GtkTreeStore rebuilds emit transient selections; accepting
         # them eagerly activated every project and defeated lazy repository load.
-        if self.restoring_tree or self.startup_inactive:
+        if self.restoring_tree or self.startup_inactive or self.selecting_context_row:
             return
         model, tree_iter = selection.get_selected()
         if tree_iter is None:
@@ -2472,7 +2524,24 @@ class SlateWindow(Gtk.ApplicationWindow):
                 # Il press Ctrl non seleziona la sorgente: un riordino non deve
                 # cambiare terminale, editor o progetto attivo.
                 return True
+            if event.button == 3:
+                # 2026-10-01: il menu deve poter rimuovere una campanella senza
+                # consumarla semplicemente selezionando la sua riga col destro.
+                self.selecting_context_row = True
+                tree.get_selection().select_path(path)
+                self.selecting_context_row = False
+                self._show_tree_menu(kind, event)
+                return True
             tree.get_selection().select_path(path)
+            if event.button == 1 and kind in {"terminal", "editor", "browser"}:
+                self._clear_manual_attention(
+                    (
+                        kind,
+                        self.project_store.get_value(tree_iter, self.COL_PROJECT),
+                        self.project_store.get_value(tree_iter, self.COL_ITEM),
+                    ),
+                    tree_iter,
+                )
             if (
                 event.button == 1
                 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS
@@ -2487,9 +2556,6 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self.file_manager.reveal_path(relative_path)
                 return True
             if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS and kind == "project":
-                return True
-            if event.button == 3:
-                self._show_tree_menu(kind, event)
                 return True
         return False
 
@@ -2836,6 +2902,18 @@ class SlateWindow(Gtk.ApplicationWindow):
             close_item = Gtk.MenuItem(label="Close")
             close_item.connect("activate", self._on_close_browser)
             menu.append(close_item)
+        if kind in {"terminal", "editor", "browser"}:
+            identity = self._selected_sidebar_identity()
+            if identity is not None:
+                bell_item = Gtk.MenuItem(
+                    label=(
+                        "Remove Bell"
+                        if identity in self.manual_attention
+                        else "Add Bell"
+                    )
+                )
+                bell_item.connect("activate", self._on_toggle_manual_attention)
+                menu.prepend(bell_item)
         menu.show_all()
         if event is not None:
             menu.popup_at_pointer(event)
@@ -2845,6 +2923,40 @@ class SlateWindow(Gtk.ApplicationWindow):
                 Gdk.Gravity.CENTER,
                 Gdk.Gravity.CENTER,
                 None,
+            )
+
+    def _selected_sidebar_identity(self) -> _SidebarIdentity | None:
+        """Return the stable identity of the selected actionable child row."""
+
+        model, tree_iter = self.project_tree.get_selection().get_selected()
+        if tree_iter is None:
+            return None
+        kind = model.get_value(tree_iter, self.COL_KIND)
+        if kind not in {"terminal", "editor", "browser"}:
+            return None
+        return (
+            kind,
+            model.get_value(tree_iter, self.COL_PROJECT),
+            model.get_value(tree_iter, self.COL_ITEM),
+        )
+
+    def _on_toggle_manual_attention(self, _item: Gtk.MenuItem) -> None:
+        """Toggle a runtime bell on the explicitly selected project child."""
+
+        identity = self._selected_sidebar_identity()
+        if identity is None:
+            return
+        if identity in self.manual_attention:
+            self.manual_attention.remove(identity)
+        else:
+            self.manual_attention.add(identity)
+        tree_iter = self._find_sidebar_iter(identity)
+        if tree_iter is not None:
+            self.project_store.set_value(
+                tree_iter,
+                self.COL_ATTENTION,
+                identity in self.manual_attention
+                or self._native_row_attention(identity),
             )
 
     def _on_toggle_project_pin(self, _item: Gtk.MenuItem) -> None:
@@ -2917,6 +3029,14 @@ class SlateWindow(Gtk.ApplicationWindow):
         if event.keyval == Gdk.KEY_Escape and surface is not None:
             surface.close_if_clean()
             return True
+        if (
+            surface is not None
+            and Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b
+            and modifiers == Gdk.ModifierType.CONTROL_MASK
+        ):
+            if not surface.go_to_definition():
+                self._show_error("Place the diff editor cursor on a source symbol first.")
+            return True
         if self.preview.get_visible() and self.preview.search_bar.handle_key(event):
             return True
         if (
@@ -2961,7 +3081,16 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.project_search.focus_query()
             return
         self._close_preview()
+        self._raise_project_search()
         self.project_search.open(project["name"], project["path"])
+
+    def _raise_project_search(self) -> None:
+        """Keep global search above a diff-editor overlay created later."""
+
+        # 2026-10-01: GtkOverlay paints children by stacking order; the
+        # diff-editor is created after Search and would otherwise cover it while
+        # shortcuts and focus continue acting on the hidden search surface.
+        self.content_overlay.reorder_overlay(self.project_search, -1)
 
     def _start_definition_search(
         self, source_root: str, source_path: str, symbol: str
@@ -3032,14 +3161,16 @@ class SlateWindow(Gtk.ApplicationWindow):
             # 2026-09-06: una ricerca strutturale senza risultati degrada alla
             # ricerca testuale già disponibile, mantenendo il simbolo modificabile.
             self._close_preview()
+            self._raise_project_search()
             self.project_search.search_for(
                 project_name, project_root, symbol
             )
             return
         if len(ordered) == 1:
-            self._edit_project_file_internal(ordered[0].path, ordered[0].line)
+            self._edit_search_result_internal(ordered[0].path, ordered[0].line)
             return
         self._close_preview()
+        self._raise_project_search()
         self.project_search.show_definition_results(
             project_name, project_root, symbol, ordered
         )
@@ -4267,6 +4398,26 @@ class SlateWindow(Gtk.ApplicationWindow):
         if line is not None:
             editor.goto_line_number(line)
         return editor
+
+    def _edit_search_result_internal(
+        self, relative_path: str, line: int | None = None
+    ) -> EditorDocument | None:
+        """Open a search result without leaving a stale diff-editor above it."""
+
+        surface = getattr(self, "diff_editor_surface", None)
+        if surface is None:
+            return self._edit_project_file_internal(relative_path, line)
+        if surface.path == relative_path:
+            if line is not None:
+                surface.editor.goto_line_number(line)
+            surface.editor.view.grab_focus()
+            return surface.editor
+        continuation = partial(
+            self._edit_project_file_internal, relative_path, line
+        )
+        if surface.finish_before_navigation(continuation):
+            return None
+        return self._edit_project_file_internal(relative_path, line)
 
     def _edit_project_file_external(self, relative_path: str) -> None:
         """Open one safe project file with the configured external editor."""

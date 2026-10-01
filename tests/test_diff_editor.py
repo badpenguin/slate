@@ -38,6 +38,7 @@ class _EditorStub(Gtk.Box):
         self.goto_line_number = MagicMock()
         self.save = MagicMock()
         self.show_search = MagicMock()
+        self.go_to_definition = MagicMock(return_value=True)
 
 
 class DiffEditorSurfaceTest(unittest.TestCase):
@@ -191,6 +192,10 @@ class DiffEditorSurfaceTest(unittest.TestCase):
             keyval=Gdk.KEY_s,
             state=Gdk.ModifierType.CONTROL_MASK,
         )
+        definition = SimpleNamespace(
+            keyval=Gdk.KEY_b,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
 
         self.assertTrue(surface._on_key_press(surface.diff_view, right))
         self.assertEqual(surface.hunk_index, 1)
@@ -204,6 +209,8 @@ class DiffEditorSurfaceTest(unittest.TestCase):
         )
         self.assertTrue(surface._on_key_press(editor.view, save))
         editor.save.assert_called_once_with()
+        self.assertTrue(surface._on_key_press(editor.view, definition))
+        editor.go_to_definition.assert_called_once_with()
         surface.destroy()
 
     def test_navigation_shares_toolbar_layout_with_long_path(self) -> None:

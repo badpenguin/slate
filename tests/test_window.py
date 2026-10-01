@@ -165,6 +165,40 @@ class WindowActionTest(unittest.TestCase):
         self.assertIsInstance(appended[2], Gtk.SeparatorMenuItem)
         self.assertEqual(appended[3].get_label(), "Remove Project")
 
+    def test_browser_context_menu_exposes_manual_bell_action(self) -> None:
+        """Every non-terminal project child receives the contextual bell toggle."""
+
+        store = Gtk.TreeStore(str, str, str, str, bool, str, bool)
+        parent = store.append(
+            None, ["repo", "project", "repo", "", False, "repo", False]
+        )
+        browser = store.append(
+            parent,
+            ["Docs", "browser", "repo", "browser-1", False, "Docs", False],
+        )
+        tree = Gtk.TreeView(model=store)
+        tree.expand_row(store.get_path(parent), False)
+        tree.get_selection().select_iter(browser)
+        menu = MagicMock()
+        owner = SimpleNamespace(
+            project_tree=tree,
+            manual_attention=set(),
+            COL_KIND=SlateWindow.COL_KIND,
+            COL_PROJECT=SlateWindow.COL_PROJECT,
+            COL_ITEM=SlateWindow.COL_ITEM,
+            _on_close_browser=MagicMock(),
+            _on_toggle_manual_attention=MagicMock(),
+        )
+        owner._selected_sidebar_identity = (
+            SlateWindow._selected_sidebar_identity.__get__(owner)
+        )
+
+        with patch("slate.window.Gtk.Menu", return_value=menu):
+            SlateWindow._show_tree_menu(owner, "browser", None)
+
+        bell_item = menu.prepend.call_args.args[0]
+        self.assertEqual(bell_item.get_label(), "Add Bell")
+
     def test_visible_revision_preview_ignores_repeated_same_file_request(self) -> None:
         """A second click on the current revision row must not reload its preview."""
 
@@ -393,6 +427,52 @@ class WindowActionTest(unittest.TestCase):
         self.assertTrue(SlateWindow._on_key_press(owner, None, event))
         owner._show_project_search.assert_called_once_with()
 
+    def test_diff_editor_owns_go_to_definition_before_hidden_preview(self) -> None:
+        """Ctrl+B resolves from the visible diff editor, never the preview below."""
+
+        surface = MagicMock()
+        surface.go_to_definition.return_value = True
+        owner = SimpleNamespace(
+            project_search=MagicMock(),
+            browser_manager=MagicMock(),
+            diff_editor_surface=surface,
+            preview=MagicMock(),
+            _show_error=MagicMock(),
+        )
+        owner.project_search.get_visible.return_value = False
+        owner.browser_manager.handle_key.return_value = False
+        event = SimpleNamespace(
+            keyval=Gdk.KEY_b,
+            state=Gdk.ModifierType.CONTROL_MASK,
+        )
+
+        self.assertTrue(SlateWindow._on_key_press(owner, None, event))
+
+        surface.go_to_definition.assert_called_once_with()
+        owner.preview.go_to_definition.assert_not_called()
+
+    def test_global_search_is_raised_above_later_diff_overlay(self) -> None:
+        """Opening project search restores it to the top GtkOverlay position."""
+
+        project = {"name": "repo", "path": "/tmp/repo"}
+        owner = SimpleNamespace(
+            search_available=True,
+            active_project_name="repo",
+            config=SimpleNamespace(find_project=MagicMock(return_value=project)),
+            project_search=MagicMock(),
+            content_overlay=MagicMock(),
+            _close_preview=MagicMock(),
+        )
+        owner.project_search.get_visible.return_value = False
+        owner._raise_project_search = SlateWindow._raise_project_search.__get__(owner)
+
+        SlateWindow._show_project_search(owner)
+
+        owner.content_overlay.reorder_overlay.assert_called_once_with(
+            owner.project_search, -1
+        )
+        owner.project_search.open.assert_called_once_with("repo", "/tmp/repo")
+
     def test_missing_ripgrep_blocks_only_project_search(self) -> None:
         """An unavailable optional search tool reports locally without startup impact."""
 
@@ -470,6 +550,7 @@ class WindowActionTest(unittest.TestCase):
             definition_search=object(),
             project_search=MagicMock(),
             _close_preview=MagicMock(),
+            _raise_project_search=MagicMock(),
             _show_error=MagicMock(),
         )
         completion = SimpleNamespace(error="")
@@ -486,10 +567,34 @@ class WindowActionTest(unittest.TestCase):
 
         self.assertIsNone(owner.definition_search)
         owner._close_preview.assert_called_once_with()
+        owner._raise_project_search.assert_called_once_with()
         owner.project_search.search_for.assert_called_once_with(
             "workspace", "/tmp/workspace", "go"
         )
         owner._show_error.assert_not_called()
+
+    def test_search_result_closes_or_saves_diff_before_changing_file(self) -> None:
+        """Search navigation cannot expose another editor below a stale surface."""
+
+        surface = MagicMock(path="current.py")
+        surface.finish_before_navigation.return_value = False
+        target_editor = MagicMock()
+        owner = SimpleNamespace(
+            diff_editor_surface=surface,
+            _edit_project_file_internal=MagicMock(return_value=target_editor),
+        )
+
+        result = SlateWindow._edit_search_result_internal(owner, "other.py", 12)
+
+        surface.finish_before_navigation.assert_called_once()
+        owner._edit_project_file_internal.assert_called_once_with("other.py", 12)
+        self.assertIs(result, target_editor)
+
+        owner._edit_project_file_internal.reset_mock()
+        surface.finish_before_navigation.return_value = True
+        result = SlateWindow._edit_search_result_internal(owner, "third.py", 20)
+        owner._edit_project_file_internal.assert_not_called()
+        self.assertIsNone(result)
 
     def test_sequence_move_rejects_invalid_and_unchanged_positions(self) -> None:
         """The shared reorder primitive returns only effective stable moves."""
@@ -693,7 +798,9 @@ class WindowActionTest(unittest.TestCase):
             project_expander_column=object(),
             right_notebook=MagicMock(),
             file_manager=MagicMock(),
+            _clear_manual_attention=MagicMock(),
             COL_KIND=SlateWindow.COL_KIND,
+            COL_PROJECT=SlateWindow.COL_PROJECT,
             COL_ITEM=SlateWindow.COL_ITEM,
         )
         event = SimpleNamespace(
@@ -707,6 +814,7 @@ class WindowActionTest(unittest.TestCase):
         self.assertTrue(SlateWindow._on_tree_button(owner, tree, event))
         owner.right_notebook.set_current_page.assert_called_once_with(1)
         owner.file_manager.reveal_path.assert_called_once_with("src/app.py")
+        owner._clear_manual_attention.assert_called_once()
 
     def test_ctrl_drag_uses_gtk_copy_protocol_for_a_real_reorder_target(self) -> None:
         """GTK's Ctrl action remains acceptable while SLATE shows the drop marker."""
@@ -1130,6 +1238,7 @@ class WindowActionTest(unittest.TestCase):
             ),
             terminals=terminals,
             attention_terminals=set(),
+            manual_attention=set(),
             editor_workspace=SimpleNamespace(editors={}),
             _ordered_project_items=SlateWindow._ordered_project_items.__get__(
                 SimpleNamespace(editor_workspace=SimpleNamespace(editors={}))
@@ -1148,6 +1257,49 @@ class WindowActionTest(unittest.TestCase):
             owner.project_store.get_value(spacer_iter, SlateWindow.COL_KIND),
             "spacer",
         )
+
+    def test_manual_bell_supports_browser_rows_and_is_consumed_on_activation(self) -> None:
+        """Non-terminal children can receive and consume the shared bell icon."""
+
+        store = Gtk.TreeStore(str, str, str, str, bool, str, bool)
+        parent = store.append(
+            None, ["repo", "project", "repo", "", False, "repo", False]
+        )
+        browser = store.append(
+            parent,
+            ["Docs", "browser", "repo", "browser-1", False, "Docs", False],
+        )
+        tree = Gtk.TreeView(model=store)
+        tree.expand_row(store.get_path(parent), False)
+        tree.get_selection().select_iter(browser)
+        owner = SimpleNamespace(
+            project_tree=tree,
+            project_store=store,
+            manual_attention=set(),
+            attention_terminals=set(),
+            terminals=SimpleNamespace(terminals={}),
+            editor_workspace=SimpleNamespace(editors={}),
+            COL_KIND=SlateWindow.COL_KIND,
+            COL_PROJECT=SlateWindow.COL_PROJECT,
+            COL_ITEM=SlateWindow.COL_ITEM,
+            COL_ATTENTION=SlateWindow.COL_ATTENTION,
+        )
+        owner._selected_sidebar_identity = (
+            SlateWindow._selected_sidebar_identity.__get__(owner)
+        )
+        owner._find_sidebar_iter = SlateWindow._find_sidebar_iter.__get__(owner)
+        owner._native_row_attention = SlateWindow._native_row_attention.__get__(owner)
+
+        SlateWindow._on_toggle_manual_attention(owner, Gtk.MenuItem())
+
+        identity = ("browser", "repo", "browser-1")
+        self.assertEqual(owner.manual_attention, {identity})
+        self.assertTrue(store.get_value(browser, SlateWindow.COL_ATTENTION))
+
+        SlateWindow._clear_manual_attention(owner, identity, browser)
+
+        self.assertEqual(owner.manual_attention, set())
+        self.assertFalse(store.get_value(browser, SlateWindow.COL_ATTENTION))
 
     def test_private_browser_rows_enter_persistent_item_order(self) -> None:
         """Anonymous browser identities retain their project position on restart."""
@@ -2204,6 +2356,7 @@ class WindowActionTest(unittest.TestCase):
         )
         owner = SimpleNamespace(
             attention_terminals=set(),
+            manual_attention=set(),
             project_store=store,
             terminals=SimpleNamespace(
                 terminals={"repo/main": first, "repo/test": second}

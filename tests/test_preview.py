@@ -383,17 +383,50 @@ class FilePreviewTest(unittest.TestCase):
             "/tmp/repo", "assets/logo.png", self.preview.request_serial
         )
 
-    def test_modified_markdown_uses_rendered_working_file(self) -> None:
-        """Revision Markdown rows bypass the textual diff for visual rendering."""
+    def test_modified_markdown_defaults_to_diff_and_offers_rendered_mode(self) -> None:
+        """Revision Markdown starts as a diff while exposing an explicit toggle."""
 
         status = FileStatus("README.md", "modified")
-        scm = SimpleNamespace(root="/tmp/repo", environment={})
-        with patch.object(self.preview, "_load_working_file") as load:
+        scm = SimpleNamespace(
+            root="/tmp/repo",
+            environment={},
+            preview_diff_argv=MagicMock(return_value=["hg", "diff", "README.md"]),
+        )
+        with patch("slate.preview.run_async", return_value=MagicMock()) as run:
             self.preview.show_status("/tmp/repo", scm, status)
 
+        scm.preview_diff_argv.assert_called_once_with("README.md")
+        run.assert_called_once()
+        self.assertTrue(self.preview.markdown_mode_button.get_visible())
+        self.assertEqual(self.preview.markdown_mode_button.get_label(), "Rendered")
+
+    def test_markdown_revision_toggle_switches_rendered_and_diff_modes(self) -> None:
+        """The revision header toggles without changing Files preview semantics."""
+
+        status = FileStatus("README.md", "modified")
+        scm = SimpleNamespace(
+            root="/tmp/repo",
+            environment={},
+            preview_diff_argv=MagicMock(return_value=["hg", "diff", "README.md"]),
+        )
+        self.preview.current_root = "/tmp/repo"
+        self.preview.current_path = "README.md"
+        self.preview.revision_scm = scm
+        self.preview.revision_status = status
+        self.preview.markdown_mode_button.set_label("Rendered")
+        with patch.object(self.preview, "_load_working_file") as load:
+            self.preview._on_markdown_mode_clicked(self.preview.markdown_mode_button)
         load.assert_called_once_with(
             "/tmp/repo", "README.md", self.preview.request_serial
         )
+        self.assertEqual(self.preview.markdown_mode_button.get_label(), "Diff")
+
+        with patch.object(self.preview, "_load_revision_diff") as load_diff:
+            self.preview._on_markdown_mode_clicked(self.preview.markdown_mode_button)
+        load_diff.assert_called_once_with(
+            scm, status, self.preview.request_serial
+        )
+        self.assertEqual(self.preview.markdown_mode_button.get_label(), "Rendered")
 
     def test_removed_markdown_renders_parent_revision(self) -> None:
         """A removed Markdown file renders the completed parent-revision content."""

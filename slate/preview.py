@@ -94,6 +94,8 @@ class FilePreview(Gtk.Box):
         self.image_fit_size: tuple[int, int] | None = None
         self.diff_edit_lines: list[int | None] = []
         self.markdown_view: object | None = None
+        self.revision_scm: SCM | None = None
+        self.revision_status: FileStatus | None = None
         self.get_style_context().add_class("file-preview")
         self.set_no_show_all(True)
         self.set_can_focus(True)
@@ -114,6 +116,14 @@ class FilePreview(Gtk.Box):
         close_button.get_accessible().set_name("Close preview")
         close_button.connect("clicked", self._on_close_clicked)
         header.pack_start(self.title, True, True, 0)
+        self.markdown_mode_button = Gtk.Button(label="Rendered")
+        self.markdown_mode_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.markdown_mode_button.set_tooltip_text(
+            "Switch between the Markdown document and its revision diff"
+        )
+        self.markdown_mode_button.set_no_show_all(True)
+        self.markdown_mode_button.connect("clicked", self._on_markdown_mode_clicked)
+        header.pack_end(self.markdown_mode_button, False, False, 0)
         header.pack_end(close_button, False, False, 0)
         self.pack_start(header, False, False, 0)
 
@@ -178,6 +188,8 @@ class FilePreview(Gtk.Box):
         request_serial = self.request_serial
         self.current_path = status.path
         self.current_root = str(Path(root).resolve())
+        self.revision_scm = scm
+        self.revision_status = status
         title = (
             f"{status.source_path} → {status.path}"
             if status.state == "moved" and status.source_path
@@ -185,28 +197,24 @@ class FilePreview(Gtk.Box):
         )
         self.title.set_text(title)
         self.title.set_tooltip_text(title)
+        markdown_diff = (
+            Path(status.path).suffix.casefold() in {".md", ".markdown"}
+            and status.state not in {"untracked", "added", "missing", "removed"}
+        )
+        self.markdown_mode_button.set_visible(markdown_diff)
+        self.markdown_mode_button.set_label("Rendered")
         self._set_plain_text("Loading preview…")
         if status.state == "missing":
             self._set_plain_text("The file is missing from the working copy.")
             return
-        if status.state != "removed" and (
-            self._is_image_path(status.path)
-            or Path(status.path).suffix.casefold() in {".md", ".markdown"}
-        ):
-            # 2026-09-27: immagini e Markdown sono formati visuali; Revisioni
-            # mostra il file corrente con il renderer dedicato, mentre il diff
-            # resta raggiungibile tramite le azioni esplicite della revisione.
+        if status.state != "removed" and self._is_image_path(status.path):
             self._load_working_file(root, status.path, request_serial)
             return
-        if status.state == "moved" and status.source_path:
-            # 2026-08-17: rename-aware output is required because a normal patch
-            # can render a move as unrelated add/remove blocks.
-            self.command = run_async(
-                scm.preview_move_diff_argv(status.source_path, status.path),
-                partial(self._on_diff_loaded, request_serial, status.path),
-                cwd=scm.root,
-                env=scm.environment,
-            )
+        if markdown_diff:
+            # 2026-10-01: Revisioni serve prima di tutto a controllare le
+            # modifiche; il documento Markdown renderizzato resta una modalità
+            # esplicita, mentre Files continua a mostrarlo direttamente.
+            self._load_revision_diff(scm, status, request_serial)
             return
         if status.state in {"untracked", "added"}:
             self._load_working_file(root, status.path, request_serial)
@@ -219,12 +227,7 @@ class FilePreview(Gtk.Box):
                 env=scm.environment,
             )
             return
-        self.command = run_async(
-            scm.preview_diff_argv(status.path),
-            partial(self._on_diff_loaded, request_serial, status.path),
-            cwd=scm.root,
-            env=scm.environment,
-        )
+        self._load_revision_diff(scm, status, request_serial)
 
     def show_file(self, root: str, relative_path: str) -> None:
         """Preview a normal project file independently from source-control state."""
@@ -233,12 +236,51 @@ class FilePreview(Gtk.Box):
         request_serial = self.request_serial
         self.current_path = relative_path
         self.current_root = str(Path(root).resolve())
+        self.revision_scm = None
+        self.revision_status = None
+        self.markdown_mode_button.hide()
         self.title.set_text(relative_path)
         self.title.set_tooltip_text(relative_path)
         self._set_plain_text("Loading preview…")
         # 2026-08-16: la vista File usa lo stesso lettore sicuro e gli stessi
         # limiti della preview SCM, senza creare un secondo renderer di sorgenti.
         self._load_working_file(root, relative_path, request_serial)
+
+    def _load_revision_diff(
+        self, scm: SCM, status: FileStatus, request_serial: int
+    ) -> None:
+        """Start the normal or rename-aware diff for one revision row."""
+
+        argv = (
+            scm.preview_move_diff_argv(status.source_path, status.path)
+            if status.state == "moved" and status.source_path
+            else scm.preview_diff_argv(status.path)
+        )
+        self.command = run_async(
+            argv,
+            partial(self._on_diff_loaded, request_serial, status.path),
+            cwd=scm.root,
+            env=scm.environment,
+        )
+
+    def _on_markdown_mode_clicked(self, _button: Gtk.Button) -> None:
+        """Toggle a tracked Markdown revision between diff and rendered document."""
+
+        scm = self.revision_scm
+        status = self.revision_status
+        root = self.current_root
+        if scm is None or status is None or root is None:
+            return
+        show_rendered = self.markdown_mode_button.get_label() == "Rendered"
+        self.cancel()
+        request_serial = self.request_serial
+        self._set_plain_text("Loading preview…")
+        if show_rendered:
+            self.markdown_mode_button.set_label("Diff")
+            self._load_working_file(root, status.path, request_serial)
+        else:
+            self.markdown_mode_button.set_label("Rendered")
+            self._load_revision_diff(scm, status, request_serial)
 
     def cancel(self) -> None:
         """Cancel asynchronous work belonging to a superseded or closed preview."""

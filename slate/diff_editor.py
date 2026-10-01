@@ -398,6 +398,8 @@ class DiffEditorSurface(Gtk.Box):
             if Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_s:
                 self.editor.save()
                 return True
+            if Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b:
+                return self.go_to_definition()
             if Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_f:
                 search = self.search_bars.get(widget)
                 if search is not None:
@@ -407,6 +409,11 @@ class DiffEditorSurface(Gtk.Box):
                     self.editor.show_search()
                     return True
         return False
+
+    def go_to_definition(self) -> bool:
+        """Resolve the symbol from the editor visibly owned by this surface."""
+
+        return self.editor.go_to_definition()
 
     def _on_previous_clicked(self, _button: Gtk.Button) -> None:
         """Navigate to the previous hunk."""
