@@ -43,6 +43,13 @@ class ProjectFileManagerTest(unittest.TestCase):
         (self.root / "broken-link").symlink_to("missing.txt")
         (self.outside / "external.txt").write_text("external\n", encoding="utf-8")
         (self.root / "external-link").symlink_to(self.outside / "external.txt")
+        (self.outside / "external-directory").mkdir()
+        (self.outside / "external-directory" / "child.txt").write_text(
+            "child\n", encoding="utf-8"
+        )
+        (self.root / "external-directory-link").symlink_to(
+            self.outside / "external-directory", target_is_directory=True
+        )
         (self.root / ".hidden").write_text("hidden\n", encoding="utf-8")
         (self.root / "ignored.txt").write_text("ignored\n", encoding="utf-8")
         (self.root / "node_modules").mkdir()
@@ -187,6 +194,7 @@ class ProjectFileManagerTest(unittest.TestCase):
             self._root_names(),
             [
                 "directory-link",
+                "external-directory-link",
                 "src",
                 "broken-link",
                 "external-link",
@@ -207,7 +215,7 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.assertTrue(self.preferences[-1]["show_excluded"])
 
     def test_only_safe_internal_directory_symlinks_are_expandable(self) -> None:
-        """Internal directory links expand while unsafe links remain inert leaves."""
+        """Internal and read-only external directory links are expandable."""
 
         rows = {name: tree_iter for name, tree_iter in self._root_rows()}
         for name in ("file-link", "directory-link", "broken-link", "external-link"):
@@ -243,6 +251,29 @@ class ProjectFileManagerTest(unittest.TestCase):
             self.manager.store.get_value(child, self.manager.COL_PATH),
             "directory-link/app.py",
         )
+        external_directory = rows["external-directory-link"]
+        self.assertTrue(
+            self.manager.store.get_value(
+                external_directory, self.manager.COL_DIRECTORY
+            )
+        )
+        self.assertTrue(
+            self.manager.store.get_value(external_directory, self.manager.COL_BLOCKED)
+        )
+        self.manager.tree.expand_row(
+            self.manager.store.get_path(external_directory), False
+        )
+        self._wait_for_path("external-directory-link")
+        external_child = self.manager.store.iter_children(external_directory)
+        self.assertEqual(
+            self.manager.store.get_value(external_child, self.manager.COL_PATH),
+            "external-directory-link/child.txt",
+        )
+        self.assertTrue(
+            self.manager.store.get_value(external_child, self.manager.COL_BLOCKED)
+        )
+        self.manager.tree.set_cursor(self.manager.store.get_path(external_child))
+        self.assertEqual(self.previewed, "external-directory-link/child.txt")
         for name in ("file-link", "broken-link", "external-link"):
             tree_iter = rows[name]
             self.assertFalse(
