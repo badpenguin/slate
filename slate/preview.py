@@ -7,6 +7,7 @@ import html
 from pathlib import Path
 import re
 from typing import Callable
+from urllib.parse import unquote, urlsplit
 
 import gi
 
@@ -87,6 +88,7 @@ class FilePreview(Gtk.Box):
         self.on_action = on_action
         self.current_path: str | None = None
         self.current_root: str | None = None
+        self.current_file_panel_external = False
         self.command: AsyncCommand | None = None
         self.file_cancellable: Gio.Cancellable | None = None
         self.request_serial = 0
@@ -188,6 +190,7 @@ class FilePreview(Gtk.Box):
         request_serial = self.request_serial
         self.current_path = status.path
         self.current_root = str(Path(root).resolve())
+        self.current_file_panel_external = False
         self.revision_scm = scm
         self.revision_status = status
         title = (
@@ -236,6 +239,7 @@ class FilePreview(Gtk.Box):
         request_serial = self.request_serial
         self.current_path = relative_path
         self.current_root = str(Path(root).resolve())
+        self.current_file_panel_external = True
         self.revision_scm = None
         self.revision_status = None
         self.markdown_mode_button.hide()
@@ -303,15 +307,23 @@ class FilePreview(Gtk.Box):
     def _load_working_file(
         self, root: str, relative_path: str, request_serial: int
     ) -> None:
-        """Read one safe current working-copy path asynchronously through Gio."""
+        """Read one current file, allowing external links only from Files."""
 
         root_path = Path(root).resolve()
+        if (
+            not relative_path
+            or Path(relative_path).is_absolute()
+            or ".." in Path(relative_path).parts
+        ):
+            self._set_plain_text("Preview rejected: invalid project path.")
+            return
         candidate = (root_path / relative_path).resolve()
         try:
             candidate.relative_to(root_path)
         except ValueError:
-            self._set_plain_text("Preview rejected: the path leaves the project.")
-            return
+            if not self.current_file_panel_external:
+                self._set_plain_text("Preview rejected: the path leaves the project.")
+                return
         try:
             size = candidate.stat().st_size
         except OSError as error:
@@ -401,11 +413,12 @@ class FilePreview(Gtk.Box):
         self.image_fit_size = None
         self.image.clear()
         rendered = github_flavored_markdown_to_html(text)
-        # 2026-09-27: la prima versione non carica alcuna risorsa; rimuovere gli
-        # img generati da cmark impedisce richieste remote e letture file://.
+        # 2026-10-03: le immagini relative sono utili nella documentazione, ma
+        # vengono risolte e convalidate singolarmente per non concedere alla
+        # WebView accesso a URL remoti o file esterni alla root del progetto.
         rendered = re.sub(
-            r"<img\b[^>]*>",
-            '<span class="blocked-image">[Image omitted]</span>',
+            r'<img\b(?P<prefix>[^>]*?\bsrc=")(?P<src>[^"]*)(?P<suffix>"[^>]*)>',
+            partial(self._sanitize_markdown_image, path),
             rendered,
             flags=re.IGNORECASE,
         )
@@ -443,6 +456,7 @@ class FilePreview(Gtk.Box):
             ".task-list{padding-left:0}.task-list-item{list-style:none;position:relative;"
             "padding-left:1.45em}.task-list-item input{position:absolute;left:0;top:.4em;"
             "margin:0;accent-color:#1f883d}"
+            "img{display:block;max-width:100%;height:auto}"
             "a{color:#0969da}.blocked-image{color:#6e7781;font-style:italic}"
             "</style><title>"
             + html.escape(path)
@@ -452,7 +466,40 @@ class FilePreview(Gtk.Box):
         )
         self._ensure_markdown_view()
         self.content_stack.set_visible_child_name("markdown")
-        self.markdown_view.load_html(document, "about:blank")
+        base_uri = "about:blank"
+        if self.current_root is not None:
+            base_uri = Path(self.current_root).resolve().as_uri() + "/"
+        self.markdown_view.load_html(document, base_uri)
+
+    def _sanitize_markdown_image(self, path: str, match: re.Match[str]) -> str:
+        """Allow one local Markdown image only when it remains inside the project."""
+
+        blocked = '<span class="blocked-image">[Image omitted]</span>'
+        if self.current_root is None:
+            return blocked
+        source = html.unescape(match.group("src"))
+        parsed = urlsplit(source)
+        if parsed.scheme or parsed.netloc or not parsed.path:
+            return blocked
+        if parsed.path.startswith("/") or "\0" in parsed.path:
+            return blocked
+        root = Path(self.current_root).resolve()
+        image_path = (root / Path(path).parent / unquote(parsed.path)).resolve()
+        try:
+            image_path.relative_to(root)
+        except ValueError:
+            if not self.current_file_panel_external:
+                return blocked
+        if not image_path.is_file():
+            return blocked
+        source_uri = html.escape(image_path.as_uri(), quote=True)
+        return (
+            "<img"
+            + match.group("prefix")
+            + source_uri
+            + match.group("suffix")
+            + ">"
+        )
 
     def _on_markdown_policy(
         self, _view: object, decision: object, decision_type: object
@@ -464,6 +511,17 @@ class FilePreview(Gtk.Box):
         request = decision.get_request()
         uri = request.get_uri() if request is not None else ""
         if uri == "about:blank":
+            return False
+        navigation_action = decision.get_navigation_action()
+        navigation_type = navigation_action.get_navigation_type()
+        # 2026-10-03: load_html usa il base URI file come URI del documento;
+        # consentire soltanto quella navigazione tecnica di tipo OTHER evita
+        # la pagina bianca senza rendere visitabili i link contenuti nel Markdown.
+        if (
+            navigation_type == WebKit2.NavigationType.OTHER
+            and self.current_root is not None
+            and uri == Path(self.current_root).resolve().as_uri() + "/"
+        ):
             return False
         decision.ignore()
         return True
