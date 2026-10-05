@@ -15,6 +15,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
+from slate import preview as preview_module
 from slate.preview import FilePreview
 from slate.scm.base import FileStatus
 
@@ -256,7 +257,7 @@ class FilePreviewTest(unittest.TestCase):
         self.assertTrue(buffer.get_highlight_syntax())
 
     def test_markdown_uses_gfm_html_without_remote_images(self) -> None:
-        """Markdown rendering keeps GFM tables while omitting every image source."""
+        """Markdown rendering keeps GFM tables while omitting remote images."""
 
         markdown_page = Gtk.Box()
         markdown_view = MagicMock()
@@ -294,6 +295,85 @@ class FilePreviewTest(unittest.TestCase):
             self.preview.content_stack.get_visible_child_name(), "markdown"
         )
 
+    def test_markdown_loads_only_local_images_inside_project(self) -> None:
+        """Markdown embeds relative images but rejects symlinks outside the root."""
+
+        markdown_page = Gtk.Box()
+        markdown_view = MagicMock()
+
+        def ensure_markdown_view() -> None:
+            """Install an inert stack child instead of starting a WebKit process."""
+
+            self.preview.content_stack.add_named(markdown_page, "markdown")
+            markdown_page.show()
+            self.preview.markdown_view = markdown_view
+
+        with tempfile.TemporaryDirectory() as project_directory:
+            project_root = Path(project_directory)
+            docs = project_root / "docs"
+            docs.mkdir()
+            local_image = docs / "diagram image.png"
+            local_image.write_bytes(b"image")
+            with tempfile.TemporaryDirectory() as outside_directory:
+                outside_image = Path(outside_directory) / "private.png"
+                outside_image.write_bytes(b"private")
+                (docs / "external.png").symlink_to(outside_image)
+                self.preview.current_root = project_directory
+                with patch.object(
+                    self.preview,
+                    "_ensure_markdown_view",
+                    side_effect=ensure_markdown_view,
+                ):
+                    self.preview._set_markdown_text(
+                        "![local](diagram%20image.png)\n\n"
+                        "![external](external.png)\n",
+                        "docs/README.md",
+                    )
+
+        document, base_uri = markdown_view.load_html.call_args.args
+        self.assertIn(local_image.as_uri(), document)
+        self.assertNotIn(outside_image.as_uri(), document)
+        self.assertEqual(document.count("[Image omitted]"), 1)
+        self.assertIn("img{display:block;max-width:100%;height:auto}", document)
+        self.assertEqual(base_uri, project_root.as_uri() + "/")
+
+    def test_markdown_policy_allows_only_generated_file_document(self) -> None:
+        """The file base URI loads while an ordinary Markdown link stays blocked."""
+
+        with tempfile.TemporaryDirectory() as project_directory:
+            self.preview.current_root = project_directory
+            base_uri = Path(project_directory).resolve().as_uri() + "/"
+            request = MagicMock()
+            request.get_uri.return_value = base_uri
+            navigation_action = MagicMock()
+            navigation_action.get_navigation_type.return_value = (
+                preview_module.WebKit2.NavigationType.OTHER
+            )
+            decision = MagicMock()
+            decision.get_request.return_value = request
+            decision.get_navigation_action.return_value = navigation_action
+            handled = self.preview._on_markdown_policy(
+                MagicMock(),
+                decision,
+                preview_module.WebKit2.PolicyDecisionType.NAVIGATION_ACTION,
+            )
+
+            self.assertFalse(handled)
+            decision.ignore.assert_not_called()
+
+            request.get_uri.return_value = base_uri + "linked-file.md"
+            navigation_action.get_navigation_type.return_value = (
+                preview_module.WebKit2.NavigationType.LINK_CLICKED
+            )
+            handled = self.preview._on_markdown_policy(
+                MagicMock(),
+                decision,
+                preview_module.WebKit2.PolicyDecisionType.NAVIGATION_ACTION,
+            )
+
+        self.assertTrue(handled)
+        decision.ignore.assert_called_once_with()
+
     def test_render_modes_keep_one_view_buffer(self) -> None:
         """Preview refreshes never replace the buffer owned by the text layout."""
 
@@ -321,6 +401,29 @@ class FilePreviewTest(unittest.TestCase):
             text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
             self.assertEqual(text, "value = 42\n")
             self.assertIsNotNone(buffer.get_language())
+
+    def test_files_preview_reads_through_external_directory_symlink(self) -> None:
+        """Files alone may preview a relative path through an external link."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as outside_directory:
+                outside = Path(outside_directory)
+                (outside / "linked.txt").write_text("linked\n", encoding="utf-8")
+                (Path(directory) / "external").symlink_to(
+                    outside, target_is_directory=True
+                )
+                self.preview.show_file(directory, "external/linked.txt")
+                deadline = time.monotonic() + 2
+                context = GLib.MainContext.default()
+                while (
+                    self.preview.file_cancellable is not None
+                    and time.monotonic() < deadline
+                ):
+                    context.iteration(True)
+
+        buffer = self.preview.view.get_buffer()
+        text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        self.assertEqual(text, "linked\n")
 
     def test_project_image_loads_inline_without_enlargement(self) -> None:
         """A raster file uses the image surface and retains its smaller dimensions."""
