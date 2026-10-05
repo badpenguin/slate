@@ -814,16 +814,14 @@ class ProjectFileManager(Gtk.Box):
     def _classify_entry(
         self, relative: str, info: Gio.FileInfo
     ) -> tuple[bool, bool, bool]:
-        """Classify links without allowing broken, external or cyclic traversal."""
+        """Classify entries and mark external-link branches as read-only."""
 
         is_symlink = info.get_is_symlink()
-        if not is_symlink:
-            return info.get_file_type() == Gio.FileType.DIRECTORY, False, False
         if self.root is None:
-            return False, True, True
+            return False, is_symlink, True
         candidate = os.path.join(self.root, relative)
         if not os.path.exists(candidate):
-            return False, True, True
+            return False, is_symlink, is_symlink
         target = os.path.realpath(candidate)
         parent_target = os.path.realpath(os.path.dirname(candidate))
         try:
@@ -834,11 +832,15 @@ class ProjectFileManager(Gtk.Box):
         except ValueError:
             inside_root = False
             target_contains_parent = True
-        # 2026-08-17: only links to safe descendants can become expandable.
-        # External, broken and ancestor links remain visible but inert, avoiding
-        # both workspace escape and recursive cycles during "Espandi".
+        if not is_symlink and inside_root:
+            return info.get_file_type() == Gio.FileType.DIRECTORY, False, False
+        # 2026-10-03: Files può esplorare un symlink esterno su richiesta
+        # esplicita, ma l'intero ramo resta marcato come bloccato affinché menu,
+        # shortcut e mutazioni non operino al di fuori del progetto. I link che
+        # risalgono verso un antenato restano non espandibili per evitare cicli.
+        is_directory = os.path.isdir(candidate) and not target_contains_parent
         blocked = not inside_root or target_contains_parent
-        return os.path.isdir(candidate) and not blocked, True, blocked
+        return is_directory, is_symlink, blocked
 
     def _entry_visible(self, parent: str, info: Gio.FileInfo) -> bool:
         """Apply metadata, hidden and excluded visibility rules to one entry."""
@@ -995,10 +997,16 @@ class ProjectFileManager(Gtk.Box):
         self.on_preview(relative)
 
     def _focused_file(self) -> str | None:
-        """Return the focused non-placeholder file path."""
+        """Return the focused file, including read-only external-link children."""
 
         entry = self._focused_entry()
-        if entry is None or entry[1] or entry[2]:
+        if entry is None or entry[1]:
+            return None
+        if (
+            entry[2]
+            and self.root is not None
+            and os.path.islink(os.path.join(self.root, entry[0]))
+        ):
             return None
         return entry[0]
 
