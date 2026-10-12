@@ -2195,6 +2195,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Show terminal activity or unsaved editor state beside the row."""
 
         active = model.get_value(tree_iter, self.COL_ACTIVITY)
+        # 2026-10-12: i renderer finali invisibili non devono riservare celle;
+        # la campanella o il pallino presente arriva fino al bordo destro.
+        renderer.set_property("visible", active)
         renderer.set_property("icon-name", "media-record" if active else None)
         self._set_project_row_background(
             renderer, model.get_value(tree_iter, self.COL_KIND) == "project"
@@ -2211,6 +2214,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Render the colored bell for terminals or editors needing attention."""
 
         attention = model.get_value(tree_iter, self.COL_ATTENTION)
+        renderer.set_property("visible", attention)
         renderer.set_property("icon-name", None)
         renderer.set_property("pixbuf", self.attention_icon if attention else None)
         self._set_project_row_background(
@@ -2266,6 +2270,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         project_row = model.get_value(tree_iter, self.COL_KIND) == "project"
         project_name = model.get_value(tree_iter, self.COL_PROJECT)
         pinned = project_name in self.config.data.get("pinned_projects", [])
+        renderer.set_property("visible", project_row and pinned)
         renderer.set_property(
             "icon-name", "view-pin-symbolic" if project_row and pinned else None
         )
