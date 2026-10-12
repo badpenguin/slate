@@ -15,6 +15,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, GtkSource, Pango  # noqa: E402
 
+from .processes import AsyncCommand, CommandResult, run_async
 from .search import source_symbol_at_cursor
 
 
@@ -74,6 +75,9 @@ class EditorDocument(Gtk.Box):
         self.load_cancellable: Gio.Cancellable | None = None
         self.save_cancellable: Gio.Cancellable | None = None
         self.save_callbacks: list[Callable[[bool], None]] = []
+        self.lint_command: AsyncCommand | None = None
+        self.lint_serial = 0
+        self.lint_dialog: Gtk.MessageDialog | None = None
         self.mute_monitor_until = 0
         self.initial_load_id: int | None = None
         self.pending_line: int | None = None
@@ -111,10 +115,13 @@ class EditorDocument(Gtk.Box):
         root = Path(self.root)
         candidate = root / self.relative_path
         try:
-            candidate.resolve().relative_to(root)
-        except (OSError, ValueError):
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
             return None
-        return str(candidate)
+        # 2026-10-12: Gio.replace_contents_async sostituirebbe il link stesso;
+        # usare il target fisico mantiene il link intatto quando si salva.
+        return str(resolved)
 
     def _start_initial_load(self) -> bool:
         """Begin first loading after the constructed editor belongs to its stack."""
@@ -210,6 +217,7 @@ class EditorDocument(Gtk.Box):
         self.view.set_tab_width(4)
         self.view.set_insert_spaces_instead_of_tabs(False)
         self.view.set_wrap_mode(Gtk.WrapMode.NONE)
+        self.view.connect("button-press-event", self._on_view_button_press)
         self.view.connect("populate-popup", self._on_populate_popup)
         self.font_provider = Gtk.CssProvider()
         self.view.get_style_context().add_provider(
@@ -220,6 +228,43 @@ class EditorDocument(Gtk.Box):
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.view)
         self.pack_start(scroller, True, True, 0)
+
+    def _on_view_button_press(
+        self, view: GtkSource.View, event: Gdk.EventButton
+    ) -> bool:
+        """Select one identifier on a text-area double click."""
+
+        if event.button != 1 or event.type != Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            return False
+        window_type = view.get_window_type(event.window)
+        if window_type != Gtk.TextWindowType.TEXT:
+            return False
+        x, y = view.window_to_buffer_coords(window_type, int(event.x), int(event.y))
+        _inside_text, text_iter = view.get_iter_at_location(x, y)
+        return self._select_identifier_at(text_iter)
+
+    def _select_identifier_at(self, text_iter: Gtk.TextIter) -> bool:
+        """Select a source identifier, including underscores and PHP sigils."""
+
+        character = text_iter.get_char()
+        if not (character.isalnum() or character in {"_", "$"}):
+            return False
+        # 2026-10-12: GTK può interpretare il doppio clic come selezione di
+        # riga; i confini dell'identificatore sono espliciti solo nell'area testo.
+        start = text_iter.copy()
+        while start.backward_char():
+            character = start.get_char()
+            if not (character.isalnum() or character in {"_", "$"}):
+                start.forward_char()
+                break
+        end = text_iter.copy()
+        while not end.is_end():
+            character = end.get_char()
+            if not (character.isalnum() or character in {"_", "$"}):
+                break
+            end.forward_char()
+        self.buffer.select_range(start, end)
+        return True
 
     def _build_search_bar(self) -> None:
         """Create the built-in GtkSource search controls below the editor."""
@@ -426,6 +471,13 @@ class EditorDocument(Gtk.Box):
     def relocate(self, relative_path: str) -> None:
         """Retarget this buffer after its file or an ancestor was renamed."""
 
+        self.lint_serial += 1
+        if self.lint_command is not None:
+            self.lint_command.cancel()
+            self.lint_command = None
+        if self.lint_dialog is not None:
+            self.lint_dialog.destroy()
+            self.lint_dialog = None
         if self.monitor_source_id is not None:
             GLib.source_remove(self.monitor_source_id)
             self.monitor_source_id = None
@@ -690,7 +742,68 @@ class EditorDocument(Gtk.Box):
         self._ensure_monitor()
         self._hide_notice()
         self.on_state(self)
+        self._start_php_lint()
         self._finish_save(True)
+
+    def _start_php_lint(self) -> None:
+        """Check a newly saved PHP file without blocking the GTK main loop."""
+
+        if self.path is None or Path(self.path).suffix.lower() != ".php":
+            return
+        # 2026-10-12: il lint parte solo dopo una scrittura riuscita; annullare
+        # quello precedente evita popup relativi a contenuti ormai superati.
+        self.lint_serial += 1
+        if self.lint_command is not None:
+            self.lint_command.cancel()
+        if self.lint_dialog is not None:
+            self.lint_dialog.destroy()
+            self.lint_dialog = None
+        self.lint_command = run_async(
+            ["php", "-l", self.path],
+            partial(self._on_php_lint_finished, self.lint_serial),
+            cwd=self.root,
+        )
+
+    def _on_php_lint_finished(self, serial: int, result: CommandResult) -> None:
+        """Show one syntax-error popup for the latest saved PHP version."""
+
+        if serial != self.lint_serial:
+            return
+        self.lint_command = None
+        if result.ok:
+            return
+        detail = "\n".join(
+            part.strip() for part in (result.stderr, result.stdout) if part.strip()
+        )
+        if not detail:
+            detail = str(result.error) if result.error else f"Exit code {result.returncode}"
+        top_level = self.get_toplevel()
+        parent = top_level if isinstance(top_level, Gtk.Window) else None
+        dialog = Gtk.MessageDialog(
+            transient_for=parent,
+            modal=False,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text=f"⛔ PHP syntax error: {self.relative_path}",
+        )
+        # 2026-10-12: l'icona d'errore del tema rende riconoscibile il problema
+        # anche se il carattere di divieto non è reso a colori dal sistema.
+        dialog.set_image(
+            Gtk.Image.new_from_icon_name("dialog-error", Gtk.IconSize.DIALOG)
+        )
+        dialog.format_secondary_text(detail)
+        dialog.connect("response", self._on_php_lint_dialog_response)
+        self.lint_dialog = dialog
+        dialog.show_all()
+
+    def _on_php_lint_dialog_response(
+        self, dialog: Gtk.MessageDialog, _response: Gtk.ResponseType
+    ) -> None:
+        """Dismiss a completed PHP syntax-check popup."""
+
+        if self.lint_dialog is dialog:
+            self.lint_dialog = None
+        dialog.destroy()
 
     def _finish_save(self, success: bool) -> None:
         """Resolve and clear every callback waiting on the current save."""
@@ -868,6 +981,13 @@ class EditorDocument(Gtk.Box):
     def close(self) -> None:
         """Cancel asynchronous operations and release the retained file monitor."""
 
+        self.lint_serial += 1
+        if self.lint_command is not None:
+            self.lint_command.cancel()
+            self.lint_command = None
+        if self.lint_dialog is not None:
+            self.lint_dialog.destroy()
+            self.lint_dialog = None
         if self.initial_load_id is not None:
             GLib.source_remove(self.initial_load_id)
             self.initial_load_id = None
@@ -987,9 +1107,11 @@ class EditorWorkspace(Gtk.Stack):
     def open_file(
         self, project_name: str, root: str, relative_path: str
     ) -> EditorDocument:
-        """Create or activate one unique project-relative editor child."""
+        """Create or activate the editor for one physical project file."""
 
-        key = (project_name, relative_path)
+        key = self.find_open_reference(project_name, root, relative_path)
+        if key is None:
+            key = (project_name, relative_path)
         entry = self.editors.get(key)
         created = entry is None
         if entry is None:
@@ -1005,6 +1127,31 @@ class EditorWorkspace(Gtk.Stack):
         if created:
             self.on_collection_changed()
         return editor
+
+    def find_open_reference(
+        self, project_name: str, root: str, relative_path: str
+    ) -> EditorRef | None:
+        """Find an existing tab reached through a file or directory symlink."""
+
+        project_root = Path(root).resolve()
+        try:
+            target = (project_root / relative_path).resolve(strict=True)
+            target.relative_to(project_root)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        # 2026-10-12: due alias interni dello stesso file condividono il buffer;
+        # mantenere il riferimento originale evita bozze e salvataggi divergenti.
+        for reference, entry in self.editors.items():
+            if entry.project_name != project_name or Path(entry.root).resolve() != project_root:
+                continue
+            try:
+                existing = (project_root / entry.relative_path).resolve(strict=True)
+                existing.relative_to(project_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if existing == target:
+                return reference
+        return None
 
     def _materialize(self, entry: EditorEntry) -> EditorDocument:
         """Create and register an editor widget only on its first activation."""
@@ -1322,6 +1469,7 @@ class EditorWorkspace(Gtk.Stack):
         """Register configured editor rows without touching their project files."""
 
         roots = {project["name"]: project["path"] for project in projects}
+        aliases: dict[EditorRef, EditorRef] = {}
         self.restoring = True
         try:
             for item in state.get("tabs", []):
@@ -1330,12 +1478,21 @@ class EditorWorkspace(Gtk.Stack):
                 root = roots.get(project_name)
                 if root:
                     reference = (project_name, relative_path)
+                    existing = self.find_open_reference(
+                        project_name, root, relative_path
+                    )
+                    if existing is not None:
+                        # 2026-10-12: le configurazioni precedenti possono avere
+                        # due schede per alias dello stesso file; ripristinarne una.
+                        aliases[reference] = existing
+                        continue
                     self.editors[reference] = EditorEntry(
                         project_name, root, relative_path
                     )
             active = state.get("active_tab")
             if isinstance(active, dict):
                 reference = (active.get("project", ""), active.get("path", ""))
+                reference = aliases.get(reference, reference)
                 self.active_ref = reference if reference in self.editors else None
             self.terminal_page.show()
             self.set_visible_child(self.terminal_page)
