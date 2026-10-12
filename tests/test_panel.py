@@ -300,14 +300,14 @@ class SCMPanelTest(unittest.TestCase):
                 self.panel.group_iters[(repository, "missing")],
                 self.panel.COL_TEXT,
             ),
-            "Missing (1)",
+            "Missing:  1",
         )
         self.assertEqual(
             self.panel.store.get_value(
                 self.panel.group_iters[(repository, "removed")],
                 self.panel.COL_TEXT,
             ),
-            "Removed (1)",
+            "Removed:  1",
         )
 
     def test_revision_font_size_updates_renderer(self) -> None:
@@ -1045,6 +1045,28 @@ class SCMPanelTest(unittest.TestCase):
         timeout_callback = timeout_add.call_args.args[1]
         self.assertEqual(timeout_callback(), GLib.SOURCE_REMOVE)
         self.assertEqual(self.previewed, status)
+
+    def test_e_cancels_pending_click_preview_before_opening_editor(self) -> None:
+        """A delayed click cannot place the preview back over an opened editor."""
+
+        status = FileStatus("tracked.py", "modified")
+        self.panel.set_supported(True)
+        self.panel.update_status([status], "default")
+        source_path = self.panel.store.get_path(self.panel.iter_by_path[status.path])
+        filtered_path = self.panel.filtered_store.convert_child_path_to_path(source_path)
+        self.panel.tree.set_cursor(filtered_path)
+        with mock.patch("slate.panel.GLib.timeout_add", return_value=73) as timeout_add:
+            self.panel._schedule_preview(status)
+        timeout_callback = timeout_add.call_args.args[1]
+        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+        with mock.patch("slate.panel.GLib.source_remove") as source_remove:
+            self.assertTrue(self.panel._on_tree_key_press(self.panel.tree, event))
+        source_remove.assert_called_once_with(73)
+        self.assertIsNone(self.panel.preview_timeout_id)
+        self.assertEqual(self.edited_internal, status)
+        self.previewed = None
+        timeout_callback()
+        self.assertIsNone(self.previewed)
 
     def test_double_click_cancels_preview_before_opening_diff_editor(self) -> None:
         """Activating a tracked row opens assisted editing without preview."""
