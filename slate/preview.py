@@ -898,6 +898,11 @@ class FilePreview(Gtk.Box):
             self.on_action("delete")
 
     def _on_key_press(self, _view: Gtk.TextView, event: Gdk.EventKey) -> bool:
+        """Dispatch key events delivered directly to the preview widget."""
+
+        return self.handle_key(event)
+
+    def handle_key(self, event: Gdk.EventKey) -> bool:
         """Handle preview copy/search and forward unmodified file actions."""
 
         if (
@@ -922,12 +927,25 @@ class FilePreview(Gtk.Box):
             return False
         if modifiers != Gdk.ModifierType(0):
             return False
+        if event.keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete):
+            if self.on_action is None or self.current_path is None:
+                return False
+            self.on_action("delete")
+            return True
+        if event.keyval == Gdk.KEY_F5:
+            if self.on_action is None or self.current_path is None:
+                return False
+            self.on_action("refresh")
+            return True
         keyval = Gdk.keyval_to_lower(event.keyval)
         actions = {
             Gdk.KEY_v: "view",
             Gdk.KEY_e: "edit-internal",
             Gdk.KEY_m: "edit-external",
             Gdk.KEY_d: "meld",
+            Gdk.KEY_r: "rename",
+            Gdk.KEY_a: "add",
+            Gdk.KEY_space: "toggle-selection",
         }
         action = actions.get(keyval)
         if action is None or self.on_action is None or self.current_path is None:
