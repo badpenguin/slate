@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import gi
 
@@ -14,6 +14,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk
 
 from slate.editor import EditorDocument, EditorWorkspace
+from slate.processes import CommandResult
 
 
 class EditorTest(unittest.TestCase):
@@ -102,6 +103,34 @@ class EditorTest(unittest.TestCase):
         self.assertEqual(self.path.read_text(encoding="utf-8"), "# TODO\n- prova\n")
         editor.close()
 
+    def test_double_click_selects_identifier_instead_of_entire_line(self) -> None:
+        """Source identifiers include underscores and PHP variable prefixes."""
+
+        editor = self._document()
+        editor.buffer.set_text("echo $my_variable + next_word;\n")
+        clicked = editor.buffer.get_iter_at_offset(9)
+
+        self.assertTrue(editor._select_identifier_at(clicked))
+
+        start, end = editor.buffer.get_selection_bounds()
+        self.assertEqual(editor.buffer.get_text(start, end, True), "$my_variable")
+        editor.close()
+
+    def test_double_click_in_line_number_gutter_keeps_native_selection(self) -> None:
+        """The identifier handler does not override GTK's line-number gutter."""
+
+        owner = SimpleNamespace(_select_identifier_at=MagicMock())
+        view = MagicMock()
+        view.get_window_type.return_value = Gtk.TextWindowType.LEFT
+        event = SimpleNamespace(
+            button=1,
+            type=Gdk.EventType.DOUBLE_BUTTON_PRESS,
+            window=object(),
+        )
+
+        self.assertFalse(EditorDocument._on_view_button_press(owner, view, event))
+        owner._select_identifier_at.assert_not_called()
+
     def test_empty_document_save_completes(self) -> None:
         """Truncating a document still resolves the callback used by Save all."""
 
@@ -114,6 +143,44 @@ class EditorTest(unittest.TestCase):
         self.assertEqual(completed, [True])
         self.assertEqual(self.path.read_bytes(), b"")
         self.assertFalse(editor.dirty)
+        editor.close()
+
+    def test_php_save_checks_syntax_and_reports_failure(self) -> None:
+        """Saving PHP starts async lint and shows its syntax error only on failure."""
+
+        self.path = self.root / "example.php"
+        self.path.write_text("<?php echo 1;\n", encoding="utf-8")
+        editor = EditorDocument(
+            "project", str(self.root), "example.php", 11,
+            self._state_changed, self._removed,
+        )
+        self._wait_until(lambda: not editor.loading and editor.etag is not None)
+        editor.buffer.set_text("<?php echo ;\n")
+        completed: list[bool] = []
+        command = MagicMock()
+
+        with patch("slate.editor.run_async", return_value=command) as launch:
+            editor.save(completed.append)
+            self._wait_until(lambda: bool(completed))
+
+        self.assertEqual(completed, [True])
+        self.assertEqual(launch.call_args.args[0], ["php", "-l", str(self.path)])
+        self.assertEqual(launch.call_args.kwargs["cwd"], str(self.root))
+        callback = launch.call_args.args[1]
+        failed = CommandResult(("php", "-l", str(self.path)), 255, "", "Parse error")
+        with patch("slate.editor.Gtk.MessageDialog") as dialog_class:
+            callback(failed)
+        dialog_class.assert_called_once()
+        self.assertEqual(
+            dialog_class.call_args.kwargs["text"],
+            "⛔ PHP syntax error: example.php",
+        )
+        error_icon = dialog_class.return_value.set_image.call_args.args[0]
+        self.assertEqual(error_icon.get_icon_name()[0], "dialog-error")
+        dialog_class.return_value.format_secondary_text.assert_called_once_with(
+            "Parse error"
+        )
+        dialog_class.return_value.show_all.assert_called_once_with()
         editor.close()
 
     def test_save_preserves_executable_file_mode(self) -> None:
@@ -380,6 +447,49 @@ class EditorTest(unittest.TestCase):
         self.assertFalse(workspace.handle_key(save_event))
         workspace.shutdown()
 
+    def test_workspace_reuses_editor_through_file_and_directory_symlinks(self) -> None:
+        """File aliases and linked parent directories share the original buffer."""
+
+        source = self.root / "src"
+        source.mkdir()
+        (source / "file.md").write_text("# Source\n", encoding="utf-8")
+        (self.root / "alias.md").symlink_to(source / "file.md")
+        (self.root / "linked").symlink_to(source, target_is_directory=True)
+        workspace = EditorWorkspace(
+            Gtk.Box(), 10, MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        )
+
+        original = workspace.open_file("project", str(self.root), "src/file.md")
+        file_alias = workspace.open_file("project", str(self.root), "alias.md")
+        directory_alias = workspace.open_file("project", str(self.root), "linked/file.md")
+
+        self.assertIs(file_alias, original)
+        self.assertIs(directory_alias, original)
+        self.assertEqual(len(workspace.editors), 1)
+        self.assertEqual(workspace.active_ref, ("project", "src/file.md"))
+        workspace.shutdown()
+
+    def test_saving_file_symlink_updates_target_without_replacing_link(self) -> None:
+        """The editor writes the resolved target and preserves a file alias."""
+
+        alias = self.root / "alias.md"
+        alias.symlink_to(self.path)
+        editor = EditorDocument(
+            "project", str(self.root), "alias.md", 11,
+            self._state_changed, self._removed,
+        )
+        self._wait_until(lambda: not editor.loading and editor.etag is not None)
+        editor.buffer.set_text("# Updated\n")
+        completed: list[bool] = []
+
+        editor.save(completed.append)
+
+        self._wait_until(lambda: bool(completed))
+        self.assertEqual(completed, [True])
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "# Updated\n")
+        editor.close()
+
     def test_workspace_dispatches_every_documented_editor_shortcut(self) -> None:
         """The complete Ctrl shortcut matrix reaches only its intended command."""
 
@@ -540,6 +650,30 @@ class EditorTest(unittest.TestCase):
         editor = entry.document
         self.assertIs(workspace.current_editor(), editor)
         self._wait_until(lambda: editor is not None and editor.etag is not None)
+        workspace.shutdown()
+
+    def test_restore_collapses_existing_symlink_alias_tabs(self) -> None:
+        """Old duplicate references restore one lazy editor and its active row."""
+
+        alias = self.root / "alias.md"
+        alias.symlink_to(self.path)
+        terminal_page = Gtk.Box()
+        workspace = EditorWorkspace(
+            terminal_page, 10, MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        )
+        state = {
+            "tabs": [
+                {"project": "project", "path": "TODO.md"},
+                {"project": "project", "path": "alias.md"},
+            ],
+            "active_tab": {"project": "project", "path": "alias.md"},
+        }
+
+        workspace.restore(state, [{"name": "project", "path": str(self.root)}])
+
+        self.assertEqual(list(workspace.editors), [("project", "TODO.md")])
+        self.assertEqual(workspace.active_ref, ("project", "TODO.md"))
+        self.assertEqual(workspace.get_children(), [terminal_page])
         workspace.shutdown()
 
     def test_missing_restored_file_is_removed_only_after_selection(self) -> None:
