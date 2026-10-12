@@ -3023,8 +3023,6 @@ class SlateWindow(Gtk.ApplicationWindow):
             # 2026-09-02: l'overlay opaco possiede i propri tasti; nessuna
             # scorciatoia deve raggiungere le viste ancora montate sotto di lui.
             return False
-        if self.browser_manager.handle_key(event):
-            return True
         surface = getattr(self, "diff_editor_surface", None)
         if event.keyval == Gdk.KEY_Escape and surface is not None:
             surface.close_if_clean()
@@ -3037,7 +3035,12 @@ class SlateWindow(Gtk.ApplicationWindow):
             if not surface.go_to_definition():
                 self._show_error("Place the diff editor cursor on a source symbol first.")
             return True
-        if self.preview.get_visible() and self.preview.search_bar.handle_key(event):
+        # 2026-10-12: la finestra riceve i tasti prima di alcuni child GTK;
+        # l'overlay visibile deve precedere gli editor rimasti montati sotto.
+        preview_visible = self.preview.get_visible() and surface is None
+        if preview_visible and self.preview.handle_key(event):
+            return True
+        if not preview_visible and self.browser_manager.handle_key(event):
             return True
         if (
             Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b
@@ -3048,7 +3051,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             if not self.preview.go_to_definition():
                 self._show_error("Place the preview cursor on a source symbol first.")
             return True
-        if self.editor_workspace.handle_key(event):
+        if not preview_visible and self.editor_workspace.handle_key(event):
             return True
         if event.keyval == Gdk.KEY_Escape and self.preview.get_visible():
             self._close_preview()
@@ -3057,7 +3060,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._request_close()
             return True
         if event.keyval == Gdk.KEY_F2:
-            self._prompt_terminal_rename()
+            self._prompt_terminal_rename(send_codex_rename=True)
             return True
         return False
 
@@ -3182,7 +3185,9 @@ class SlateWindow(Gtk.ApplicationWindow):
             return
         self.project_search.dismiss()
 
-    def _prompt_terminal_rename(self, *_args: object) -> None:
+    def _prompt_terminal_rename(
+        self, *_args: object, send_codex_rename: bool = False
+    ) -> None:
         """Request a terminal session name in a modal text-entry dialog."""
 
         selected = self._selected_terminal()
@@ -3244,6 +3249,10 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.config.save()
             self._populate_projects()
             self._select_tree_row(project_name, clean_name)
+            # 2026-10-08: F2 sincronizza la rinomina con Codex soltanto dopo
+            # il successo di tmux e della configurazione locale.
+            if send_codex_rename:
+                self.terminals.request_codex_rename(project_name, clean_name)
 
         self.terminals.rename(project_name, old_name, clean_name, renamed)
 
@@ -3883,6 +3892,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             and self.preview.current_path == status.path
             and getattr(self, "preview_status", None) == status
         ):
+            self.preview.grab_focus()
             return
         self.preview_status = status
         self.preview.show_status(scm.root, scm, status)
@@ -3892,6 +3902,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.preview.set_no_show_all(False)
         self.preview.show_all()
         self.preview.set_no_show_all(True)
+        # 2026-10-12: l'overlay visibile possiede i tasti; lasciare il focus
+        # all'editor sottostante farebbe scrivere E nel documento nascosto.
+        self.preview.grab_focus()
 
     def _preview_project_file(self, relative_path: str | None) -> None:
         """Preview a normal file selected from the active project's file tree."""
@@ -3900,7 +3913,15 @@ class SlateWindow(Gtk.ApplicationWindow):
         if relative_path is None or project is None:
             self._close_preview()
             return
-        if (project["name"], relative_path) in self.editor_workspace.editors:
+        if (
+            (project["name"], relative_path) in self.editor_workspace.editors
+            or (
+                self.editor_workspace.editors
+                and self.editor_workspace.find_open_reference(
+                    project["name"], project["path"], relative_path
+                ) is not None
+            )
+        ):
             # 2026-09-03: una scheda editor già aperta è la rappresentazione
             # principale del file; il click in File deve riportarvi l'utente
             # invece di sovrapporre una seconda rappresentazione in preview.
@@ -3914,6 +3935,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.preview.set_no_show_all(False)
         self.preview.show_all()
         self.preview.set_no_show_all(True)
+        self.preview.grab_focus()
 
     def _handle_file_preview_action(self, action: str) -> None:
         """Apply a focused shared-preview shortcut to its exact current file."""
@@ -3937,8 +3959,21 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self._open_diff_editor(status)
             elif action == "edit-external":
                 self._edit_status_external(status)
+            elif action == "add" and status.state == "untracked":
+                self._add_statuses([status])
+            elif action == "toggle-selection" and status.state not in {
+                "untracked", "missing"
+            }:
+                # 2026-10-12: il focus sull'anteprima non cambia la selezione
+                # dell'albero; Space agisce sulla riga mostrata esplicitamente.
+                key = self.panel._status_key(status)
+                self.panel._set_operation_checkboxes(
+                    [status], key not in self.panel.checked_paths
+                )
             elif action == "delete":
                 self._delete_status(status)
+            elif action == "refresh":
+                self._scan_active_project()
             elif action == "meld" and status.state not in {
                 "untracked",
                 "added",
@@ -3956,8 +3991,12 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._edit_project_file_internal(path)
         elif action == "edit-external":
             self._edit_project_file_external(path)
+        elif action == "rename":
+            self._rename_project_file(path)
         elif action == "delete":
             self._delete_project_file(path)
+        elif action == "refresh":
+            self.file_manager.refresh()
         elif action == "meld":
             self._open_search_result_meld(path)
 
@@ -4382,17 +4421,18 @@ class SlateWindow(Gtk.ApplicationWindow):
         if path is None or project is None or not os.path.isfile(path):
             return None
         self._close_preview()
-        order_changed = self._append_project_item(
-            project, "editor", relative_path
-        )
         editor = self.editor_workspace.open_file(
             project["name"], project["path"], relative_path
         )
+        # 2026-10-12: open_file può riusare una scheda raggiunta tramite link;
+        # l'albero deve selezionare il suo percorso originale, non creare un alias.
+        editor_path = editor.relative_path
+        order_changed = self._append_project_item(project, "editor", editor_path)
         if order_changed:
             self.config.save()
         # 2026-08-16: la riga creata nell'albero, non il contenitore centrale,
         # governa sempre il cambio di vista e il focus del documento aperto.
-        self._select_tree_row(project["name"], relative_path, "editor")
+        self._select_tree_row(project["name"], editor_path, "editor")
         # 2026-09-12: applicare la destinazione dopo la riattivazione finale
         # impedisce al remap della vista di riportare lo scroll a inizio file.
         if line is not None:
