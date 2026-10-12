@@ -420,8 +420,53 @@ class ProjectFileManagerTest(unittest.TestCase):
             )
         self.assertTrue(self.manager.dirty)
         self.manager.set_active(True)
-        self._wait_for_path("")
+        deadline = time.monotonic() + 2
+        context = GLib.MainContext.default()
+        while "late-link" not in self._root_names() and time.monotonic() < deadline:
+            context.iteration(True)
         self.assertIn("late-link", self._root_names())
+
+    def test_refresh_keeps_existing_rows_and_expansion(self) -> None:
+        """A filesystem refresh changes only affected rows in the loaded tree."""
+
+        src_iter = self.manager.dir_iters["src"]
+        self.manager.tree.expand_row(self.manager.store.get_path(src_iter), False)
+        self._wait_for_path("src")
+        original_file_iter = self.manager._tree_iter_for_path("normal.txt")
+        original_file_row = Gtk.TreeRowReference.new(
+            self.manager.store, self.manager.store.get_path(original_file_iter)
+        )
+        self.manager.tree.set_cursor(self.manager.store.get_path(original_file_iter))
+        (self.root / "added.txt").write_text("new\n", encoding="utf-8")
+        with patch.object(self.manager.store, "clear") as clear:
+            self.manager.refresh()
+            deadline = time.monotonic() + 2
+            context = GLib.MainContext.default()
+            while self.manager.loading_paths and time.monotonic() < deadline:
+                context.iteration(True)
+            clear.assert_not_called()
+        self.assertIn("added.txt", self._root_names())
+        self.assertTrue(original_file_row.valid())
+        self.assertEqual(
+            self.manager.store.get_value(
+                self.manager.store.get_iter(original_file_row.get_path()),
+                self.manager.COL_PATH,
+            ),
+            "normal.txt",
+        )
+        self.assertTrue(
+            self.manager.tree.row_expanded(self.manager.store.get_path(src_iter))
+        )
+        self.assertEqual(self.manager._focused_file(), "normal.txt")
+        (self.root / "src" / "later.py").write_text("later\n", encoding="utf-8")
+        (self.root / "broken-link").unlink()
+        self.manager.refresh()
+        deadline = time.monotonic() + 2
+        while self.manager.loading_paths and time.monotonic() < deadline:
+            context.iteration(True)
+        self.assertNotIn("broken-link", self._root_names())
+        self.assertIsNotNone(self.manager._tree_iter_for_path("src/later.py"))
+        self.assertEqual(self.manager._focused_file(), "normal.txt")
 
     def test_file_icons_use_colored_gio_choices_with_four_pixel_spacing(self) -> None:
         """The file column uses legible MIME icons and keeps the required gap."""
@@ -447,8 +492,8 @@ class ProjectFileManagerTest(unittest.TestCase):
         if isinstance(icon, Gio.ThemedIcon):
             self.assertFalse(icon.get_names()[0].endswith("-symbolic"))
 
-    def test_expand_label_remains_visible_on_the_single_toolbar_row(self) -> None:
-        """The fixed expand label shares one row with both visibility filters."""
+    def test_icon_buttons_and_filters_share_one_toolbar_row(self) -> None:
+        """Toolbar actions precede a flexible gap and right-aligned filters."""
 
         toolbar = self.manager.expand_button.get_parent()
         self.assertEqual(toolbar.get_orientation(), Gtk.Orientation.HORIZONTAL)
@@ -458,6 +503,8 @@ class ProjectFileManagerTest(unittest.TestCase):
                 self.manager.new_file_button,
                 self.manager.new_directory_button,
                 self.manager.expand_button,
+                self.manager.refresh_button,
+                toolbar.get_children()[4],
                 self.manager.hidden_check,
                 self.manager.excluded_check,
             ],
@@ -469,13 +516,10 @@ class ProjectFileManagerTest(unittest.TestCase):
             self.manager.new_directory_button.get_accessible().get_name(),
             "+ Folder",
         )
-        expand_content = self.manager.expand_button.get_child()
-        self.assertEqual(expand_content.get_spacing(), 4)
-        self.assertIs(expand_content.get_children()[0], self.manager.expand_icon)
-        self.assertEqual(self.manager.expand_label.get_text(), "Expand")
-        width_request, _height_request = self.manager.expand_button.get_size_request()
-        self.assertGreaterEqual(width_request, 100)
-        self.assertTrue(self.manager.expand_label.get_visible())
+        self.assertIs(self.manager.expand_button.get_child(), self.manager.expand_icon)
+        self.assertIsInstance(toolbar.get_children()[4], Gtk.Box)
+        self.assertTrue(toolbar.child_get_property(toolbar.get_children()[4], "expand"))
+        self.assertIsInstance(self.manager.refresh_button.get_child(), Gtk.Image)
 
     def test_first_click_and_filter_rebuild_keep_directory_expanded(self) -> None:
         """One left click opens a folder and filters preserve that expansion."""
@@ -646,7 +690,7 @@ class ProjectFileManagerTest(unittest.TestCase):
             if name == "node_modules"
         )
         self.assertFalse(self.manager.tree.row_expanded(self.manager.store.get_path(node_iter)))
-        self.assertEqual(self.manager.expand_label.get_text(), "Collapse")
+        self.assertEqual(self.manager.expand_button.get_tooltip_text(), "Collapse all folders")
 
 
 if __name__ == "__main__":
