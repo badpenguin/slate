@@ -1678,6 +1678,9 @@ class SCMPanel(Gtk.Box):
         if keyval == Gdk.KEY_e:
             if multiple:
                 return True
+            # 2026-10-12: una preview ritardata dal click precedente può
+            # riapparire sopra l'editor dopo E; annullarla prima dell'azione.
+            self._cancel_pending_preview()
             self.on_edit_internal(status)
             return True
         if keyval == Gdk.KEY_m:
@@ -1762,6 +1765,7 @@ class SCMPanel(Gtk.Box):
         """Open the contextual working-copy file in a SLATE editor tab."""
 
         if self.context_status:
+            self._cancel_pending_preview()
             self.on_edit_internal(self.context_status)
 
     def _on_context_edit_with_diff(self, _item: Gtk.MenuItem) -> None:
