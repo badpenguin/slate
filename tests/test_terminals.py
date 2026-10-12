@@ -9,6 +9,7 @@ from gi.repository import Gdk, Vte
 
 from slate.processes import CommandResult
 from slate.terminals import (
+    PaneInfo,
     TerminalManager,
     codex_inline_command,
     is_codex_launcher_command,
@@ -422,6 +423,33 @@ class TerminalHelpersTest(unittest.TestCase):
         )
         self.assertGreaterEqual(argv.count(";"), 4)
 
+    def test_codex_pane_does_not_show_generic_running_process_dot(self) -> None:
+        """The Codex marker hides only Codex, preserving other process activity."""
+
+        self.assertFalse(PaneInfo("session", "node", 123, agent_display="Codex").active)
+        self.assertFalse(PaneInfo("session", "codex", 123, agent_display="Codex").active)
+        self.assertTrue(PaneInfo("session", "vim", 123, agent_display="Codex").active)
+        self.assertTrue(PaneInfo("session", "node", 123).active)
+
+    def test_activity_query_reads_codex_marker_with_pane_command(self) -> None:
+        """One tmux query provides both process and persisted agent identity."""
+
+        owner = SimpleNamespace(tmux=("tmux", "-L", "slate"))
+        captured: list[list[PaneInfo]] = []
+        with patch("slate.terminals.run_async") as run:
+            TerminalManager.query_panes(
+                owner, captured.append, include_duration=False
+            )
+        argv, completed = run.call_args.args
+        self.assertEqual(argv[:4], ["tmux", "-L", "slate", "list-panes"])
+        self.assertIn("@slate_agent_display", argv[-1])
+
+        completed(CommandResult(tuple(argv), 0, "repo--work|node|123|/dev/pts/9|Codex\n", ""))
+
+        self.assertEqual(len(captured[0]), 1)
+        self.assertEqual(captured[0][0].agent_display, "Codex")
+        self.assertFalse(captured[0][0].active)
+
     def test_status_bar_setting_applies_to_existing_sessions(self) -> None:
         """Changing the preference updates tmux without rebuilding terminals."""
 
@@ -570,6 +598,76 @@ class TerminalHelpersTest(unittest.TestCase):
         callback.assert_called_once_with(True)
         owner.on_error.assert_not_called()
         owner._set_metadata.assert_not_called()
+
+    def test_codex_rename_checks_foreground_before_sending_input(self) -> None:
+        """F2 sends the slash command only to the still-attached Codex pane."""
+
+        terminal = MagicMock()
+        owner = TerminalManager.__new__(TerminalManager)
+        owner.terminals = {"Repo/Work two": terminal}
+        owner.sessions = {"Repo/Work two": "repo--work-two"}
+        owner.tmux = ("tmux", "-L", "slate")
+        owner.query_panes = MagicMock()
+        owner._codex_rename_sent = MagicMock()
+        with patch("slate.terminals.run_async") as run:
+            TerminalManager.request_codex_rename(owner, "Repo", "Work two")
+            panes_ready = owner.query_panes.call_args.args[0]
+            panes_ready([PaneInfo("repo--work-two", "node", 123, "/dev/pts/9")])
+            self.assertEqual(
+                run.call_args.args[0],
+                ["ps", "-t", "pts/9", "-o", "pid=,pgid=,tpgid=,comm=,args="],
+            )
+            process_ready = run.call_args.args[1]
+            process_ready(CommandResult((), 0, "123 123 123 node node /opt/@openai/codex/bin/codex.js\n", ""))
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "tmux", "-L", "slate",
+                "send-keys", "-t", "repo--work-two", "-l", "/rename Work two",
+                ";", "send-keys", "-t", "repo--work-two", "Enter",
+            ],
+        )
+        terminal.feed_child.assert_not_called()
+
+    def test_codex_rename_rejects_shell_metacharacters_in_title(self) -> None:
+        """A title must not execute shell syntax if Codex exits before delivery."""
+
+        owner = SimpleNamespace(
+            on_error=MagicMock(),
+            query_panes=MagicMock(),
+        )
+        TerminalManager.request_codex_rename(owner, "Repo", "work; echo bad")
+        owner.query_panes.assert_not_called()
+        owner.on_error.assert_called_once()
+
+    def test_codex_rename_skips_a_different_pane_command(self) -> None:
+        """The selected session cannot receive slash input while Vim owns it."""
+
+        terminal = MagicMock()
+        owner = SimpleNamespace(
+            terminals={"Repo/work": terminal},
+            sessions={"Repo/work": "repo--work"},
+            query_panes=MagicMock(),
+        )
+        with patch("slate.terminals.run_async") as run:
+            TerminalManager.request_codex_rename(owner, "Repo", "work")
+            panes_ready = owner.query_panes.call_args.args[0]
+            panes_ready([PaneInfo("repo--work", "vim", 123, "/dev/pts/9")])
+            run.assert_not_called()
+        terminal.feed_child.assert_not_called()
+
+    def test_codex_rename_ignores_other_foreground_programs(self) -> None:
+        """A remembered Codex launcher does not justify typing into another app."""
+
+        self.assertFalse(TerminalManager._foreground_is_codex(
+            "123 123 123 node node /srv/app.js codex\n"
+        ))
+        self.assertFalse(TerminalManager._foreground_is_codex(
+            "123 123 456 codex codex\n456 456 456 vim vim file.txt\n"
+        ))
+        self.assertTrue(TerminalManager._foreground_is_codex(
+            "123 123 123 codex codex resume\n"
+        ))
 
     def test_lazy_terminal_close_still_targets_a_background_session(self) -> None:
         """Closing an unloaded row issues kill-session instead of returning early."""
