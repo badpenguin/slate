@@ -87,11 +87,19 @@ class PaneInfo:
     pid: int
     tty: str = ""
     duration: int | None = None
+    agent_display: str = ""
 
     @property
     def active(self) -> bool:
         """Return whether the pane is running something other than a shell."""
 
+        # 2026-10-12: Codex rimane in foreground anche quando attende input;
+        # il pallino deve indicare altri processi, non una sessione Codex idle.
+        if self.agent_display == "Codex" and (
+            self.command in {"node", "codex"}
+            or self.command.startswith("codex-")
+        ):
+            return False
         return self.command not in SHELL_COMMANDS
 
 
@@ -598,6 +606,105 @@ class TerminalManager:
             [*self.tmux, "rename-session", "-t", old_session, new_session], renamed
         )
 
+    def request_codex_rename(self, project_name: str, terminal_name_value: str) -> None:
+        """Send a named Codex rename only to a verified foreground process."""
+
+        # 2026-10-08: la shell potrebbe tornare in primo piano fra il controllo
+        # del processo e l'input; il nome inviato deve restare testo innocuo.
+        if not all(
+            character.isalnum() or character in " ._-"
+            for character in terminal_name_value
+        ):
+            self.on_error(
+                "Codex rename skipped: use letters, numbers, spaces, dots, "
+                "underscores or hyphens in the terminal name."
+            )
+            return
+        key = terminal_key(project_name, terminal_name_value)
+        terminal = self.terminals.get(key)
+        if terminal is None:
+            return
+        tmux_session = self.sessions.get(key)
+        if tmux_session is None:
+            return
+
+        def panes_ready(panes: list[PaneInfo]) -> None:
+            """Find the requested pane before inspecting its foreground command."""
+
+            if self.terminals.get(key) is not terminal:
+                return
+            pane = next((item for item in panes if item.session == tmux_session), None)
+            if (
+                pane is None
+                or not pane.active
+                or not pane.tty.startswith("/dev/")
+                or not (pane.command == "node" or pane.command.startswith("codex"))
+            ):
+                return
+
+            def process_ready(result: CommandResult) -> None:
+                """Send a Codex command and a real tmux Enter to the same pane."""
+
+                if (
+                    result.ok
+                    and self.terminals.get(key) is terminal
+                    and self.sessions.get(key) == tmux_session
+                    and self._foreground_is_codex(result.stdout)
+                ):
+                    # 2026-10-12: in Codex LF e CR possono aggiungere una riga
+                    # al composer; tmux invia Enter come tasto distinto dopo
+                    # il testo letterale, nella stessa richiesta ordinata.
+                    run_async(
+                        self._batched_tmux_argv((
+                            ("send-keys", "-t", tmux_session, "-l",
+                             f"/rename {terminal_name_value}"),
+                            ("send-keys", "-t", tmux_session, "Enter"),
+                        )),
+                        self._codex_rename_sent,
+                    )
+
+            # 2026-10-08: il marcatore del launcher sopravvive all'uscita di
+            # Codex; verificare il processo corrente evita input in un'altra app.
+            run_async(
+                ["ps", "-t", pane.tty.removeprefix("/dev/"),
+                 "-o", "pid=,pgid=,tpgid=,comm=,args="],
+                process_ready,
+            )
+
+        self.query_panes(panes_ready, include_duration=False)
+
+    def _codex_rename_sent(self, result: CommandResult) -> None:
+        """Report a failed explicit Codex rename input without retrying it."""
+
+        if not result.ok:
+            self.on_error(self._error("Renaming Codex chat", result))
+
+    @staticmethod
+    def _foreground_is_codex(output: str) -> bool:
+        """Recognize Codex as the foreground process-group leader from ps data."""
+
+        for line in output.splitlines():
+            fields = line.split(None, 4)
+            if len(fields) != 5:
+                continue
+            try:
+                pid, pgid, foreground_pgid = map(int, fields[:3])
+            except ValueError:
+                continue
+            if pid != pgid or pgid != foreground_pgid:
+                continue
+            command, arguments = fields[3], fields[4]
+            if command == "codex" or command.startswith("codex-"):
+                return True
+            if command == "node":
+                parts = arguments.split()
+                if len(parts) > 1 and (
+                    "@openai/codex/" in parts[1]
+                    or os.path.basename(parts[1]) in {"codex", "codex.js"}
+                ):
+                    return True
+        return False
+
     def close(
         self,
         project_name: str,
@@ -663,7 +770,8 @@ class TerminalManager:
         """Read pane state and optionally enrich foreground-process durations."""
 
         format_value = (
-            "#{session_name}|#{pane_current_command}|#{pane_pid}|#{pane_tty}"
+            "#{session_name}|#{pane_current_command}|#{pane_pid}|#{pane_tty}|"
+            "#{@slate_agent_display}"
         )
 
         def completed(result: CommandResult) -> None:
@@ -681,10 +789,15 @@ class TerminalManager:
                 return
             panes: list[PaneInfo] = []
             for line in result.stdout.splitlines():
-                fields = line.split("|", 3)
-                if len(fields) == 4:
+                fields = line.split("|", 4)
+                if len(fields) == 5:
                     try:
-                        panes.append(PaneInfo(fields[0], fields[1], int(fields[2]), fields[3]))
+                        panes.append(
+                            PaneInfo(
+                                fields[0], fields[1], int(fields[2]),
+                                fields[3], agent_display=fields[4],
+                            )
+                        )
                     except ValueError:
                         continue
             if include_duration:
