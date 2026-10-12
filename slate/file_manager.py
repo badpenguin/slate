@@ -107,6 +107,7 @@ class ProjectFileManager(Gtk.Box):
         self.dir_iters: dict[str, Gtk.TreeIter] = {}
         self.loading_paths: set[str] = set()
         self.loaded_paths: set[str] = set()
+        self.refresh_pending_paths: set[str] = set()
         self.monitors: dict[str, Gio.FileMonitor] = {}
         self.cancellable = Gio.Cancellable()
         self.request_serial = 0
@@ -173,17 +174,19 @@ class ProjectFileManager(Gtk.Box):
         self.new_directory_button = self._toolbar_button(
             "+ Folder", "folder-new", self._on_new_directory_clicked
         )
+        # 2026-10-05: l'icona lascia spazio ai controlli Files nella riga unica.
+        self.refresh_button = Gtk.Button()
+        self.refresh_button.add(
+            Gtk.Image.new_from_icon_name("view-refresh", Gtk.IconSize.BUTTON)
+        )
+        self.refresh_button.get_accessible().set_name("Refresh files")
+        self.refresh_button.connect("clicked", self._on_refresh_clicked)
+        self.refresh_button.set_tooltip_text("Refresh files (F5)")
         self.expand_button = Gtk.Button()
-        expand_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.expand_icon = Gtk.Image.new_from_icon_name(
             "go-down", Gtk.IconSize.BUTTON
         )
-        self.expand_label = Gtk.Label(label="Expand")
-        expand_content.pack_start(self.expand_icon, False, False, 0)
-        expand_content.pack_start(self.expand_label, False, False, 0)
-        self.expand_button.add(expand_content)
-        expand_content.show_all()
-        self.expand_button.set_size_request(100, -1)
+        self.expand_button.add(self.expand_icon)
         self._set_expand_action(False)
         self.expand_button.connect("clicked", self._on_expand_all_clicked)
         self.hidden_check = Gtk.CheckButton(label="Hidden")
@@ -197,18 +200,21 @@ class ProjectFileManager(Gtk.Box):
         toolbar.pack_start(self.new_file_button, False, False, 0)
         toolbar.pack_start(self.new_directory_button, False, False, 0)
         toolbar.pack_start(self.expand_button, False, False, 0)
+        # 2026-10-05: Refresh chiude il gruppo dei pulsanti; lo spazio
+        # espandibile allinea i filtri al bordo destro della stessa riga.
+        toolbar.pack_start(self.refresh_button, False, False, 0)
+        toolbar.pack_start(Gtk.Box(), True, True, 0)
         toolbar.pack_start(self.hidden_check, False, False, 0)
         toolbar.pack_start(self.excluded_check, False, False, 0)
         self.pack_start(toolbar, False, False, 0)
 
     def _set_expand_action(self, expanded: bool) -> None:
-        """Update the global tree action with directional icon and label."""
+        """Update the global tree action with a directional icon and tooltip."""
 
         # 2026-08-16: frecce verticali descrivono espansione e compressione
         # dell'albero senza ricorrere agli ambigui simboli più e meno.
         label = "Collapse" if expanded else "Expand"
         icon_name = "go-up" if expanded else "go-down"
-        self.expand_label.set_text(label)
         self.expand_icon.set_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
         self.expand_button.set_tooltip_text(f"{label} all folders")
         self.expand_button.get_accessible().set_name(label)
@@ -481,7 +487,7 @@ class ProjectFileManager(Gtk.Box):
         )
 
     def refresh(self) -> None:
-        """Reload the visible hierarchy while restoring expanded paths."""
+        """Reconcile loaded directories without clearing the visible tree."""
 
         if self.root is None:
             return
@@ -489,7 +495,30 @@ class ProjectFileManager(Gtk.Box):
             self.dirty = True
             return
         self.dirty = False
-        self._rebuild()
+        # 2026-10-05: conservare il modello evita il flash e mantiene cursor,
+        # espansioni e scroll quando il watcher segnala una modifica ordinaria.
+        pending_paths = self.loaded_paths | self.loading_paths
+        self._cancel_requests()
+        self.cancellable = Gio.Cancellable()
+        self.loading_paths.clear()
+        self.refresh_pending_paths = pending_paths
+        # 2026-10-05: dopo un cambio progetto i monitor supplementari sono chiusi:
+        # riattivarli sui rami già espansi mantiene gli eventi successivi.
+        self._monitor_directory("", excluded=False)
+        for relative in self.expanded_paths:
+            tree_iter = self.dir_iters.get(relative)
+            if tree_iter is not None:
+                excluded = self.store.get_value(tree_iter, self.COL_EXCLUDED)
+                self._monitor_directory(relative, excluded)
+        if "" in self.refresh_pending_paths:
+            self._load_directory("", force=True)
+        else:
+            self._load_directory("")
+
+    def _on_refresh_clicked(self, _button: Gtk.Button) -> None:
+        """Reload Files after an explicit toolbar request."""
+
+        self.refresh()
 
     def relocate_path(self, old_path: str, new_path: str) -> None:
         """Preserve expansion and cursor state across a successful rename."""
@@ -593,6 +622,7 @@ class ProjectFileManager(Gtk.Box):
         self.expand_button.set_sensitive(available)
         self.new_file_button.set_sensitive(available)
         self.new_directory_button.set_sensitive(available)
+        self.refresh_button.set_sensitive(available)
         self.hidden_check.set_sensitive(available)
         self.excluded_check.set_sensitive(available)
         # 2026-08-16: Gtk.Stack seleziona soltanto child già visibili; farli
@@ -604,6 +634,7 @@ class ProjectFileManager(Gtk.Box):
         """Cancel stale enumeration and lazily reload the project root."""
 
         self._cancel_requests()
+        self.refresh_pending_paths.clear()
         self._clear_monitors()
         self._clear_model()
         self.dir_iters.clear()
@@ -639,10 +670,12 @@ class ProjectFileManager(Gtk.Box):
             GLib.source_remove(self.refresh_id)
             self.refresh_id = None
 
-    def _load_directory(self, relative: str) -> None:
-        """Start asynchronous enumeration for one unloaded relative directory."""
+    def _load_directory(self, relative: str, *, force: bool = False) -> None:
+        """Start asynchronous enumeration for an unloaded or refreshed directory."""
 
-        if self.root is None or relative in self.loading_paths or relative in self.loaded_paths:
+        if self.root is None or relative in self.loading_paths or (
+            relative in self.loaded_paths and not force
+        ):
             return
         self.loading_paths.add(relative)
         directory = Gio.File.new_for_path(os.path.join(self.root, relative))
@@ -732,10 +765,23 @@ class ProjectFileManager(Gtk.Box):
         """Replace a placeholder with sorted, filtered directory children."""
 
         self.loading_paths.discard(relative)
-        self.loaded_paths.add(relative)
         parent = self.dir_iters.get(relative) if relative else None
         if relative and parent is None:
             return
+        if relative in self.loaded_paths:
+            self.refresh_pending_paths.discard(relative)
+            if error:
+                self.show_error(f"Unable to read {relative or 'project'}: {error}")
+                return
+            self._reconcile_directory(relative, parent, entries)
+            # Le directory già caricate sono rilette dopo il loro genitore:
+            # una rimozione non lascia callback in corsa con iter invalidi.
+            for child_path in sorted(self.refresh_pending_paths):
+                if os.path.dirname(child_path) == relative and child_path in self.dir_iters:
+                    self._load_directory(child_path, force=True)
+            return
+        self.loaded_paths.add(relative)
+        self.refresh_pending_paths.discard(relative)
         placeholder = None
         if parent is not None:
             self.store.set_value(parent, self.COL_LOADED, True)
@@ -776,6 +822,112 @@ class ProjectFileManager(Gtk.Box):
         self._resolve_pending_reveal(relative)
         self._restore_child_expansion(relative)
         self._continue_expand_all()
+
+    def _reconcile_directory(
+        self,
+        relative: str,
+        parent: Gtk.TreeIter | None,
+        entries: list[Gio.FileInfo],
+    ) -> None:
+        """Apply directory changes while retaining unchanged GTK tree rows."""
+
+        visible = [info for info in entries if self._entry_visible(relative, info)]
+        visible.sort(key=partial(self._entry_sort_key, relative))
+        current: dict[str, Gtk.TreeIter] = {}
+        stale_rows: list[Gtk.TreeIter] = []
+        child = self.store.iter_children(parent)
+        while child is not None:
+            path = self.store.get_value(child, self.COL_PATH)
+            if path:
+                current[path] = child
+            else:
+                stale_rows.append(child)
+            child = self.store.iter_next(child)
+
+        wanted = {
+            f"{relative}/{info.get_name()}" if relative else info.get_name()
+            for info in visible
+        }
+        added_directory = False
+        self.rebuilding_model = True
+        try:
+            for tree_iter in stale_rows:
+                self.store.remove(tree_iter)
+            # 2026-10-05: togliere solo le righe scomparse lascia stabili
+            # gli iter, la selezione e l'espansione di tutte le altre righe.
+            for path, tree_iter in tuple(current.items()):
+                if path not in wanted:
+                    self._drop_directory_state(path)
+                    self.store.remove(tree_iter)
+                    current.pop(path)
+            for info in visible:
+                path = f"{relative}/{info.get_name()}" if relative else info.get_name()
+                values = self._entry_values(relative, info)
+                tree_iter = current.get(path)
+                if tree_iter is not None and self.store.get_value(
+                    tree_iter, self.COL_DIRECTORY
+                ) != values[self.COL_DIRECTORY]:
+                    self._drop_directory_state(path)
+                    self.store.remove(tree_iter)
+                    tree_iter = None
+                if tree_iter is None:
+                    tree_iter = self._append_entry(parent, relative, info)
+                    current[path] = tree_iter
+                    added_directory = added_directory or values[self.COL_DIRECTORY]
+                else:
+                    for column in (
+                        self.COL_NAME,
+                        self.COL_SYMLINK,
+                        self.COL_EXCLUDED,
+                        self.COL_BLOCKED,
+                    ):
+                        if self.store.get_value(tree_iter, column) != values[column]:
+                            self.store.set_value(tree_iter, column, values[column])
+                            if column in (self.COL_SYMLINK, self.COL_BLOCKED):
+                                self.store.set_value(
+                                    tree_iter, self.COL_ICON, values[self.COL_ICON]
+                                )
+            desired = [
+                f"{relative}/{info.get_name()}" if relative else info.get_name()
+                for info in visible
+            ]
+            actual: list[str] = []
+            child = self.store.iter_children(parent)
+            while child is not None:
+                actual.append(self.store.get_value(child, self.COL_PATH))
+                child = self.store.iter_next(child)
+            if actual != desired:
+                previous: Gtk.TreeIter | None = None
+                for path in desired:
+                    self.store.move_after(current[path], previous)
+                    previous = current[path]
+        finally:
+            self.rebuilding_model = False
+        self._resolve_pending_reveal(relative)
+        self._restore_child_expansion(relative)
+        # 2026-10-05: Expand all comprende anche le directory arrivate dopo
+        # l'espansione iniziale, senza ricostruire l'albero per includerle.
+        if added_directory and self.expand_all_complete:
+            self.expand_all_complete = False
+            self.expand_all_requested = True
+        self._continue_expand_all()
+
+    def _drop_directory_state(self, relative: str) -> None:
+        """Forget loaded descendants of a removed or retyped tree row."""
+
+        prefix = f"{relative}/"
+        for path in tuple(self.dir_iters):
+            if path == relative or path.startswith(prefix):
+                self.dir_iters.pop(path, None)
+        self.loaded_paths = {
+            path for path in self.loaded_paths
+            if path != relative and not path.startswith(prefix)
+        }
+        self.refresh_pending_paths = {
+            path for path in self.refresh_pending_paths
+            if path != relative and not path.startswith(prefix)
+        }
+        self._remove_monitors_below(relative)
 
     def _resolve_pending_reveal(self, loaded_directory: str) -> None:
         """Fall back when a requested next path component is filtered or absent."""
@@ -869,8 +1021,39 @@ class ProjectFileManager(Gtk.Box):
         parent: Gtk.TreeIter | None,
         parent_path: str,
         info: Gio.FileInfo,
-    ) -> None:
+    ) -> Gtk.TreeIter:
         """Append one safe filesystem entry and a lazy directory placeholder."""
+
+        values = self._entry_values(parent_path, info)
+        relative = values[self.COL_PATH]
+        is_directory = values[self.COL_DIRECTORY]
+        excluded = values[self.COL_EXCLUDED]
+        tree_iter = self.store.append(parent, values)
+        if relative == self.pending_cursor_path:
+            row_path = self.store.get_path(tree_iter)
+            self.tree.set_cursor(row_path)
+            self.tree.scroll_to_cell(row_path, None, False, 0.0, 0.0)
+            self.pending_cursor_path = None
+        if is_directory:
+            self.dir_iters[relative] = tree_iter
+            self.store.append(
+                tree_iter,
+                [
+                    "Loading…",
+                    "",
+                    False,
+                    False,
+                    True,
+                    excluded,
+                    True,
+                    Gio.ThemedIcon.new("process-working"),
+                    False,
+                ],
+            )
+        return tree_iter
+
+    def _entry_values(self, parent_path: str, info: Gio.FileInfo) -> list[object]:
+        """Build the row values for a filesystem entry and its current target."""
 
         name = info.get_name()
         relative = f"{parent_path}/{name}" if parent_path else name
@@ -897,41 +1080,17 @@ class ProjectFileManager(Gtk.Box):
             icon = info.get_icon() or Gio.ThemedIcon.new(
                 "folder" if is_directory else "text-x-generic"
             )
-        tree_iter = self.store.append(
-            parent,
-            [
-                info.get_display_name(),
-                relative,
-                is_directory,
-                is_symlink,
-                not is_directory,
-                excluded,
-                False,
-                icon,
-                blocked,
-            ],
-        )
-        if relative == self.pending_cursor_path:
-            row_path = self.store.get_path(tree_iter)
-            self.tree.set_cursor(row_path)
-            self.tree.scroll_to_cell(row_path, None, False, 0.0, 0.0)
-            self.pending_cursor_path = None
-        if is_directory:
-            self.dir_iters[relative] = tree_iter
-            self.store.append(
-                tree_iter,
-                [
-                    "Loading…",
-                    "",
-                    False,
-                    False,
-                    True,
-                    excluded,
-                    True,
-                    Gio.ThemedIcon.new("process-working"),
-                    False,
-                ],
-            )
+        return [
+            info.get_display_name(),
+            relative,
+            is_directory,
+            is_symlink,
+            not is_directory,
+            excluded,
+            False,
+            icon,
+            blocked,
+        ]
 
     def _restore_child_expansion(self, parent_path: str) -> None:
         """Expand persisted direct children after their parent finishes loading."""
@@ -1044,6 +1203,9 @@ class ProjectFileManager(Gtk.Box):
 
         if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
             return False
+        if event.keyval == Gdk.KEY_F5:
+            self.refresh()
+            return True
         entry = self._focused_entry()
         if entry is None:
             return False
