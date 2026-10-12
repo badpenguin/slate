@@ -2647,6 +2647,43 @@ class WindowActionTest(unittest.TestCase):
         )
         self.assertIsNone(pin_renderer.get_property("icon-name"))
 
+    def test_sidebar_indicators_do_not_reserve_space_when_absent(self) -> None:
+        """A Codex bell reaches the right edge when no activity dot is shown."""
+
+        store = Gtk.TreeStore(str, str, str, str, bool, str, bool)
+        terminal = store.append(
+            None, ["codex", "terminal", "repo", "codex", False, "codex", True]
+        )
+        owner = SimpleNamespace(
+            COL_KIND=SlateWindow.COL_KIND,
+            COL_PROJECT=SlateWindow.COL_PROJECT,
+            COL_ACTIVITY=SlateWindow.COL_ACTIVITY,
+            COL_ATTENTION=SlateWindow.COL_ATTENTION,
+            config=SimpleNamespace(data={"pinned_projects": []}),
+            attention_icon=GdkPixbuf.Pixbuf.new(
+                GdkPixbuf.Colorspace.RGB, True, 8, 1, 1
+            ),
+            _set_project_row_background=MagicMock(),
+        )
+        activity = Gtk.CellRendererPixbuf()
+        attention = Gtk.CellRendererPixbuf()
+        pin = Gtk.CellRendererPixbuf()
+
+        SlateWindow._render_activity_icon(owner, None, activity, store, terminal)
+        SlateWindow._render_attention_icon(owner, None, attention, store, terminal)
+        SlateWindow._render_pin_icon(owner, None, pin, store, terminal)
+
+        self.assertFalse(activity.get_property("visible"))
+        self.assertTrue(attention.get_property("visible"))
+        self.assertFalse(pin.get_property("visible"))
+
+        store.set_value(terminal, SlateWindow.COL_ACTIVITY, True)
+        store.set_value(terminal, SlateWindow.COL_ATTENTION, False)
+        SlateWindow._render_activity_icon(owner, None, activity, store, terminal)
+        SlateWindow._render_attention_icon(owner, None, attention, store, terminal)
+        self.assertTrue(activity.get_property("visible"))
+        self.assertFalse(attention.get_property("visible"))
+
     def test_codex_terminal_uses_headerbar_icon_in_project_tree(self) -> None:
         """Persisted Codex launchers render the bundled icon, not a terminal."""
 
