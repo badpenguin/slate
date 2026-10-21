@@ -1,6 +1,9 @@
 """Pure terminal naming and process-duration parser tests."""
 
 import unittest
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -43,11 +46,11 @@ class TerminalHelpersTest(unittest.TestCase):
         self.assertNotIn("|", encoded)
         self.assertEqual(TerminalManager._decode_metadata(encoded), value)
 
-    def test_project_history_is_shared_by_all_project_terminals(self) -> None:
-        """History identity depends on the canonical project path, not a terminal."""
+    def test_project_history_is_external_and_stable(self) -> None:
+        """History files remain outside working copies and use stable identities."""
 
         with patch.dict("os.environ", {"XDG_STATE_HOME": "/tmp/slate-state"}):
-            history_path, fish_history_name = project_history("/tmp/repo/../repo")
+            history_path, fish_history_name = project_history("/tmp/repo/../repo", terminal_id="a" * 32)
 
         self.assertEqual(history_path.parent, Path("/tmp/slate-state/slate/history"))
         self.assertEqual(history_path.name, fish_history_name.removeprefix("slate_"))
@@ -59,6 +62,78 @@ class TerminalHelpersTest(unittest.TestCase):
             TerminalManager._status_label(" Progetto\n| #[rosso] "),
             "Progetto ¦ #［rosso]",
         )
+
+    def test_history_identity_separates_projects_and_terminals(self) -> None:
+        """Canonical aliases share history only for the same terminal identity."""
+
+        with tempfile.TemporaryDirectory(prefix="slate-history-", dir="/tmp") as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(project, target_is_directory=True)
+            for terminal_id in ("a" * 32, "b" * 32):
+                with self.subTest(terminal_id=terminal_id):
+                    identity = project_history(str(project), terminal_id=terminal_id)
+                    self.assertEqual(identity, project_history(str(alias), terminal_id=terminal_id))
+                    self.assertNotEqual(identity, project_history(str(root / "other"), terminal_id=terminal_id))
+            normal_path, normal_fish = project_history(str(project), terminal_id="a" * 32)
+            other_path, other_fish = project_history(str(project), terminal_id="b" * 32)
+            self.assertNotEqual(other_path, normal_path)
+            self.assertNotEqual(other_fish, normal_fish)
+
+    def test_spawn_passes_separate_history_to_tmux(self) -> None:
+        """Only plain terminals receive shell and Fish history overrides."""
+
+        with tempfile.TemporaryDirectory(prefix="slate-history-", dir="/tmp") as directory:
+            with patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
+                for terminal_id in ("a" * 32, None):
+                    with self.subTest(terminal_id=terminal_id):
+                        terminal = MagicMock()
+                        owner = SimpleNamespace(
+                            tmux=("tmux", "-L", "slate-test-unused"),
+                            initial_commands={}, spawn_cancellables={},
+                            _on_spawned=MagicMock(),
+                        )
+                        TerminalManager._spawn_terminal(
+                            owner, terminal, "repo/renamed", "repo", directory,
+                            "renamed", directory, None, history_id=terminal_id,
+                        )
+                        argv = terminal.spawn_async.call_args.args[2]
+                        if terminal_id is not None:
+                            history, fish = project_history(directory, terminal_id=terminal_id)
+                            self.assertIn(f"HISTFILE={history}", argv)
+                            self.assertIn(f"fish_history={fish}", argv)
+                        else:
+                            self.assertNotIn("-e", argv)
+                        self.assertEqual(argv[:3], list(owner.tmux))
+                        self.assertEqual(owner.initial_commands, {})
+
+    def test_bash_reopens_only_its_terminal_history(self) -> None:
+        """Separate Bash processes persist and reload only their assigned per-terminal history."""
+
+        # 2026-10-15: exercise real Bash history without startup files, GTK or
+        # production tmux; explicit /tmp placement keeps artifacts out of repos.
+        with tempfile.TemporaryDirectory(prefix="slate-history-", dir="/tmp") as directory:
+            with patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
+                for terminal_id, entry in (("a" * 32, "echo first-marker"), ("b" * 32, "echo second-marker")):
+                    history, _fish = project_history(directory, terminal_id=terminal_id)
+                    history.parent.mkdir(parents=True, exist_ok=True)
+                    env = {"PATH": os.defpath, "HOME": directory, "HISTFILE": str(history)}
+                    subprocess.run(
+                        ["bash", "--noprofile", "--norc", "-c",
+                         'history -c; history -s "$1"; history -w', "slate-test", entry],
+                        env=env, check=True, capture_output=True, timeout=10,
+                    )
+                for terminal_id, expected in (("a" * 32, "echo first-marker"), ("b" * 32, "echo second-marker")):
+                    history, _fish = project_history(directory, terminal_id=terminal_id)
+                    env = {"PATH": os.defpath, "HOME": directory, "HISTFILE": str(history)}
+                    result = subprocess.run(
+                        ["bash", "--noprofile", "--norc", "-c",
+                         "history -c; history -r; history -w /dev/stdout"],
+                        env=env, check=True, capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.stdout.strip(), expected)
 
     def test_standard_paste_shortcuts_reach_vte_clipboard(self) -> None:
         """Ctrl+Shift+V and Shift+Insert paste without entering terminal text."""
@@ -430,6 +505,9 @@ class TerminalHelpersTest(unittest.TestCase):
         self.assertFalse(PaneInfo("session", "codex", 123, agent_display="Codex").active)
         self.assertTrue(PaneInfo("session", "vim", 123, agent_display="Codex").active)
         self.assertTrue(PaneInfo("session", "node", 123).active)
+        for command in ("node", "codex", "codex-linux", "vim"):
+            self.assertTrue(PaneInfo("session", command, 123, agent_display="Codex").running_process)
+        self.assertFalse(PaneInfo("session", "bash", 123, agent_display="Codex").running_process)
 
     def test_activity_query_reads_codex_marker_with_pane_command(self) -> None:
         """One tmux query provides both process and persisted agent identity."""
@@ -609,24 +687,91 @@ class TerminalHelpersTest(unittest.TestCase):
         owner.tmux = ("tmux", "-L", "slate")
         owner.query_panes = MagicMock()
         owner._codex_rename_sent = MagicMock()
-        with patch("slate.terminals.run_async") as run:
+        with patch("slate.terminals.run_async") as run, patch(
+            "slate.terminals.GLib.timeout_add"
+        ) as timeout:
             TerminalManager.request_codex_rename(owner, "Repo", "Work two")
             panes_ready = owner.query_panes.call_args.args[0]
-            panes_ready([PaneInfo("repo--work-two", "node", 123, "/dev/pts/9")])
+            pane = PaneInfo(
+                "repo--work-two", "node", 123, "/dev/pts/9",
+                agent_display="Codex",
+            )
+            self.assertFalse(pane.active)
+            panes_ready([pane])
             self.assertEqual(
                 run.call_args.args[0],
                 ["ps", "-t", "pts/9", "-o", "pid=,pgid=,tpgid=,comm=,args="],
             )
             process_ready = run.call_args.args[1]
             process_ready(CommandResult((), 0, "123 123 123 node node /opt/@openai/codex/bin/codex.js\n", ""))
-        self.assertEqual(
-            run.call_args.args[0],
-            [
-                "tmux", "-L", "slate",
-                "send-keys", "-t", "repo--work-two", "-l", "/rename Work two",
-                ";", "send-keys", "-t", "repo--work-two", "Enter",
-            ],
-        )
+            self.assertEqual(
+                run.call_args.args[0],
+                ["tmux", "-L", "slate", "send-keys", "-t",
+                 "repo--work-two", "-l", "/rename Work two"],
+            )
+            text_sent = run.call_args.args[1]
+            text_sent(CommandResult((), 0, "", ""))
+            timeout.assert_called_once()
+            self.assertEqual(timeout.call_args.args[0], 250)
+            self.assertEqual(run.call_count, 2)
+            submit_after_delay = timeout.call_args.args[1]
+            self.assertFalse(submit_after_delay())
+            self.assertEqual(run.call_count, 3)
+            submit_process_ready = run.call_args.args[1]
+            submit_process_ready(CommandResult(
+                (), 0, "123 123 123 node node /opt/@openai/codex/bin/codex.js\n", ""
+            ))
+            self.assertEqual(
+                run.call_args.args[0],
+                ["tmux", "-L", "slate", "send-keys", "-t",
+                 "repo--work-two", "Enter"],
+            )
+        terminal.feed_child.assert_not_called()
+
+    def test_codex_rename_does_not_submit_if_codex_exits_during_delay(self) -> None:
+        """Delayed Enter never reaches a shell that replaced the Codex process."""
+
+        terminal = MagicMock()
+        owner = TerminalManager.__new__(TerminalManager)
+        owner.terminals = {"Repo/work": terminal}
+        owner.sessions = {"Repo/work": "repo--work"}
+        owner.tmux = ("tmux", "-L", "slate")
+        owner.query_panes = MagicMock()
+        with patch("slate.terminals.run_async") as run, patch(
+            "slate.terminals.GLib.timeout_add"
+        ) as timeout:
+            TerminalManager.request_codex_rename(owner, "Repo", "work")
+            panes_ready = owner.query_panes.call_args.args[0]
+            panes_ready([PaneInfo("repo--work", "node", 123, "/dev/pts/9")])
+            process_ready = run.call_args.args[1]
+            process_ready(CommandResult((), 0, "123 123 123 codex codex\n", ""))
+            text_sent = run.call_args.args[1]
+            text_sent(CommandResult((), 0, "", ""))
+            submit_after_delay = timeout.call_args.args[1]
+            self.assertFalse(submit_after_delay())
+            submit_process_ready = run.call_args.args[1]
+            submit_process_ready(CommandResult((), 0, "123 123 123 bash bash\n", ""))
+            self.assertEqual(run.call_count, 3)
+
+    def test_codex_rename_does_not_trust_stale_agent_marker(self) -> None:
+        """A Codex marker alone cannot authorize input to an unrelated Node app."""
+
+        terminal = MagicMock()
+        owner = TerminalManager.__new__(TerminalManager)
+        owner.terminals = {"Repo/work": terminal}
+        owner.sessions = {"Repo/work": "repo--work"}
+        owner.tmux = ("tmux", "-L", "slate")
+        owner.query_panes = MagicMock()
+        with patch("slate.terminals.run_async") as run:
+            TerminalManager.request_codex_rename(owner, "Repo", "work")
+            panes_ready = owner.query_panes.call_args.args[0]
+            panes_ready([
+                PaneInfo("repo--work", "node", 123, "/dev/pts/9",
+                         agent_display="Codex")
+            ])
+            process_ready = run.call_args.args[1]
+            process_ready(CommandResult((), 0, "123 123 123 node node /srv/app.js\n", ""))
+            self.assertEqual(run.call_count, 1)
         terminal.feed_child.assert_not_called()
 
     def test_codex_rename_rejects_shell_metacharacters_in_title(self) -> None:
