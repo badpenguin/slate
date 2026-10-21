@@ -1272,6 +1272,9 @@ class SCMPanel(Gtk.Box):
 
         hit = tree.get_path_at_pos(int(event.x), int(event.y))
         if event.button == 1:
+            # 2026-10-13: la preview segue la selezione senza prendere il
+            # focus; frecce e shortcut restano nella lista Revisioni.
+            tree.grab_focus()
             if event.type == Gdk.EventType._2BUTTON_PRESS:
                 self._cancel_pending_preview()
                 if hit:
