@@ -7,6 +7,7 @@ import binascii
 import hashlib
 import os
 import re
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
@@ -67,11 +68,14 @@ def terminal_key(project_name: str, terminal_name: str) -> str:
     return f"{project_name}/{terminal_name}"
 
 
-def project_history(project_path: str) -> tuple[Path, str]:
-    """Return the shared shell-history path and Fish name for one project."""
+def project_history(project_path: str, *, terminal_id: str) -> tuple[Path, str]:
+    """Return project-scoped history paths for one persistent terminal identity."""
 
+    # 2026-10-16: each plain shell owns its history; a persistent opaque ID
+    # preserves it across renames without copying old shared command history.
     canonical_path = os.path.realpath(project_path)
-    identifier = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()[:24]
+    project_id = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()[:24]
+    identifier = f"{project_id}-{terminal_id}"
     state_home = Path(
         os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
     )
@@ -90,8 +94,16 @@ class PaneInfo:
     agent_display: str = ""
 
     @property
+    def running_process(self) -> bool:
+        """Report foreground programs, including Codex, for lifecycle decisions."""
+
+        # 2026-10-16: hiding an activity dot must never authorize terminating
+        # a live Codex session or classify it as a shell at the prompt.
+        return self.command not in SHELL_COMMANDS
+
+    @property
     def active(self) -> bool:
-        """Return whether the pane is running something other than a shell."""
+        """Return whether the pane should display the generic activity dot."""
 
         # 2026-10-12: Codex rimane in foreground anche quando attende input;
         # il pallino deve indicare altri processi, non una sessione Codex idle.
@@ -100,7 +112,7 @@ class PaneInfo:
             or self.command.startswith("codex-")
         ):
             return False
-        return self.command not in SHELL_COMMANDS
+        return self.running_process
 
 
 @dataclass(frozen=True)
@@ -119,6 +131,7 @@ class TerminalManager:
 
     ACTIVITY_DEBOUNCE_MS = 100
     ACTIVITY_INTERVAL_MS = 5000
+    CODEX_RENAME_SUBMIT_DELAY_MS = 250
 
     def __init__(
         self,
@@ -245,6 +258,9 @@ class TerminalManager:
                 terminal_name_value,
                 spawn_directory,
                 None,
+                history_id=project.setdefault("terminal_history_ids", {}).setdefault(
+                    terminal_name_value, uuid.uuid4().hex
+                ),
             )
         terminal.show()
         self.request_activity_refresh()
@@ -294,17 +310,14 @@ class TerminalManager:
         terminal_name_value: str,
         spawn_directory: str,
         initial_command: str | None,
+        *,
+        history_id: str | None = None,
     ) -> None:
         """Attach VTE to tmux and retain a launcher for a newly created session."""
 
         if initial_command:
             self.initial_commands[key] = initial_command
         tmux_session = session_name(project_name, terminal_name_value)
-        history_path, fish_history_name = project_history(project_path)
-        # 2026-09-15: una sola history per progetto evita che, dopo un riavvio,
-        # ogni terminale rilegga la cronologia globale salvata per ultima. La
-        # directory resta esterna alla working copy e non cresce per sessione.
-        history_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         argv = [
             *self.tmux,
             "new-session",
@@ -314,11 +327,13 @@ class TerminalManager:
             tmux_session,
             "-c",
             spawn_directory,
-            "-e",
-            f"HISTFILE={history_path}",
-            "-e",
-            f"fish_history={fish_history_name}",
         ]
+        # 2026-10-16: custom launchers inherit their shell defaults; only plain
+        # terminals receive a dedicated history, independent of tab labels.
+        if history_id is not None:
+            history_path, fish_history_name = project_history(project_path, terminal_id=history_id)
+            history_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            argv.extend(["-e", f"HISTFILE={history_path}", "-e", f"fish_history={fish_history_name}"])
         cancellable = Gio.Cancellable()
         self.spawn_cancellables[key] = cancellable
         terminal.spawn_async(
@@ -636,14 +651,13 @@ class TerminalManager:
             pane = next((item for item in panes if item.session == tmux_session), None)
             if (
                 pane is None
-                or not pane.active
                 or not pane.tty.startswith("/dev/")
                 or not (pane.command == "node" or pane.command.startswith("codex"))
             ):
                 return
 
             def process_ready(result: CommandResult) -> None:
-                """Send a Codex command and a real tmux Enter to the same pane."""
+                """Send rename text only after confirming Codex owns the pane."""
 
                 if (
                     result.ok
@@ -651,16 +665,55 @@ class TerminalManager:
                     and self.sessions.get(key) == tmux_session
                     and self._foreground_is_codex(result.stdout)
                 ):
-                    # 2026-10-12: in Codex LF e CR possono aggiungere una riga
-                    # al composer; tmux invia Enter come tasto distinto dopo
-                    # il testo letterale, nella stessa richiesta ordinata.
+                    def text_sent(text_result: CommandResult) -> None:
+                        """Wait until Codex's paste-burst window expires."""
+
+                        if not text_result.ok:
+                            self._codex_rename_sent(text_result)
+                            return
+
+                        def submit_after_delay() -> bool:
+                            """Recheck the foreground process before sending Enter."""
+
+                            if (
+                                self.terminals.get(key) is not terminal
+                                or self.sessions.get(key) != tmux_session
+                            ):
+                                return GLib.SOURCE_REMOVE
+
+                            def submit_process_ready(submit_result: CommandResult) -> None:
+                                """Submit only while Codex still owns the same TTY."""
+
+                                if (
+                                    submit_result.ok
+                                    and self.terminals.get(key) is terminal
+                                    and self.sessions.get(key) == tmux_session
+                                    and self._foreground_is_codex(submit_result.stdout)
+                                ):
+                                    run_async(
+                                        [*self.tmux, "send-keys", "-t",
+                                         tmux_session, "Enter"],
+                                        self._codex_rename_sent,
+                                    )
+
+                            run_async(
+                                ["ps", "-t", pane.tty.removeprefix("/dev/"),
+                                 "-o", "pid=,pgid=,tpgid=,comm=,args="],
+                                submit_process_ready,
+                            )
+                            return GLib.SOURCE_REMOVE
+
+                        # 2026-10-13: Codex inserisce una nuova riga quando
+                        # Enter arriva entro 120 ms da un paste burst; attendere
+                        # prima del submit evita che `/rename` resti nel composer.
+                        GLib.timeout_add(
+                            self.CODEX_RENAME_SUBMIT_DELAY_MS, submit_after_delay
+                        )
+
                     run_async(
-                        self._batched_tmux_argv((
-                            ("send-keys", "-t", tmux_session, "-l",
-                             f"/rename {terminal_name_value}"),
-                            ("send-keys", "-t", tmux_session, "Enter"),
-                        )),
-                        self._codex_rename_sent,
+                        [*self.tmux, "send-keys", "-t", tmux_session, "-l",
+                         f"/rename {terminal_name_value}"],
+                        text_sent,
                     )
 
             # 2026-10-08: il marcatore del launcher sopravvive all'uscita di
@@ -849,6 +902,79 @@ class TerminalManager:
         """Terminate only the dedicated SLATE tmux server."""
 
         run_async([*self.tmux, "kill-server"], callback)
+
+    def retire_idle_shells(self, projects: Sequence[dict], callback: Callable[[], None]) -> None:
+        """Close only plain single-pane shells without foreground or background jobs."""
+
+        # 2026-10-16: foreground activity alone misses background/stopped jobs.
+        # Inspect processes only for this explicit close action; keep sessions
+        # on uncertainty and never send textual exit commands into a terminal.
+        plain_sessions = {
+            session_name(project["name"], name)
+            for project in projects
+            for name in project["terminals"]
+            if not project.get("terminal_commands", {}).get(name)
+        }
+
+        def panes_ready(panes: list[PaneInfo]) -> None:
+            """Select plain shell candidates using a fresh dedicated tmux query."""
+
+            candidates = [
+                pane for pane in panes
+                if pane.session in plain_sessions and not pane.running_process
+                and not pane.agent_display
+                and sum(other.session == pane.session for other in panes) == 1
+            ]
+            if not candidates:
+                callback()
+                return
+
+            def processes_ready(result: CommandResult) -> None:
+                """Retain any shell with children, including stopped/background jobs."""
+
+                if not result.ok:
+                    callback()
+                    return
+                processes: dict[int, tuple[int, int, int, str, str]] = {}
+                try:
+                    for line in result.stdout.splitlines():
+                        pid, parent, group, foreground, state, command = line.split(None, 5)
+                        processes[int(pid)] = (int(parent), int(group), int(foreground), command, state)
+                except (ValueError, TypeError):
+                    callback()
+                    return
+                parents = {process[0] for process in processes.values()}
+                safe = []
+                for pane in candidates:
+                    process = processes.get(pane.pid)
+                    # The original pane process must still be the foreground
+                    # shell and have no children; wrappers and extra panes stay.
+                    if (process is not None and process[3] == pane.command
+                            and process[1] == process[2] and process[2] > 0
+                            and process[4].startswith("S")
+                            and pane.pid not in parents):
+                        safe.append(pane.session)
+                if not safe:
+                    callback()
+                    return
+                pending = len(safe)
+
+                def retired(_result: CommandResult) -> None:
+                    """Finish after all safe closures, keeping failed sessions alive."""
+
+                    nonlocal pending
+                    pending -= 1
+                    if pending == 0:
+                        callback()
+
+                # tmux closes the PTY, letting interactive shells handle HUP
+                # and save history; no SIGKILL and no terminal input injection.
+                for name in safe:
+                    self.kill_session(name, retired)
+
+            run_async(["ps", "-e", "-o", "pid=,ppid=,pgid=,tpgid=,stat=,comm="], processes_ready)
+
+        self.query_panes(panes_ready, include_duration=False)
 
     def kill_session(self, name: str, callback: Callable[[CommandResult], None]) -> None:
         """Terminate one named session on the dedicated server."""
@@ -1205,7 +1331,7 @@ class TerminalManager:
     ) -> None:
         """Resolve active foreground durations from each pane tty using ps."""
 
-        active_indexes = [index for index, pane in enumerate(panes) if pane.active]
+        active_indexes = [index for index, pane in enumerate(panes) if pane.running_process]
         if not active_indexes:
             callback(panes)
             return
