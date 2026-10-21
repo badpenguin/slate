@@ -15,6 +15,9 @@ from gi.repository import Gdk, GLib, Gtk
 
 from slate.editor import EditorDocument, EditorWorkspace
 from slate.processes import CommandResult
+from slate.preview import FilePreview
+from slate.scm.base import FileStatus
+from slate.window import SlateWindow
 
 
 class EditorTest(unittest.TestCase):
@@ -469,6 +472,78 @@ class EditorTest(unittest.TestCase):
         self.assertEqual(workspace.active_ref, ("project", "src/file.md"))
         workspace.shutdown()
 
+    def test_revision_preview_e_opens_or_reuses_real_editor_buffer(self) -> None:
+        """The complete E path activates one buffer without losing existing edits."""
+
+        for already_open in (False, True):
+            with self.subTest(already_open=already_open):
+                workspace = EditorWorkspace(
+                    Gtk.Box(), 10, MagicMock(), MagicMock(), MagicMock(), MagicMock()
+                )
+                self.addCleanup(workspace.shutdown)
+                existing = None
+                if already_open:
+                    existing = workspace.open_file("project", str(self.root), "TODO.md")
+
+                    def initial_content_loaded() -> bool:
+                        """Wait for the existing buffer before adding an unsaved edit."""
+
+                        return existing.etag is not None and not existing.loading
+
+                    self._wait_until(initial_content_loaded)
+                    existing.buffer.insert(existing.buffer.get_end_iter(), "unsaved\n")
+                preview = FilePreview(MagicMock())
+                preview.current_path = "TODO.md"
+                preview._set_diff_text(
+                    "diff --git a/TODO.md b/TODO.md\n"
+                    "--- a/TODO.md\n+++ b/TODO.md\n@@ -1 +1 @@\n-old\n+new\n"
+                )
+                preview.set_no_show_all(False)
+                preview.show_all()
+                preview.set_no_show_all(True)
+                panel = Gtk.Box()
+                panel.message = Gtk.TextView()
+                panel._cancel_pending_preview = MagicMock()
+                owner = SimpleNamespace(
+                    preview=preview, preview_status=FileStatus("TODO.md", "modified"),
+                    panel=panel, editor_workspace=workspace, project_tree=Gtk.TreeView(),
+                    active_project_name="project", project_search=MagicMock(),
+                    get_focus=MagicMock(return_value=preview), browser_manager=MagicMock(),
+                    config=SimpleNamespace(
+                        find_project=MagicMock(return_value={"name": "project", "path": str(self.root)}),
+                        save=MagicMock(),
+                    ),
+                    _workspace_repository_path=MagicMock(return_value="TODO.md"),
+                    _project_file_path=MagicMock(return_value=str(self.path)),
+                    _append_project_item=MagicMock(return_value=False),
+                    _select_tree_row=MagicMock(),
+                )
+                owner.project_search.get_visible.return_value = False
+                owner._close_preview = SlateWindow._close_preview.__get__(owner)
+                owner._edit_status_internal = SlateWindow._edit_status_internal.__get__(owner)
+                owner._edit_project_file_internal = SlateWindow._edit_project_file_internal.__get__(owner)
+                preview.on_action = SlateWindow._handle_file_preview_action.__get__(owner)
+                SlateWindow._protect_preview_background(owner)
+                event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+
+                self.assertTrue(SlateWindow._on_key_press(owner, None, event))
+
+                self.assertFalse(preview.get_visible())
+                self.assertTrue(workspace.get_sensitive())
+                self.assertEqual(len(workspace.editors), 1)
+                if existing is not None:
+                    self.assertIs(workspace.current_editor(), existing)
+                    self.assertTrue(existing.dirty)
+                    self.assertEqual(
+                        existing.buffer.get_text(
+                            existing.buffer.get_start_iter(), existing.buffer.get_end_iter(), True
+                        ),
+                        "# TODO\nunsaved\n",
+                    )
+                else:
+                    self.assertEqual(workspace.current_editor().relative_path, "TODO.md")
+                workspace.shutdown()
+
     def test_saving_file_symlink_updates_target_without_replacing_link(self) -> None:
         """The editor writes the resolved target and preserves a file alias."""
 
@@ -586,11 +661,28 @@ class EditorTest(unittest.TestCase):
                 and editor.line_navigation_id is None
             )
 
-        self._wait_until(initial_load_finished)
+        with patch.object(editor.view, "grab_focus") as grab_focus:
+            self._wait_until(initial_load_finished)
+        grab_focus.assert_not_called()
         cursor = editor.buffer.get_iter_at_mark(editor.buffer.get_insert())
         self.assertEqual(cursor.get_line(), 2)
         self.assertIsNone(editor.pending_line)
         workspace.shutdown()
+
+    def test_line_navigation_idle_does_not_repeat_focus_request(self) -> None:
+        """Delayed scroll confirmation leaves the user's newer focus choice alone."""
+
+        editor = self._document()
+        self.addCleanup(editor.close)
+        with patch.object(editor.view, "grab_focus") as grab_focus, patch(
+            "slate.editor.GLib.idle_add", return_value=71
+        ) as idle:
+            editor.goto_line_number(1)
+            grab_focus.assert_called_once_with()
+            grab_focus.reset_mock()
+            callback, line = idle.call_args.args
+            self.assertFalse(callback(line))
+            grab_focus.assert_not_called()
 
     def test_workspace_rekeys_dirty_editor_after_file_rename(self) -> None:
         """A renamed open file keeps its buffer and receives the new identity."""
