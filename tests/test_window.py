@@ -15,8 +15,10 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gtk
 
 from slate.processes import CommandResult
+from slate.preview import FilePreview
 from slate.scm.base import FileStatus, RepositoryRef, RepositorySyncStatus
 from slate.scm.git import GitSCM
+from slate.terminals import PaneInfo
 from slate.window import SlateWindow, _CODEX_RESUME_COMMAND, _moved_sequence
 
 
@@ -211,16 +213,23 @@ class WindowActionTest(unittest.TestCase):
             _repository_scm=MagicMock(),
             _close_preview=MagicMock(),
             _update_preview_geometry=MagicMock(),
+            get_focus=MagicMock(return_value=None),
+            panel=SimpleNamespace(message=Gtk.TextView()),
+            project_tree=MagicMock(),
+            editor_workspace=MagicMock(),
+        )
+        owner._protect_preview_background = (
+            SlateWindow._protect_preview_background.__get__(owner)
         )
 
         SlateWindow._preview_file(owner, status)
 
         preview.show_status.assert_not_called()
         owner._update_preview_geometry.assert_not_called()
-        preview.grab_focus.assert_called_once_with()
+        preview.grab_focus.assert_not_called()
 
-    def test_revision_preview_takes_focus_when_shown(self) -> None:
-        """A displayed revision preview owns keys before the editor below it."""
+    def test_revision_preview_preserves_sidebar_focus_when_shown(self) -> None:
+        """A displayed revision preview blocks the background without grabbing focus."""
 
         status = FileStatus("tracked.py", "modified")
         preview = MagicMock(current_path=None)
@@ -230,12 +239,100 @@ class WindowActionTest(unittest.TestCase):
             _repository_scm=MagicMock(),
             _close_preview=MagicMock(),
             _update_preview_geometry=MagicMock(),
+            get_focus=MagicMock(return_value=None),
+            panel=SimpleNamespace(message=Gtk.TextView()),
+            project_tree=MagicMock(),
+            editor_workspace=MagicMock(),
+        )
+        owner._protect_preview_background = (
+            SlateWindow._protect_preview_background.__get__(owner)
         )
 
         SlateWindow._preview_file(owner, status)
 
         preview.show_status.assert_called_once()
-        preview.grab_focus.assert_called_once_with()
+        preview.grab_focus.assert_not_called()
+        owner.project_tree.set_sensitive.assert_called_once_with(False)
+        owner.editor_workspace.set_sensitive.assert_called_once_with(False)
+
+    def test_revision_preview_does_not_redirect_focused_text_input(self) -> None:
+        """Showing preview content never redirects an already focused text input."""
+
+        status = FileStatus("tracked.py", "modified")
+        message = Gtk.TextView()
+        preview = MagicMock(current_path=None)
+        preview.get_visible.return_value = False
+        owner = SimpleNamespace(
+            preview=preview,
+            panel=SimpleNamespace(message=message),
+            project_tree=MagicMock(),
+            editor_workspace=MagicMock(),
+            get_focus=MagicMock(return_value=message),
+            _repository_scm=MagicMock(),
+            _close_preview=MagicMock(),
+            _update_preview_geometry=MagicMock(),
+        )
+        owner._protect_preview_background = (
+            SlateWindow._protect_preview_background.__get__(owner)
+        )
+
+        SlateWindow._preview_file(owner, status)
+
+        preview.grab_focus.assert_not_called()
+
+    def test_preview_disables_covered_widgets_until_it_closes(self) -> None:
+        """GTK cannot deliver keys to the covered editor or sidebar."""
+
+        project_tree = Gtk.TreeView()
+        editor_workspace = Gtk.Box()
+        preview = MagicMock()
+        owner = SimpleNamespace(
+            project_tree=project_tree,
+            editor_workspace=editor_workspace,
+            preview=preview,
+            panel=SimpleNamespace(message=Gtk.TextView(), _cancel_pending_preview=MagicMock()),
+            get_focus=MagicMock(return_value=Gtk.TextView()),
+            preview_status=FileStatus("tracked.py", "modified"),
+        )
+
+        SlateWindow._protect_preview_background(owner)
+
+        self.assertFalse(project_tree.get_sensitive())
+        self.assertFalse(editor_workspace.get_sensitive())
+        preview.grab_focus.assert_not_called()
+
+        SlateWindow._close_preview(owner)
+
+        self.assertTrue(project_tree.get_sensitive())
+        self.assertTrue(editor_workspace.get_sensitive())
+
+    def test_revision_refresh_does_not_steal_commit_message_focus(self) -> None:
+        """An automatic preview reload leaves the commit text editor usable."""
+
+        status = FileStatus("tracked.py", "modified")
+        preview = MagicMock(current_path=status.path)
+        message = Gtk.TextView()
+        owner = SimpleNamespace(
+            preview=preview,
+            preview_status=status,
+            panel=SimpleNamespace(message=message),
+            get_focus=MagicMock(return_value=message),
+            project_tree=MagicMock(),
+            editor_workspace=MagicMock(),
+            _repository_scm=MagicMock(),
+            _close_preview=MagicMock(),
+            _update_preview_geometry=MagicMock(),
+        )
+        owner._protect_preview_background = (
+            SlateWindow._protect_preview_background.__get__(owner)
+        )
+
+        SlateWindow._preview_file(owner, status, force=True)
+
+        preview.show_status.assert_called_once()
+        preview.grab_focus.assert_not_called()
+        owner.project_tree.set_sensitive.assert_called_once_with(False)
+        owner.editor_workspace.set_sensitive.assert_called_once_with(False)
 
     def test_revision_watcher_forces_current_preview_reload(self) -> None:
         """A watcher refresh reloads content even when the row identity is unchanged."""
@@ -469,7 +566,11 @@ class WindowActionTest(unittest.TestCase):
     def test_ctrl_shift_f_precedes_contextual_editor_shortcuts(self) -> None:
         """Global project search consumes its accelerator before child managers."""
 
-        owner = SimpleNamespace(_show_project_search=MagicMock())
+        owner = SimpleNamespace(
+            _show_project_search=MagicMock(),
+            get_focus=MagicMock(return_value=None),
+            panel=SimpleNamespace(message=Gtk.TextView()),
+        )
         event = SimpleNamespace(
             keyval=Gdk.KEY_f,
             state=(
@@ -491,6 +592,8 @@ class WindowActionTest(unittest.TestCase):
             diff_editor_surface=surface,
             preview=MagicMock(),
             _show_error=MagicMock(),
+            get_focus=MagicMock(return_value=surface),
+            panel=SimpleNamespace(message=Gtk.TextView()),
         )
         owner.project_search.get_visible.return_value = False
         owner.browser_manager.handle_key.return_value = False
@@ -512,7 +615,9 @@ class WindowActionTest(unittest.TestCase):
             preview=MagicMock(),
             browser_manager=MagicMock(),
             editor_workspace=MagicMock(),
+            panel=SimpleNamespace(message=Gtk.TextView()),
         )
+        owner.get_focus = MagicMock(return_value=owner.preview)
         owner.project_search.get_visible.return_value = False
         owner.preview.get_visible.return_value = True
         owner.preview.handle_key.return_value = True
@@ -521,6 +626,278 @@ class WindowActionTest(unittest.TestCase):
         self.assertTrue(SlateWindow._on_key_press(owner, None, event))
 
         owner.preview.handle_key.assert_called_once_with(event)
+        owner.browser_manager.handle_key.assert_not_called()
+        owner.editor_workspace.handle_key.assert_not_called()
+
+    def test_preview_receives_e_even_if_covered_editor_retains_focus(self) -> None:
+        """A covered editor cannot receive E while a revision preview is open."""
+
+        editor = Gtk.TextView()
+        workspace = Gtk.Box()
+        workspace.add(editor)
+        workspace.handle_key = MagicMock()
+        owner = SimpleNamespace(
+            panel=Gtk.Box(),
+            get_focus=MagicMock(return_value=editor),
+            project_search=MagicMock(),
+            preview=MagicMock(),
+            browser_manager=MagicMock(),
+            editor_workspace=workspace,
+        )
+        owner.panel.message = Gtk.TextView()
+        owner.project_search.get_visible.return_value = False
+        owner.preview.get_visible.return_value = True
+        owner.preview.is_ancestor.return_value = False
+        owner.preview.handle_key.return_value = True
+        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+
+        self.assertTrue(SlateWindow._on_key_press(owner, None, event))
+
+        owner.preview.handle_key.assert_called_once_with(event)
+        owner.editor_workspace.handle_key.assert_not_called()
+
+    def test_preview_owns_e_over_covered_editor_search_entry(self) -> None:
+        """A stale search-entry focus in the hidden editor cannot swallow E."""
+
+        editor_workspace = Gtk.Box()
+        entry = Gtk.Entry()
+        editor_workspace.add(entry)
+        owner = SimpleNamespace(
+            panel=Gtk.Box(),
+            get_focus=MagicMock(return_value=entry),
+            project_tree=Gtk.TreeView(),
+            project_search=MagicMock(),
+            preview=MagicMock(),
+            browser_manager=MagicMock(),
+            editor_workspace=editor_workspace,
+        )
+        owner.panel.message = Gtk.TextView()
+        owner.project_search.get_visible.return_value = False
+        owner.preview.get_visible.return_value = True
+        owner.preview.is_ancestor.return_value = False
+        owner.preview.handle_key.return_value = True
+        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+
+        self.assertTrue(SlateWindow._on_key_press(owner, None, event))
+
+        owner.preview.handle_key.assert_called_once_with(event)
+
+    def test_revision_preview_e_opens_editor_and_cancels_pending_preview(self) -> None:
+        """E traverses window and preview routing without reopening the overlay."""
+
+        status = FileStatus("tracked.py", "modified")
+        project = {"name": "repo", "path": "/tmp/repo"}
+        editor = SimpleNamespace(relative_path="tracked.py")
+        panel = Gtk.Box()
+        panel.message = Gtk.TextView()
+        panel._cancel_pending_preview = MagicMock()
+        preview = FilePreview(MagicMock())
+        preview.current_path = status.path
+        # Un diff reale termina con una riga non mappabile: è il caso normale
+        # che la precedente preview vuota non esercitava.
+        preview._set_diff_text(
+            "diff --git a/tracked.py b/tracked.py\n"
+            "--- a/tracked.py\n+++ b/tracked.py\n@@ -1 +1 @@\n-old\n+new\n"
+        )
+        preview.set_no_show_all(False)
+        preview.show_all()
+        preview.set_no_show_all(True)
+        owner = SimpleNamespace(
+            panel=panel,
+            preview=preview,
+            preview_status=status,
+            get_focus=MagicMock(return_value=preview),
+            project_search=MagicMock(),
+            browser_manager=MagicMock(),
+            editor_workspace=SimpleNamespace(
+                open_file=MagicMock(return_value=editor),
+                handle_key=MagicMock(),
+                set_sensitive=MagicMock(),
+            ),
+            project_tree=MagicMock(),
+            active_project_name="repo",
+            config=SimpleNamespace(
+                find_project=MagicMock(return_value=project),
+                save=MagicMock(),
+            ),
+            _workspace_repository_path=MagicMock(return_value="tracked.py"),
+            _project_file_path=MagicMock(return_value="/tmp/repo/tracked.py"),
+            _append_project_item=MagicMock(return_value=False),
+            _select_tree_row=MagicMock(),
+        )
+        owner._close_preview = SlateWindow._close_preview.__get__(owner)
+        owner._edit_project_file_internal = (
+            SlateWindow._edit_project_file_internal.__get__(owner)
+        )
+        owner._edit_status_internal = SlateWindow._edit_status_internal.__get__(owner)
+        owner._handle_file_preview_action = (
+            SlateWindow._handle_file_preview_action.__get__(owner)
+        )
+        preview.on_action = MagicMock(wraps=owner._handle_file_preview_action)
+        owner.project_search.get_visible.return_value = False
+        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+
+        with patch("slate.window.os.path.isfile", return_value=True):
+            self.assertTrue(SlateWindow._on_key_press(owner, None, event))
+
+        self.assertTrue(preview.diff_edit_lines)
+        preview.on_action.assert_called_once_with("edit-internal")
+        owner._project_file_path.assert_called_once_with("tracked.py")
+        panel._cancel_pending_preview.assert_called_once_with()
+        owner.editor_workspace.open_file.assert_called_once_with(
+            "repo", "/tmp/repo", "tracked.py"
+        )
+        owner._select_tree_row.assert_called_once_with(
+            "repo", "tracked.py", "editor"
+        )
+        self.assertFalse(preview.get_visible())
+        owner.project_tree.set_sensitive.assert_called_once_with(True)
+        owner.editor_workspace.set_sensitive.assert_called_once_with(True)
+        owner.editor_workspace.handle_key.assert_not_called()
+
+    def test_commit_message_keys_are_never_dispatched_to_preview(self) -> None:
+        """Typing in the commit text view bypasses preview and global shortcuts."""
+
+        message = Gtk.TextView()
+        owner = SimpleNamespace(
+            panel=SimpleNamespace(message=message),
+            get_focus=MagicMock(return_value=message),
+            preview=MagicMock(),
+            editor_workspace=MagicMock(),
+            browser_manager=MagicMock(),
+            _show_project_search=MagicMock(),
+        )
+        owner.preview.get_visible.return_value = True
+
+        for keyval in (Gdk.KEY_e, Gdk.KEY_a, Gdk.KEY_space, Gdk.KEY_F5):
+            event = SimpleNamespace(keyval=keyval, state=Gdk.ModifierType(0))
+            self.assertFalse(SlateWindow._on_key_press(owner, None, event))
+
+        owner.preview.handle_key.assert_not_called()
+        owner.editor_workspace.handle_key.assert_not_called()
+        owner.browser_manager.handle_key.assert_not_called()
+        owner._show_project_search.assert_not_called()
+
+    def test_sidebar_shortcuts_never_reach_visible_central_managers(self) -> None:
+        """Files F5 and sidebar Ctrl+S cannot reload a browser or save an editor."""
+
+        files = Gtk.Box()
+        tree = Gtk.TreeView()
+        files.add(tree)
+        panel = Gtk.Box()
+        panel.message = Gtk.TextView()
+        owner = SimpleNamespace(
+            panel=panel, file_manager=files, preview=MagicMock(),
+            project_search=MagicMock(), editor_workspace=Gtk.Box(),
+            browser_manager=MagicMock(), get_focus=MagicMock(return_value=tree),
+        )
+        owner.editor_workspace.handle_key = MagicMock(return_value=True)
+        owner.project_search.get_visible.return_value = False
+        owner.preview.get_visible.return_value = False
+        for keyval, state in (
+            (Gdk.KEY_F5, Gdk.ModifierType(0)),
+            (Gdk.KEY_s, Gdk.ModifierType.CONTROL_MASK),
+        ):
+            event = SimpleNamespace(keyval=keyval, state=state)
+            self.assertFalse(SlateWindow._on_key_press(owner, None, event))
+        owner.browser_manager.handle_key.assert_not_called()
+        owner.editor_workspace.handle_key.assert_not_called()
+
+    def test_preview_e_opens_file_on_headers_end_and_mapped_rows(self) -> None:
+        """Real diff content supports file opening independently of cursor mapping."""
+
+        preview = FilePreview(MagicMock())
+        preview.current_path = "tracked.py"
+        preview._set_diff_text(
+            "diff --git a/tracked.py b/tracked.py\n"
+            "--- a/tracked.py\n+++ b/tracked.py\n@@ -9 +9 @@\n-old\n+new\n"
+        )
+        status = FileStatus("tracked.py", "modified")
+        owner = SimpleNamespace(
+            preview=preview, preview_status=status,
+            _edit_status_internal=MagicMock(),
+        )
+        preview.on_action = SlateWindow._handle_file_preview_action.__get__(owner)
+        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+        for row, mapped_line in ((None, None), (0, None), (5, 9)):
+            with self.subTest(row=row):
+                if row is not None:
+                    preview.buffer.place_cursor(preview.buffer.get_iter_at_line(row))
+                owner._edit_status_internal.reset_mock()
+                self.assertTrue(preview.handle_key(event))
+                if mapped_line is None:
+                    owner._edit_status_internal.assert_called_once_with(status)
+                else:
+                    owner._edit_status_internal.assert_called_once_with(status, mapped_line)
+
+    def test_f2_renames_selected_terminal_before_contextual_handlers(self) -> None:
+        """F2 opens terminal rename even when the preview is visible."""
+
+        owner = SimpleNamespace(
+            panel=SimpleNamespace(message=Gtk.TextView()),
+            get_focus=MagicMock(return_value=None),
+            project_search=MagicMock(),
+            preview=MagicMock(),
+            editor_workspace=MagicMock(),
+            browser_manager=MagicMock(),
+            _selected_terminal=MagicMock(return_value=({"name": "repo"}, "main")),
+            _prompt_terminal_rename=MagicMock(),
+        )
+        owner.project_search.get_visible.return_value = False
+        event = SimpleNamespace(keyval=Gdk.KEY_F2, state=Gdk.ModifierType(0))
+
+        self.assertTrue(SlateWindow._on_key_press(owner, None, event))
+
+        owner._prompt_terminal_rename.assert_called_once_with(send_codex_rename=True)
+        owner.preview.handle_key.assert_not_called()
+        owner.editor_workspace.handle_key.assert_not_called()
+        owner.browser_manager.handle_key.assert_not_called()
+
+    def test_f2_does_not_rename_from_commit_input_or_without_terminal(self) -> None:
+        """F2 respects text input and requires an explicit terminal selection."""
+
+        message = Gtk.TextView()
+        owner = SimpleNamespace(
+            panel=SimpleNamespace(message=message),
+            get_focus=MagicMock(return_value=message),
+            project_search=MagicMock(),
+            _selected_terminal=MagicMock(return_value=({"name": "repo"}, "main")),
+            _prompt_terminal_rename=MagicMock(),
+        )
+        owner.project_search.get_visible.return_value = False
+        event = SimpleNamespace(keyval=Gdk.KEY_F2, state=Gdk.ModifierType(0))
+
+        self.assertFalse(SlateWindow._on_key_press(owner, None, event))
+        owner._prompt_terminal_rename.assert_not_called()
+
+        owner.get_focus.return_value = None
+        owner._selected_terminal.return_value = None
+        self.assertFalse(SlateWindow._on_key_press(owner, None, event))
+        owner._prompt_terminal_rename.assert_not_called()
+
+    def test_visible_preview_does_not_override_focused_tree_shortcuts(self) -> None:
+        """A visible overlay handles keys only while it owns keyboard focus."""
+
+        tree = Gtk.TreeView()
+        panel = Gtk.Box()
+        panel.message = Gtk.TextView()
+        panel.add(tree)
+        owner = SimpleNamespace(
+            panel=panel,
+            get_focus=MagicMock(return_value=tree),
+            project_search=MagicMock(),
+            preview=MagicMock(),
+            browser_manager=MagicMock(),
+            editor_workspace=MagicMock(),
+        )
+        owner.project_search.get_visible.return_value = False
+        owner.preview.get_visible.return_value = True
+        owner.preview.is_ancestor.return_value = False
+        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+
+        self.assertFalse(SlateWindow._on_key_press(owner, None, event))
+
+        owner.preview.handle_key.assert_not_called()
         owner.browser_manager.handle_key.assert_not_called()
         owner.editor_workspace.handle_key.assert_not_called()
 
@@ -854,6 +1231,37 @@ class WindowActionTest(unittest.TestCase):
         self.assertEqual(owner.project_drag_candidate[0], ("project", "repo", ""))
         tree.get_selection().select_path.assert_not_called()
 
+    def test_editor_click_consumes_event_and_reactivates_selected_row(self) -> None:
+        """Editor clicks prevent GTK from reclaiming focus, including repeated clicks."""
+
+        for already_selected in (False, True):
+            with self.subTest(already_selected=already_selected):
+                tree = MagicMock()
+                path = Gtk.TreePath.new_from_indices([0])
+                tree.get_path_at_pos.return_value = (path, object(), 0, 0)
+                selection = tree.get_selection.return_value
+                selection.path_is_selected.return_value = already_selected
+                owner = SimpleNamespace(
+                    project_store=MagicMock(),
+                    COL_KIND=SlateWindow.COL_KIND,
+                    COL_PROJECT=SlateWindow.COL_PROJECT,
+                    COL_ITEM=SlateWindow.COL_ITEM,
+                    _clear_manual_attention=MagicMock(),
+                    _on_tree_selection=MagicMock(),
+                )
+                owner.project_store.get_value.return_value = "editor"
+                event = SimpleNamespace(
+                    button=1, state=Gdk.ModifierType(0),
+                    type=Gdk.EventType.BUTTON_PRESS, x=24, y=12,
+                )
+
+                self.assertTrue(SlateWindow._on_tree_button(owner, tree, event))
+                selection.select_path.assert_called_once_with(path)
+                if already_selected:
+                    owner._on_tree_selection.assert_called_once_with(selection)
+                else:
+                    owner._on_tree_selection.assert_not_called()
+
     def test_editor_row_double_click_reveals_it_in_files(self) -> None:
         """Double-clicking a sidebar editor switches to Files and locates it."""
 
@@ -865,6 +1273,7 @@ class WindowActionTest(unittest.TestCase):
         path = store.get_path(tree_iter)
         tree = MagicMock()
         tree.get_path_at_pos.return_value = (path, object(), 0, 0)
+        tree.get_selection.return_value.path_is_selected.return_value = False
         owner = SimpleNamespace(
             project_drag_candidate=None,
             project_store=store,
@@ -1695,6 +2104,7 @@ class WindowActionTest(unittest.TestCase):
             ),
             editor_workspace=SimpleNamespace(open_file=MagicMock(return_value=editor)),
             _project_file_path=MagicMock(return_value="/tmp/repo/target.py"),
+            panel=SimpleNamespace(_cancel_pending_preview=MagicMock()),
             _close_preview=MagicMock(),
             _append_project_item=MagicMock(return_value=False),
             _select_tree_row=MagicMock(),
@@ -1710,6 +2120,7 @@ class WindowActionTest(unittest.TestCase):
             calls.mock_calls,
             [call.activate("repo", "target.py", "editor"), call.goto(37)],
         )
+        owner._close_preview.assert_called_once_with()
 
     def test_symlink_alias_selects_existing_editor_row(self) -> None:
         """An alias opening an existing buffer does not add a second sidebar row."""
@@ -1723,6 +2134,7 @@ class WindowActionTest(unittest.TestCase):
             ),
             editor_workspace=SimpleNamespace(open_file=MagicMock(return_value=editor)),
             _project_file_path=MagicMock(return_value="/tmp/repo/alias.php"),
+            panel=SimpleNamespace(_cancel_pending_preview=MagicMock()),
             _close_preview=MagicMock(),
             _append_project_item=MagicMock(return_value=False),
             _select_tree_row=MagicMock(),
@@ -1777,6 +2189,61 @@ class WindowActionTest(unittest.TestCase):
         owner._after_editors_close(True)
         owner.terminals.set_activity_monitoring.assert_called_once_with(False)
         owner.terminals.query_panes.assert_called_once_with(owner._decide_close)
+
+    def test_codex_close_respects_background_cancel_and_terminate_choices(self) -> None:
+        """Codex without a red dot still requires an explicit shutdown choice."""
+
+        panes = [PaneInfo("repo--codex", "node", 123, agent_display="Codex"),
+                 PaneInfo("repo--main", "bash", 124)]
+        for response in (1, 2, Gtk.ResponseType.CANCEL):
+            with self.subTest(response=response):
+                owner = SimpleNamespace(
+                    closing=True, terminals=MagicMock(), set_sensitive=MagicMock(),
+                    config=SimpleNamespace(data={"projects": []}),
+                    _terminate_all=MagicMock(), _save_window_state=MagicMock(),
+                    _final_destroy=MagicMock(), is_active=MagicMock(return_value=True),
+                    _format_duration=MagicMock(return_value="unknown"),
+                )
+                with patch("slate.window.Gtk.MessageDialog") as dialog_class:
+                    dialog = dialog_class.return_value
+                    dialog.run.return_value = response
+                    SlateWindow._decide_close(owner, panes)
+                dialog.run.assert_called_once_with()
+                details = dialog.format_secondary_text.call_args.args[0]
+                self.assertIn("repo--codex (node", details)
+                self.assertNotIn("repo--codex (shell at prompt)", details)
+                if response == 1:
+                    owner._save_window_state.assert_called_once_with()
+                    owner.terminals.begin_shutdown.assert_called_once_with()
+                    owner.terminals.retire_idle_shells.assert_called_once_with([], owner._final_destroy)
+                    owner._final_destroy.assert_not_called()
+                    owner.terminals.retire_idle_shells.call_args.args[1]()
+                    owner._final_destroy.assert_called_once_with()
+                    owner._terminate_all.assert_not_called()
+                elif response == 2:
+                    owner._terminate_all.assert_called_once_with(panes)
+                    owner._final_destroy.assert_not_called()
+                else:
+                    self.assertFalse(owner.closing)
+                    owner._terminate_all.assert_not_called()
+                    owner._final_destroy.assert_not_called()
+                owner.terminals.kill_server.assert_not_called()
+                owner.terminals.kill_session.assert_not_called()
+
+    def test_idle_shells_still_offer_explicit_background_choice(self) -> None:
+        """Shell-only sessions must not silently take the terminate-all path."""
+
+        owner = SimpleNamespace(
+            closing=True, terminals=MagicMock(), _terminate_all=MagicMock(),
+            _save_window_state=MagicMock(), _final_destroy=MagicMock(),
+            is_active=MagicMock(return_value=True),
+        )
+        with patch("slate.window.Gtk.MessageDialog") as dialog_class:
+            dialog_class.return_value.run.return_value = Gtk.ResponseType.CANCEL
+            SlateWindow._decide_close(owner, [PaneInfo("repo--main", "bash", 100)])
+        dialog_class.return_value.run.assert_called_once_with()
+        owner._terminate_all.assert_not_called()
+        owner._final_destroy.assert_not_called()
 
     def test_commit_starts_immediately_after_panel_validation(self) -> None:
         """Commit does not insert a second confirmation after message and checkbox."""
@@ -2278,6 +2745,7 @@ class WindowActionTest(unittest.TestCase):
             "terminals": ["logs-1"],
             "terminal_commands": {"logs-1": "journalctl -f"},
             "terminal_icons": {"logs-1": "text-x-script"},
+            "terminal_history_ids": {"logs-1": "a" * 32},
             "item_order": [{"kind": "terminal", "value": "logs-1"}],
             "last_terminal": "logs-1",
         }
@@ -2304,6 +2772,7 @@ class WindowActionTest(unittest.TestCase):
         renamed(True)
 
         self.assertEqual(project["terminal_icons"], {"system-logs": "text-x-script"})
+        self.assertEqual(project["terminal_history_ids"], {"system-logs": "a" * 32})
         self.assertEqual(
             project["terminal_commands"],
             {"system-logs": "journalctl -f"},
@@ -2810,6 +3279,7 @@ class WindowActionTest(unittest.TestCase):
             _edit_project_file_internal=MagicMock(),
             _close_preview=MagicMock(),
             _update_preview_geometry=MagicMock(),
+            _protect_preview_background=MagicMock(),
         )
 
         SlateWindow._preview_project_file(owner, "src/app.py")
@@ -2835,6 +3305,7 @@ class WindowActionTest(unittest.TestCase):
             _edit_status_internal=MagicMock(),
             _close_preview=MagicMock(),
             _update_preview_geometry=MagicMock(),
+            _protect_preview_background=MagicMock(),
         )
 
         SlateWindow._preview_project_file(owner, "src/app.php")
