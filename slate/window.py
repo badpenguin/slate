@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import sys
+import uuid
 from typing import Callable, Sequence
 
 import gi
@@ -2537,7 +2538,14 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self.selecting_context_row = False
                 self._show_tree_menu(kind, event)
                 return True
-            tree.get_selection().select_path(path)
+            selection = tree.get_selection()
+            editor_click = event.button == 1 and kind == "editor"
+            editor_already_selected = editor_click and selection.path_is_selected(path)
+            selection.select_path(path)
+            # 2026-10-15: la riga già selezionata non emette changed; il clic
+            # deve comunque riattivare l'editor e restituirgli la tastiera.
+            if editor_already_selected:
+                self._on_tree_selection(selection)
             if event.button == 1 and kind in {"terminal", "editor", "browser"}:
                 self._clear_manual_attention(
                     (
@@ -2561,6 +2569,10 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self.file_manager.reveal_path(relative_path)
                 return True
             if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS and kind == "project":
+                return True
+            # 2026-10-15: il gestore GTK predefinito riprenderebbe il focus
+            # appena assegnato all'editor durante la selezione della riga.
+            if editor_click:
                 return True
         return False
 
@@ -3004,6 +3016,20 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _on_key_press(self, _widget: Gtk.Widget, event: Gdk.EventKey) -> bool:
         """Close previews or handle global shortcuts while preserving tree arrows."""
 
+        focused = self.get_focus()
+        if focused is self.panel.message:
+            # 2026-10-12: il testo di commit possiede ogni battuta; la preview
+            # visibile non deve catturare E, A, Space o F5 mentre si scrive.
+            return False
+        if isinstance(focused, Gtk.Entry):
+            # 2026-10-13: un campo di ricerca nell'editor coperto non possiede
+            # più la tastiera; gli input ancora visibili conservano i loro tasti.
+            covered_entry = self.preview.get_visible() and (
+                SlateWindow._is_widget_below(focused, self.editor_workspace)
+                or SlateWindow._is_widget_below(focused, self.project_tree)
+            )
+            if not covered_entry:
+                return False
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
         if (
             Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_f
@@ -3028,44 +3054,74 @@ class SlateWindow(Gtk.ApplicationWindow):
             # 2026-09-02: l'overlay opaco possiede i propri tasti; nessuna
             # scorciatoia deve raggiungere le viste ancora montate sotto di lui.
             return False
+        if event.keyval == Gdk.KEY_F2 and modifiers == Gdk.ModifierType(0):
+            # F2 riguarda la scheda terminale selezionata: gli handler delle
+            # viste contestuali non devono intercettarlo prima della rinomina.
+            if self._selected_terminal() is not None:
+                self._prompt_terminal_rename(send_codex_rename=True)
+                return True
+            return False
         surface = getattr(self, "diff_editor_surface", None)
         if event.keyval == Gdk.KEY_Escape and surface is not None:
             surface.close_if_clean()
             return True
         if (
             surface is not None
+            and focused is not None
+            and SlateWindow._is_widget_below(focused, surface)
             and Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b
             and modifiers == Gdk.ModifierType.CONTROL_MASK
         ):
             if not surface.go_to_definition():
                 self._show_error("Place the diff editor cursor on a source symbol first.")
             return True
-        # 2026-10-12: la finestra riceve i tasti prima di alcuni child GTK;
-        # l'overlay visibile deve precedere gli editor rimasti montati sotto.
+        # 2026-10-13: GTK può lasciare il focus all'editor coperto quando la
+        # preview è visibile; i suoi tasti appartengono alla preview, mentre la
+        # colonna Revisioni/File mantiene i propri comandi contestuali.
         preview_visible = self.preview.get_visible() and surface is None
-        if preview_visible and self.preview.handle_key(event):
+        preview_has_focus = focused is not None and SlateWindow._is_widget_below(
+            focused, self.preview
+        )
+        workspace_focused = focused is not None and not preview_has_focus and (
+            SlateWindow._is_widget_below(focused, self.editor_workspace)
+        )
+        project_tree = getattr(self, "project_tree", None)
+        sidebar_covered_focus = (
+            focused is not None and not preview_has_focus and project_tree is not None
+            and SlateWindow._is_widget_below(focused, project_tree)
+        )
+        preview_key_target = preview_visible and (
+            focused is None or preview_has_focus or workspace_focused or sidebar_covered_focus
+        )
+        if preview_key_target and self.preview.handle_key(event):
             return True
-        if not preview_visible and self.browser_manager.handle_key(event):
+        # 2026-10-13: una vista centrale visibile non possiede necessariamente
+        # il focus; F5 in Files e i comandi della sidebar non vanno al browser.
+        if (
+            not preview_visible and surface is None and workspace_focused
+            and self.browser_manager.handle_key(event)
+        ):
             return True
         if (
             Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b
             and event.state & Gdk.ModifierType.CONTROL_MASK
-            and self.preview.get_visible()
+            and preview_visible
+            and preview_key_target
             and not self.project_search.get_visible()
         ):
             if not self.preview.go_to_definition():
                 self._show_error("Place the preview cursor on a source symbol first.")
             return True
-        if not preview_visible and self.editor_workspace.handle_key(event):
+        if (
+            not preview_visible and surface is None and workspace_focused
+            and self.editor_workspace.handle_key(event)
+        ):
             return True
-        if event.keyval == Gdk.KEY_Escape and self.preview.get_visible():
+        if event.keyval == Gdk.KEY_Escape and preview_visible:
             self._close_preview()
             return True
         if event.keyval == Gdk.KEY_q and event.state & Gdk.ModifierType.CONTROL_MASK:
             self._request_close()
-            return True
-        if event.keyval == Gdk.KEY_F2:
-            self._prompt_terminal_rename(send_codex_rename=True)
             return True
         return False
 
@@ -3241,6 +3297,10 @@ class SlateWindow(Gtk.ApplicationWindow):
                 # 2026-08-18: il launcher appartiene al terminale persistente,
                 # quindi una rinomina deve conservarne il comportamento.
                 terminal_commands[clean_name] = terminal_commands.pop(old_name)
+            # 2026-10-16: renaming the tab must retain its original history.
+            history_ids = project.setdefault("terminal_history_ids", {})
+            if old_name in history_ids:
+                history_ids[clean_name] = history_ids.pop(old_name)
             terminal_icons = project.setdefault("terminal_icons", {})
             if old_name in terminal_icons:
                 terminal_icons[clean_name] = terminal_icons.pop(old_name)
@@ -3349,7 +3409,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             return
         details = ["You can leave tmux sessions in the background or terminate them."]
         for pane in relevant:
-            if pane.active:
+            if pane.running_process:
                 details.append(f"⚠ {pane.session}: {pane.command} is running")
             else:
                 details.append(f"✓ {pane.session}: shell at prompt")
@@ -3536,6 +3596,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         project["terminals"].append(name)
         if initial_command:
             project.setdefault("terminal_commands", {})[name] = initial_command
+        else:
+            # 2026-10-16: persist identity before materializing a new shell so
+            # history is stable across recreation and tab renaming.
+            project.setdefault("terminal_history_ids", {})[name] = uuid.uuid4().hex
         if is_extra_command_icon(icon_name):
             # 2026-08-21: l'icona appartiene al terminale materializzato, non
             # al launcher modificabile che lo ha creato, e sopravvive quindi
@@ -3643,6 +3707,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         project["terminals"].remove(terminal_name_value)
         project.setdefault("terminal_commands", {}).pop(terminal_name_value, None)
         project.setdefault("terminal_icons", {}).pop(terminal_name_value, None)
+        project.setdefault("terminal_history_ids", {}).pop(terminal_name_value, None)
         project["item_order"] = [
             item
             for item in project.setdefault("item_order", [])
@@ -3897,7 +3962,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             and self.preview.current_path == status.path
             and getattr(self, "preview_status", None) == status
         ):
-            self.preview.grab_focus()
+            self._protect_preview_background()
             return
         self.preview_status = status
         self.preview.show_status(scm.root, scm, status)
@@ -3907,9 +3972,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.preview.set_no_show_all(False)
         self.preview.show_all()
         self.preview.set_no_show_all(True)
-        # 2026-10-12: l'overlay visibile possiede i tasti; lasciare il focus
-        # all'editor sottostante farebbe scrivere E nel documento nascosto.
-        self.preview.grab_focus()
+        self._protect_preview_background()
 
     def _preview_project_file(self, relative_path: str | None) -> None:
         """Preview a normal file selected from the active project's file tree."""
@@ -3940,7 +4003,18 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.preview.set_no_show_all(False)
         self.preview.show_all()
         self.preview.set_no_show_all(True)
-        self.preview.grab_focus()
+        self._protect_preview_background()
+
+    def _protect_preview_background(self) -> None:
+        """Block covered widgets without moving focus away from the sidebar."""
+
+        # 2026-10-13: gli editor e la sidebar sotto l'overlay non possono
+        # ricevere tasti; disabilitarli fa rilasciare anche un focus GTK rimasto
+        # sul documento coperto dopo un click in Revisioni.
+        self.project_tree.set_sensitive(False)
+        self.editor_workspace.set_sensitive(False)
+        # 2026-10-13: la selezione nella colonna destra conserva il focus;
+        # soltanto un click nella preview la rende destinataria dei tasti.
 
     def _handle_file_preview_action(self, action: str) -> None:
         """Apply a focused shared-preview shortcut to its exact current file."""
@@ -3954,8 +4028,8 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self._view_status(status)
             elif action == "edit-internal":
                 line = self.preview.edit_line_at_cursor()
-                if self.preview.diff_edit_lines and line is None:
-                    return
+                # 2026-10-13: E apre il file anche sulle intestazioni e sulla
+                # riga finale del diff; la mappa serve solo a scegliere la riga.
                 if line is None:
                     self._edit_status_internal(status)
                 else:
@@ -4045,10 +4119,16 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         if not hasattr(self, "preview"):
             return
+        # 2026-10-13: anche Escape e un cambio vista invalidano il click
+        # differito, così il timer non può riaprire l'overlay appena chiuso.
+        self.panel._cancel_pending_preview()
         self.preview.cancel()
         self.preview.current_path = None
         self.preview_status = None
         self.preview.hide()
+        # Il centro torna interattivo soltanto dopo che l'overlay è chiuso.
+        self.project_tree.set_sensitive(True)
+        self.editor_workspace.set_sensitive(True)
 
     def _update_preview_geometry(self, *_args: object) -> None:
         """Size the overlay through the second pane while leaving SCM visible."""
@@ -5166,15 +5246,17 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.closing = False
 
     def _decide_close(self, panes: list[PaneInfo]) -> None:
-        """Skip confirmation at shell prompts or present the required three choices."""
+        """Offer explicit retention or termination whenever tmux panes exist."""
 
-        active = [pane for pane in panes if pane.active]
-        if not active:
-            self._terminate_all(panes)
+        # 2026-10-16: an idle custom launcher or a shell with background jobs
+        # must not take the automatic terminate-all path.
+        if not panes:
+            self._save_window_state()
+            self._final_destroy()
             return
         lines = [f"{len(panes)} open sessions:"]
         for pane in panes:
-            if pane.active:
+            if pane.running_process:
                 duration = self._format_duration(pane.duration)
                 lines.append(f"⚠ {pane.session} ({pane.command} — running {duration})")
             else:
@@ -5195,8 +5277,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         response = dialog.run()
         dialog.destroy()
         if response == 1:
+            self.set_sensitive(False)
+            self.terminals.begin_shutdown()
             self._save_window_state()
-            self._final_destroy()
+            self.terminals.retire_idle_shells(self.config.data["projects"], self._final_destroy)
         elif response == 2:
             self._terminate_all(panes)
         else:
