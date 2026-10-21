@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -82,11 +83,14 @@ def new_project_config(
     # 2026-08-18: aggiunta manuale e riadozione condividono lo schema, ma solo
     # la prima richiede `main`; il chiamante dichiara quindi i terminali iniziali.
     terminal_names = list(terminals)
+    # 2026-10-16: opaque identities keep each plain shell's history stable
+    # through tab renames; no history state is stored in the working copy.
     return {
         "name": name,
         "path": path,
         "terminals": terminal_names,
         "terminal_commands": {},
+        "terminal_history_ids": {name: uuid.uuid4().hex for name in terminal_names},
         "terminal_icons": {},
         "last_terminal": terminal_names[0] if terminal_names else None,
         "browsers": [],
@@ -370,6 +374,21 @@ class ConfigStore:
                     and "\0" not in command
                 ):
                     terminal_commands[terminal_name] = command.strip()
+        # 2026-10-16: identities survive tab renames and remain in the single
+        # config; custom launchers never receive an application history file.
+        raw_history_ids = raw.get("terminal_history_ids", {})
+        if not isinstance(raw_history_ids, dict):
+            raw_history_ids = {}
+        history_ids: dict[str, str] = {}
+        for name in terminal_names:
+            if name in terminal_commands:
+                continue
+            identifier = raw_history_ids.get(name)
+            if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
+                identifier = uuid.uuid4().hex
+            if identifier in history_ids.values():
+                identifier = uuid.uuid4().hex
+            history_ids[name] = identifier
         terminal_icons: dict[str, str] = {}
         raw_terminal_icons = raw.get("terminal_icons", {})
         if isinstance(raw_terminal_icons, dict):
@@ -520,6 +539,7 @@ class ConfigStore:
             "path": str(raw.get("path", "")).strip(),
             "terminals": terminal_names,
             "terminal_commands": terminal_commands,
+            "terminal_history_ids": history_ids,
             "terminal_icons": terminal_icons,
             "last_terminal": last_terminal,
             "browsers": browsers,
