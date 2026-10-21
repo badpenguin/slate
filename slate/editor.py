@@ -416,7 +416,7 @@ class EditorDocument(Gtk.Box):
         if self.pending_line is not None:
             line = self.pending_line
             self.pending_line = None
-            self.goto_line_number(line)
+            self.goto_line_number(line, focus=False)
 
     def _reject_loaded_file(self, reason: str, message: str) -> None:
         """Remove an unsupported new tab or retain an existing editor with notice."""
@@ -897,7 +897,7 @@ class EditorDocument(Gtk.Box):
             return
         self.goto_line_number(int(value))
 
-    def goto_line_number(self, line_number: int) -> None:
+    def goto_line_number(self, line_number: int, *, focus: bool = True) -> None:
         """Move to a one-based line now or immediately after initial loading."""
 
         # 2026-09-09: l'apertura registra il documento prima di avviare la
@@ -910,7 +910,10 @@ class EditorDocument(Gtk.Box):
         cursor = self.buffer.get_iter_at_line(line)
         self.buffer.place_cursor(cursor)
         self.view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
-        self.view.grab_focus()
+        # 2026-10-13: un caricamento tardivo posiziona il cursore senza rubare
+        # il focus alla sidebar o alla preview aperta nel frattempo.
+        if focus:
+            self.view.grab_focus()
         if self.line_navigation_id is not None:
             GLib.source_remove(self.line_navigation_id)
         # 2026-09-12: uno stack appena rimappato può ignorare lo scroll prima
@@ -927,7 +930,8 @@ class EditorDocument(Gtk.Box):
         cursor = self.buffer.get_iter_at_line(line)
         self.buffer.place_cursor(cursor)
         self.view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
-        self.view.grab_focus()
+        # Il secondo passaggio conferma soltanto lo scroll: il focus potrebbe
+        # essere già passato a un'altra vista dopo la richiesta iniziale.
         return GLib.SOURCE_REMOVE
 
     def go_to_definition(self) -> bool:
