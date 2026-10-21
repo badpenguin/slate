@@ -17,6 +17,26 @@ from slate.config import (
 class ConfigStoreTest(unittest.TestCase):
     """Verify the single config file remains safe and human-readable."""
 
+    def test_terminal_history_ids_persist_and_exclude_custom_launchers(self) -> None:
+        """Legacy configs get distinct stable identities only for plain terminals."""
+
+        with tempfile.TemporaryDirectory(prefix="slate-config-", dir="/tmp") as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"projects": [{
+                "name": "repo", "path": directory,
+                "terminals": ["one", "two", "custom"],
+                "terminal_commands": {"custom": "codex resume"},
+                "terminal_history_ids": {"one": "../invalid", "custom": "f" * 32},
+            }]}))
+            config = ConfigStore(path)
+            ids = config.data["projects"][0]["terminal_history_ids"]
+            self.assertEqual(set(ids), {"one", "two"})
+            self.assertNotEqual(ids["one"], ids["two"])
+            self.assertRegex(ids["one"], r"^[0-9a-f]{32}$")
+            config.save()
+            restored = ConfigStore(path)
+            self.assertEqual(restored.data["projects"][0]["terminal_history_ids"], ids)
+
     def test_new_project_schema_supports_manual_and_adopted_initial_state(self) -> None:
         """One factory owns every field while callers choose initial terminals."""
 
