@@ -1068,6 +1068,66 @@ class SCMPanelTest(unittest.TestCase):
         timeout_callback()
         self.assertIsNone(self.previewed)
 
+    def test_sidebar_e_keeps_its_target_while_another_preview_is_visible(self) -> None:
+        """Window routing leaves E to the selected revision and cancels its timer."""
+
+        from slate.preview import FilePreview
+        from slate.window import SlateWindow
+
+        status = FileStatus("tracked.py", "modified")
+        self.panel.set_supported(True)
+        self.panel.update_status([status], "default")
+        source_path = self.panel.store.get_path(self.panel.iter_by_path[status.path])
+        filtered_path = self.panel.filtered_store.convert_child_path_to_path(source_path)
+        self.panel.tree.set_cursor(filtered_path)
+        preview = FilePreview(mock.MagicMock(), on_action=mock.MagicMock())
+        preview.current_path = "other.py"
+        preview._set_diff_text("diff --git a/other.py b/other.py\n@@ -1 +1 @@\n-a\n+b\n")
+        preview.set_no_show_all(False)
+        preview.show_all()
+        preview.set_no_show_all(True)
+        owner = SimpleNamespace(
+            panel=self.panel, preview=preview, project_search=mock.MagicMock(),
+            get_focus=mock.MagicMock(return_value=self.panel.tree),
+            editor_workspace=Gtk.Box(), browser_manager=mock.MagicMock(),
+        )
+        owner.project_search.get_visible.return_value = False
+        with mock.patch("slate.panel.GLib.timeout_add", return_value=73):
+            self.panel._schedule_preview(status)
+        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+
+        self.assertFalse(SlateWindow._on_key_press(owner, None, event))
+        with mock.patch("slate.panel.GLib.source_remove") as source_remove:
+            self.assertTrue(self.panel._on_tree_key_press(self.panel.tree, event))
+
+        self.assertEqual(self.edited_internal, status)
+        preview.on_action.assert_not_called()
+        source_remove.assert_called_once_with(73)
+        self.assertIsNone(self.panel.pending_preview_status)
+
+    def test_closing_preview_invalidates_pending_revision_click(self) -> None:
+        """Closing the overlay prevents a deferred click from reopening it."""
+
+        from slate.preview import FilePreview
+        from slate.window import SlateWindow
+
+        status = FileStatus("tracked.py", "modified")
+        with mock.patch("slate.panel.GLib.timeout_add", return_value=73) as timeout:
+            self.panel._schedule_preview(status)
+        owner = SimpleNamespace(
+            panel=self.panel, preview=FilePreview(mock.MagicMock()),
+            project_tree=Gtk.TreeView(), editor_workspace=Gtk.Box(),
+        )
+        with mock.patch("slate.panel.GLib.source_remove") as source_remove:
+            SlateWindow._close_preview(owner)
+
+        source_remove.assert_called_once_with(73)
+        self.assertIsNone(self.panel.pending_preview_status)
+        self.assertIsNone(self.panel.preview_timeout_id)
+        timeout.call_args.args[1]()
+        self.assertIsNone(self.previewed)
+        self.assertFalse(owner.preview.get_visible())
+
     def test_double_click_cancels_preview_before_opening_diff_editor(self) -> None:
         """Activating a tracked row opens assisted editing without preview."""
 
