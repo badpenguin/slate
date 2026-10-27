@@ -331,6 +331,16 @@ class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase
         self._complete(2, "[]")
         self.assertEqual(len(self.calls), 3)
 
+    def test_new_nested_boundary_retries_the_ignore_query_with_an_exclusion(self) -> None:
+        """Discovery can repair an ignore read that started before the child was known."""
+
+        self._finish_startup()
+        self.watcher.set_nested_repositories({"public/backoffice/atk"})
+        self._drain_main_context()
+        argv = self.calls[-1][0]
+        self.assertEqual(argv, ["hg", "status", "-i", "-T", "{path}\\n",
+                                "--exclude", "path:public/backoffice/atk"])
+
     def test_watcher_diagnostics_are_emitted_only_in_debug_mode(self) -> None:
         """Focused lifecycle traces remain silent outside explicit debug mode."""
 
@@ -742,3 +752,111 @@ class GitRepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestC
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepoWatcherLimitTest(_RepoWatcherSchedulingFixture, unittest.TestCase):
+    """Exercise overflow, cancellation and probes through the real scheduler."""
+
+    repository_marker = ".hg"
+    scm_class = MercurialSCM
+
+    def test_large_status_yields_and_stops_at_provable_limit(self) -> None:
+        """A huge result yields after 100 entries and stops decoding after 2,000."""
+
+        import json
+        from slate.project_limit import ProjectStatusLimit
+        from slate.scm.base import RepositoryRef
+
+        self.watcher.row_limit = 1000
+        gate = ProjectStatusLimit(MagicMock(), MagicMock())
+        # The project hook takes a name, whereas the watcher is already bound.
+        def block_project(_project: str) -> None:
+            """Suspend this test's single repository on project overflow."""
+
+            self.watcher.suspend_for_limit()
+
+        gate.on_block.side_effect = block_project
+        def received(rows: list[FileStatus], branch: str) -> None:
+            """Pass normalized rows to the aggregate guard before UI publication."""
+
+            gate.accept("project", RepositoryRef(".", "hg"), rows, branch)
+
+        self.watcher.on_status = received
+        self._complete(0)
+        self._complete(1, "default")
+        output = json.dumps([{"path": f"file-{index}", "status": "?"} for index in range(10000)])
+        self._complete(2, output)
+        self.assertTrue(self.watcher.processing)
+        self.assertFalse(gate.blocked)
+        self._drain_main_context()
+        self.assertIn("project", gate.blocked)
+        self.assertTrue(self.watcher.limited)
+        self.assertEqual(len(self.watcher._statuses), 2000)
+        self.assertFalse(self.watcher.monitors)
+        self.assertFalse(self.watcher.metadata_monitors)
+        self.assertIsNone(self.watcher.parse_idle_id)
+
+    def test_suspended_watcher_ignores_old_completions_and_only_probes_manually(self) -> None:
+        """Suspension invalidates an in-flight result and has no automatic retry."""
+
+        self.watcher.suspend_for_limit()
+        self._complete(0, "ignored/path")
+        self.assertEqual(self.watcher.ignored, set())
+        self.watcher.request_full()
+        self.watcher.set_active(True)
+        self._drain_main_context()
+        self.assertEqual(len(self.calls), 1)
+        self.watcher.probe_limit()
+        self._drain_main_context()
+        self.assertEqual(len(self.calls), 2)
+        self._complete(1)
+        self._complete(2, "default")
+        self.watcher.request_full(refresh_ignored=True)
+        self.watcher.request_paths(["edited-while-probing.txt"])
+        self._complete(3, "[]")
+        self.assertEqual(self.statuses, [([], "default")])
+        self.assertEqual(len(self.calls), 4)
+        self.assertFalse(self.watcher.monitors)
+        self.assertFalse(self.watcher.metadata_monitors)
+        self.assertIsNone(self.watcher.mount_idle_id)
+
+    def test_limit_does_not_strand_an_already_requested_modal(self) -> None:
+        """Suspending observers still releases the existing exclusive-operation waiter."""
+
+        waiting = MagicMock()
+        self.watcher.pause_after_current(waiting)
+        self.watcher.suspend_for_limit()
+        self._drain_main_context()
+        waiting.assert_called_once_with()
+        self.assertTrue(self.watcher.limited)
+        self.assertFalse(self.watcher.metadata_monitors)
+
+    def test_manual_recovery_refreshes_ignores_without_mounting_observers(self) -> None:
+        """Updating ignore rules takes effect only through an explicit guarded full scan."""
+
+        self.watcher.suspend_for_limit()
+        self.watcher.probe_limit()
+        self._drain_main_context()
+        self._complete(1, "mangia-sano/file.txt\n")
+        self.assertEqual(self.watcher.ignored, {"mangia-sano/file.txt"})
+        self._complete(2, "main")
+        self._complete(3, "[]")
+        self.assertEqual(self.statuses, [([], "main")])
+        self.assertTrue(self.watcher.limited)
+        self.assertFalse(self.watcher.monitors)
+        self.assertFalse(self.watcher.metadata_monitors)
+        self.assertEqual(len(self.calls), 4)
+
+    def test_one_wide_directory_yields_after_at_most_100_entries(self) -> None:
+        """Entry budgeting works even when a directory has no child directories."""
+
+        for index in range(250):
+            (self.root / f"file-{index}").touch()
+        self.watcher._mount_queue = deque([str(self.root)])
+        self.watcher._mount_queued = {str(self.root)}
+        self.assertEqual(self.watcher._mount_batch(), GLib.SOURCE_CONTINUE)
+        self.assertIsNotNone(self.watcher._mount_entries)
+        remaining = list(self.watcher._mount_entries)
+        self.assertGreaterEqual(len(remaining), 151)
+        self.watcher._mount_entries.close()
+        self.watcher._mount_entries = None
