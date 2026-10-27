@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from .base import BranchTarget, FileStatus, SCM
 
@@ -41,26 +41,54 @@ class MercurialSCM(SCM):
     def parse_status(self, output: str) -> list[FileStatus]:
         """Parse Mercurial JSON while tolerating future unknown state codes."""
 
-        records = json.loads(output or "[]")
-        statuses: list[FileStatus] = []
-        for record in records:
+        return list(self.iter_status(output))
+
+    def iter_status(self, output: str) -> Iterator[FileStatus]:
+        """Decode one JSON record at a time so the watcher can yield between files."""
+
+        # 2026-10-23: raw_decode avoids creating a huge JSON list in one GTK
+        # callback when an archive produces thousands of untracked files.
+        text = output or "[]"
+        decoder = json.JSONDecoder()
+        position = 0
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text) or text[position] != "[":
+            raise ValueError("Expected a JSON status array")
+        position += 1
+        first = True
+        while True:
+            while position < len(text) and text[position].isspace():
+                position += 1
+            if position < len(text) and text[position] == "]":
+                if text[position + 1:].strip():
+                    raise ValueError("Unexpected data after status array")
+                return
+            if not first:
+                if position >= len(text) or text[position] != ",":
+                    raise ValueError("Expected a JSON status separator")
+                position += 1
+                while position < len(text) and text[position].isspace():
+                    position += 1
+            record, position = decoder.raw_decode(text, position)
+            first = False
+            if not isinstance(record, dict):
+                raise ValueError("Expected a JSON status record")
             code = str(record.get("status", ""))
             path = str(record.get("path", ""))
             if path and code in self.STATE_MAP and code != "C":
                 source = record.get("source")
-                statuses.append(
-                    FileStatus(
-                        path,
-                        self.STATE_MAP[code],
-                        source_path=str(source) if source else None,
-                    )
-                )
-        return statuses
+                yield FileStatus(path, self.STATE_MAP[code], source_path=str(source) if source else None)
 
-    def ignored_argv(self) -> list[str]:
-        """Return the plain path-only ignored-file query."""
+    def ignored_argv(self, excluded_paths: Sequence[str] = ()) -> list[str]:
+        """Read ignored files without entering independently watched repositories."""
 
-        return ["hg", "status", "-i", "-T", "{path}\\n"]
+        # 2026-10-27: hg status -i can abort on a file below a nested .hg;
+        # filtering its output afterwards is too late. path: is a literal root.
+        argv = ["hg", "status", "-i", "-T", "{path}\\n"]
+        for path in excluded_paths:
+            argv.extend(["--exclude", f"path:{path}"])
+        return argv
 
     def parse_ignored(self, output: str) -> set[str]:
         """Parse Mercurial's plain newline-delimited ignored paths."""
