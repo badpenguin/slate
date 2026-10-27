@@ -14,6 +14,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gtk
 
+from slate.project_limit import ProjectStatusLimit
 from slate.processes import CommandResult
 from slate.preview import FilePreview
 from slate.scm.base import FileStatus, RepositoryRef, RepositorySyncStatus
@@ -1469,6 +1470,72 @@ class WindowActionTest(unittest.TestCase):
         SlateWindow._set_revision_count(owner, 0)
         self.assertEqual(store.get_value(project_iter, SlateWindow.COL_TEXT), "repo")
 
+    def test_blocking_an_inactive_project_suspends_only_its_observers(self) -> None:
+        """An overload never terminates terminals or suspends another project's watcher."""
+
+        root = RepositoryRef(".", "hg")
+        large = MagicMock()
+        other = MagicMock()
+        discovery = MagicMock()
+        owner = SimpleNamespace(
+            active_project_name="other", panel=MagicMock(),
+            watchers={("large", root): large, ("other", root): other},
+            discovery_by_project={"large": discovery},
+            _remove_unattended_repository_verification=MagicMock(),
+        )
+        SlateWindow._block_project_revisions(owner, "large")
+        large.suspend_for_limit.assert_called_once_with()
+        other.suspend_for_limit.assert_not_called()
+        discovery.cancel.assert_called_once_with()
+        self.assertNotIn("large", owner.discovery_by_project)
+        owner.panel.set_project_blocked.assert_called_once_with("large", True)
+
+    def test_blocked_revision_preview_refuses_actions_but_files_still_work(self) -> None:
+        """Old preview shortcuts cannot mutate a blocked revision target."""
+
+        gate = ProjectStatusLimit(MagicMock(), MagicMock())
+        gate.blocked.add("large")
+        owner = SimpleNamespace(
+            project_limit=gate, active_project_name="large",
+            preview=SimpleNamespace(current_path="file.txt"),
+            preview_status=FileStatus("file.txt", "untracked"),
+            _delete_status=MagicMock(), _scan_active_project=MagicMock(),
+            _edit_project_file_internal=MagicMock(),
+        )
+        SlateWindow._handle_file_preview_action(owner, "delete")
+        owner._delete_status.assert_not_called()
+        SlateWindow._handle_file_preview_action(owner, "refresh")
+        owner._scan_active_project.assert_called_once_with()
+        owner.preview_status = None
+        SlateWindow._handle_file_preview_action(owner, "edit-internal")
+        owner._edit_project_file_internal.assert_called_once_with("file.txt")
+
+    def test_project_limit_checks_watcher_snapshots_before_touching_gtk(self) -> None:
+        """Watcher callbacks from multiple repositories block before any oversized UI update."""
+
+        block = MagicMock()
+        project = {"name": "repo", "path": "/tmp/repo"}
+        owner = SimpleNamespace(
+            scm_by_repository={}, watchers={}, snapshots={}, repositories_by_project={},
+            project_limit=ProjectStatusLimit(block, MagicMock()), ignored_by_repository={},
+            active_project_name="repo", panel=MagicMock(), file_manager=MagicMock(),
+            _repository_root=MagicMock(return_value="/tmp/repo"),
+            _update_repository_boundaries=MagicMock(), _status_owned_by_repository=MagicMock(return_value=True),
+            _update_active_revision_count=MagicMock(), _refresh_visible_preview=MagicMock(),
+        )
+        with patch("slate.window.RepoWatcher") as watchers:
+            SlateWindow._attach_repository(owner, project, RepositoryRef(".", "hg"))
+            root_callback = watchers.call_args.args[2]
+            SlateWindow._attach_repository(owner, project, RepositoryRef("child", "git"))
+            child_callback = watchers.call_args.args[2]
+        root_callback([FileStatus(f"root-{index}", "untracked") for index in range(600)], "main")
+        self.assertEqual(owner.panel.update_status.call_count, 1)
+        child_callback([FileStatus(f"child-{index}", "modified") for index in range(400)], "main")
+        block.assert_called_once_with("repo")
+        self.assertEqual(owner.panel.update_status.call_count, 1)
+        child_callback([], "main")
+        self.assertEqual(owner.panel.update_status.call_count, 1)
+
     def test_repository_watcher_is_created_once_per_discovered_root(self) -> None:
         """Repeated discovery reuses the repository adapter and watcher."""
 
@@ -1476,6 +1543,7 @@ class WindowActionTest(unittest.TestCase):
         owner = SimpleNamespace(
             scm_by_repository={},
             watchers={},
+            project_limit=ProjectStatusLimit(MagicMock(), MagicMock()),
             snapshots={},
             repositories_by_project={},
             ignored_by_repository={},
@@ -1498,6 +1566,7 @@ class WindowActionTest(unittest.TestCase):
         owner = SimpleNamespace(
             scm_by_repository={},
             watchers={},
+            project_limit=ProjectStatusLimit(MagicMock(), MagicMock()),
             snapshots={},
             repositories_by_project={},
             ignored_by_repository={},
@@ -1522,6 +1591,7 @@ class WindowActionTest(unittest.TestCase):
         owner = SimpleNamespace(
             scm_by_repository={("repo", repository): scm},
             watchers={},
+            project_limit=ProjectStatusLimit(MagicMock(), MagicMock()),
             snapshots={},
             repositories_by_project={"repo": {repository}},
             ignored_by_repository={},
