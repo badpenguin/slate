@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Iterator, Sequence
 
 
 @dataclass(frozen=True)
@@ -79,8 +79,13 @@ class SCM(ABC):
     def parse_status(self, output: str) -> list[FileStatus]:
         """Parse machine-readable status output."""
 
+    def iter_status(self, output: str) -> Iterator[FileStatus]:
+        """Yield parsed status entries for adapters without a streaming parser."""
+
+        yield from self.parse_status(output)
+
     @abstractmethod
-    def ignored_argv(self) -> list[str]:
+    def ignored_argv(self, excluded_paths: Sequence[str] = ()) -> list[str]:
         """Return the command that enumerates ignored paths."""
 
     @abstractmethod
