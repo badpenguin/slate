@@ -39,6 +39,7 @@ from .repository_actions import (
     RepositorySwitchBranchDialog,
     RepositoryTagDialog,
 )
+from .project_limit import ProjectStatusLimit
 from .repository_discovery import RepositoryDiscovery
 from .repository_update import RepositoryUpdateDialog
 from .repository_verify import RepositoryVerifyDialog, UnattendedRepositoryVerifier
@@ -140,6 +141,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         # 2026-08-18: conserviamo il valore già ricevuto dal tab Revisioni per
         # ripristinarne il riflesso sulla riga progetto dopo i rebuild UI.
         self.revision_counts: dict[str, int] = {}
+        self.project_limit = ProjectStatusLimit(self._block_project_revisions, self._resume_project_revisions)
         self.repositories_by_project: dict[str, set[RepositoryRef]] = {}
         self.discovery_by_project: dict[str, RepositoryDiscovery] = {}
         self.scanned_projects: set[str] = set()
@@ -456,6 +458,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         menu.append(settings_item)
         menu.append(Gtk.SeparatorMenuItem())
         menu.append(orphans)
+        menu.append(Gtk.SeparatorMenuItem())
+        quit_item = Gtk.MenuItem(label="Quit")
+        # L'uscita esplicita usa le stesse conferme della tray anche quando
+        # la chiusura della finestra è configurata per nascondere l'app.
+        quit_item.connect("activate", self._on_tray_quit)
+        menu.append(quit_item)
         menu.show_all()
         overflow.set_popup(menu)
         header.pack_end(overflow)
@@ -1485,6 +1493,8 @@ class SlateWindow(Gtk.ApplicationWindow):
                     repo_key[0], repo_key[1], status.path
                 )
             ]
+            if not self.project_limit.accept(repo_key[0], repo_key[1], qualified, branch):
+                return
             self.snapshots[repo_key] = (qualified, branch)
             if repo_key[0] == self.active_project_name:
                 self.panel.update_status(qualified, branch, repo_key[1])
@@ -1497,6 +1507,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         ) -> None:
             """Show errors only for repositories in the visible project."""
 
+            self.project_limit.fail_scan(repo_key[0])
             if repo_key[0] == self.active_project_name:
                 self.panel.show_error(f"{repo_key[1]}: {message}")
 
@@ -1541,10 +1552,56 @@ class SlateWindow(Gtk.ApplicationWindow):
             file_changed,
             ignored_changed,
             history_changed,
+            row_limit=ProjectStatusLimit.LIMIT,
         )
         self.watchers[key] = watcher
+        if project_name in self.project_limit.blocked:
+            watcher.suspend_for_limit()
         self._update_repository_boundaries(project_name)
         watcher.set_active(project_name == self.active_project_name)
+
+    def _block_project_revisions(self, project_name: str) -> None:
+        """Suspend all SCM observers for an overloaded project, including inactive ones."""
+
+        # 2026-10-23: a visual cap alone leaves recursive mount and event storms
+        # alive; stop all project observers and invalidate their pending callbacks.
+        discovery = self.discovery_by_project.pop(project_name, None)
+        if discovery is not None:
+            discovery.cancel()
+        for (name, repository), watcher in tuple(self.watchers.items()):
+            if name == project_name:
+                watcher.suspend_for_limit()
+                self._remove_unattended_repository_verification((name, repository))
+        self.panel.set_project_blocked(project_name, True)
+
+    def _probe_project_revisions(self, project_name: str) -> None:
+        """Start a manual recovery with no automatic monitor active in the project."""
+
+        watchers = {ref: watcher for (name, ref), watcher in self.watchers.items() if name == project_name}
+        for watcher in watchers.values():
+            watcher.suspend_for_limit()
+        self.panel.set_limit_scan_running(project_name)
+        self.project_limit.begin_scan(project_name, set(watchers))
+        for watcher in watchers.values():
+            watcher.probe_limit()
+
+    def _resume_project_revisions(self, project_name: str) -> None:
+        """Publish a complete below-limit recovery before restoring automatic watching."""
+
+        snapshots = self.project_limit.snapshots.get(project_name, {})
+        for repository, snapshot in snapshots.items():
+            self.snapshots[(project_name, repository)] = snapshot
+        self.panel.set_project_blocked(project_name, False)
+        if project_name == self.active_project_name:
+            self.panel.set_repositories(self._sorted_repositories(
+                self.repositories_by_project.get(project_name, set())))
+            for repository, snapshot in snapshots.items():
+                self.panel.update_status(*snapshot, repository)
+            self._update_active_revision_count()
+        for (name, _repository), watcher in self.watchers.items():
+            if name == project_name:
+                watcher.resume_after_limit()
+        self._queue_unattended_project_verification(project_name, force=True)
 
     def _schedule_inactive_watcher_eviction(self, project_name: str) -> None:
         """Schedule one watcher cleanup after a project remains inactive for an hour."""
@@ -1658,6 +1715,14 @@ class SlateWindow(Gtk.ApplicationWindow):
             """Finish discovery without hiding clean repository nodes."""
 
             self.discovery_by_project.pop(project_name, None)
+            if project_name in self.project_limit.blocked:
+                if error:
+                    if project_name == self.active_project_name:
+                        self.panel.scan_button.set_sensitive(True)
+                        self.panel.show_error(f"Repository scan failed: {error}")
+                else:
+                    self._probe_project_revisions(project_name)
+                return
             if refresh_existing:
                 # 2026-08-17: Scansiona is the sole routine UI action that
                 # deliberately rereads branch and complete repository state.
@@ -1703,6 +1768,8 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         project = self.config.find_project(self.active_project_name or "")
         if project is not None:
+            if project["name"] in self.project_limit.pending:
+                return
             self._scan_project_repositories(project, refresh_existing=True)
 
     def _queue_unattended_project_verification(
@@ -1712,6 +1779,7 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         if (
             project_name != self.active_project_name
+            or (getattr(self, "project_limit", None) is not None and project_name in self.project_limit.blocked)
             or project_name in self.discovery_by_project
             or (not force and project_name in self.verified_projects)
         ):
@@ -1858,6 +1926,8 @@ class SlateWindow(Gtk.ApplicationWindow):
             watcher.close()
         self.scm_by_repository.pop(key, None)
         self.snapshots.pop(key, None)
+        if getattr(self, "project_limit", None) is not None:
+            self.project_limit.remove_repository(project_name, repository)
         self.ignored_by_repository.pop(key, None)
         self.repositories_by_project.setdefault(project_name, set()).discard(repository)
         self._update_repository_boundaries(project_name)
@@ -1876,6 +1946,9 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self._remove_repository_runtime(name, repository)
         self.repositories_by_project.pop(project_name, None)
         self.scanned_projects.discard(project_name)
+        if getattr(self, "project_limit", None) is not None:
+            self.project_limit.forget_project(project_name)
+            self.panel.set_project_blocked(project_name, False)
 
     def _repository_root(self, project: dict, repository: str) -> str | None:
         """Resolve a cached repository path without allowing workspace escape."""
@@ -3835,6 +3908,10 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _commit(self, message: str, statuses: list[FileStatus]) -> None:
         """Commit checked files repository-by-repository, stopping on first error."""
 
+        if (getattr(self, "project_limit", None) is not None
+                and self.active_project_name in self.project_limit.blocked):
+            return
+
         if not message:
             self.panel.show_error("Enter a commit message.")
             return
@@ -4023,6 +4100,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         if path is None:
             return
         status = getattr(self, "preview_status", None)
+        if (status is not None and action != "refresh"
+                and getattr(self, "project_limit", None) is not None
+                and self.active_project_name in self.project_limit.blocked):
+            return
         if status is not None:
             if action == "view":
                 self._view_status(status)
@@ -5006,6 +5087,10 @@ class SlateWindow(Gtk.ApplicationWindow):
     ) -> None:
         """Run repository mutations and refresh either affected paths or all state."""
 
+        if (getattr(self, "project_limit", None) is not None
+                and self.active_project_name in self.project_limit.blocked):
+            return
+
         if not operations:
             return
         self._close_preview()
@@ -5151,6 +5236,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         self, action: str, repository: RepositoryRef
     ) -> None:
         """Open one dedicated simple repository-action dialog."""
+
+        if (getattr(self, "project_limit", None) is not None
+                and self.active_project_name in self.project_limit.blocked):
+            return
 
         if self.repository_dialog is not None:
             self.repository_dialog.present()
