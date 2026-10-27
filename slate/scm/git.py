@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from .base import BranchTarget, FileStatus, SCM
 
@@ -33,50 +34,34 @@ class GitSCM(SCM):
     def parse_status(self, output: str) -> list[FileStatus]:
         """Collapse index/worktree columns and retain atomic rename endpoints."""
 
-        records = output.split("\0")
-        statuses: list[FileStatus] = []
-        index = 0
-        while index < len(records):
-            record = records[index]
-            index += 1
-            if not record or record.startswith("# "):
-                continue
+        return list(self.iter_status(output))
+
+    def iter_status(self, output: str) -> Iterator[FileStatus]:
+        """Yield porcelain entries without splitting the entire output into a list."""
+
+        # 2026-10-23: NUL records are consumed lazily, including the second
+        # pathname belonging to an atomic rename or copy record.
+        records = iter(re.finditer(r"[^\0]+", output))
+        for match in records:
+            record = match.group()
             if record.startswith("? "):
-                statuses.append(
-                    FileStatus(record[2:], "untracked", scm_type=self.kind)
-                )
-                continue
-            if record.startswith("u "):
+                yield FileStatus(record[2:], "untracked", scm_type=self.kind)
+            elif record.startswith("u "):
                 fields = record.split(" ", 10)
                 if len(fields) == 11:
-                    statuses.append(
-                        FileStatus(fields[10], "conflict", scm_type=self.kind)
-                    )
-                continue
-            if record.startswith("2 "):
+                    yield FileStatus(fields[10], "conflict", scm_type=self.kind)
+            elif record.startswith("2 "):
                 fields = record.split(" ", 9)
-                source = records[index] if index < len(records) else ""
-                index += 1
-                if len(fields) == 10 and source:
+                source_match = next(records, None)
+                if len(fields) == 10 and source_match is not None:
                     state = "moved" if fields[8].startswith("R") else "added"
-                    statuses.append(
-                        FileStatus(
-                            fields[9],
-                            state,
-                            source_path=source,
-                            scm_type=self.kind,
-                        )
-                    )
-                continue
-            if not record.startswith("1 "):
-                continue
-            fields = record.split(" ", 8)
-            if len(fields) != 9:
-                continue
-            state = self._normalized_state(fields[1][0], fields[1][1])
-            if state is not None:
-                statuses.append(FileStatus(fields[8], state, scm_type=self.kind))
-        return statuses
+                    yield FileStatus(fields[9], state, source_path=source_match.group(), scm_type=self.kind)
+            elif record.startswith("1 "):
+                fields = record.split(" ", 8)
+                if len(fields) == 9:
+                    state = self._normalized_state(fields[1][0], fields[1][1])
+                    if state is not None:
+                        yield FileStatus(fields[8], state, scm_type=self.kind)
 
     @staticmethod
     def _normalized_state(index_state: str, worktree_state: str) -> str | None:
@@ -96,7 +81,7 @@ class GitSCM(SCM):
             return "modified"
         return None
 
-    def ignored_argv(self) -> list[str]:
+    def ignored_argv(self, excluded_paths: Sequence[str] = ()) -> list[str]:
         """Return ignored untracked paths in an unambiguous machine format."""
 
         return [
@@ -106,6 +91,7 @@ class GitSCM(SCM):
             "--ignored",
             "--exclude-standard",
             "-z",
+            *(["--", *(f":(top,exclude,literal){path}" for path in excluded_paths)] if excluded_paths else []),
         ]
 
     def parse_ignored(self, output: str) -> set[str]:
