@@ -20,7 +20,7 @@ class RepositoryDiscovery:
     """Scan a project in bounded idle batches without blocking the GTK loop."""
 
     BATCH_SIZE = 32
-    BUDGET_US = 5_000
+    BUDGET_US = 4_000
     HARD_PRUNE = {
         "node_modules",
         "vendor",
@@ -50,6 +50,7 @@ class RepositoryDiscovery:
         self.source_id: int | None = None
         self.cancelled = False
         self.first_error: str | None = None
+        self.entries = None
 
     def start(self) -> None:
         """Begin discovery on the next GTK idle iteration."""
@@ -65,6 +66,9 @@ class RepositoryDiscovery:
             GLib.source_remove(self.source_id)
             self.source_id = None
         self.queue.clear()
+        if self.entries is not None:
+            self.entries.close()
+            self.entries = None
 
     def _scan_batch(self) -> bool:
         """Inspect a bounded directory batch and yield back to GTK promptly."""
@@ -73,14 +77,35 @@ class RepositoryDiscovery:
             self.source_id = None
             return GLib.SOURCE_REMOVE
         processed = 0
+        entry_count = 0
         started_at = GLib.get_monotonic_time()
         # 2026-08-17: scandir is synchronous, therefore both count and time
         # bounds are required to keep large workspaces responsive.
         while (
-            self.queue
+            (self.queue or self.entries is not None)
             and processed < self.BATCH_SIZE
+            and entry_count < 100
             and GLib.get_monotonic_time() - started_at < self.BUDGET_US
         ):
+            # 2026-10-23: one wide directory must yield just like many small
+            # directories; retain its iterator until the next main-loop turn.
+            if self.entries is not None:
+                try:
+                    entry = next(self.entries)
+                    entry_count += 1
+                    if (entry.name not in self.HARD_PRUNE
+                            and entry.name not in {".hg", ".git"}
+                            and entry.is_dir(follow_symlinks=False)):
+                        self.queue.append(Path(entry.path))
+                except StopIteration:
+                    self.entries.close()
+                    self.entries = None
+                except OSError as error:
+                    self.entries.close()
+                    self.entries = None
+                    if self.first_error is None:
+                        self.first_error = str(error)
+                continue
             directory = self.queue.popleft()
             processed += 1
             relative = self._relative(directory)
@@ -101,19 +126,12 @@ class RepositoryDiscovery:
             if relative != "." and markers:
                 continue
             try:
-                with os.scandir(directory) as entries:
-                    for entry in entries:
-                        if (
-                            entry.name not in self.HARD_PRUNE
-                            and entry.name not in {".hg", ".git"}
-                            and entry.is_dir(follow_symlinks=False)
-                        ):
-                            self.queue.append(Path(entry.path))
+                self.entries = os.scandir(directory)
             except OSError as error:
                 # One unreadable subtree must not hide repositories in siblings.
                 if self.first_error is None:
                     self.first_error = str(error)
-        if self.queue:
+        if self.queue or self.entries is not None:
             return GLib.SOURCE_CONTINUE
         self.source_id = None
         self.on_complete(self.first_error)
