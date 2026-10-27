@@ -122,6 +122,7 @@ class SCMPanel(Gtk.Box):
         self.expansion_restore_id: int | None = None
         self.preview_timeout_id: int | None = None
         self.pending_preview_status: FileStatus | None = None
+        self.active_context_menu: Gtk.Menu | None = None
         self.context_status: FileStatus | None = None
         self.context_repository: RepositoryRef | None = None
         self.context_add_statuses: list[FileStatus] = []
@@ -131,6 +132,8 @@ class SCMPanel(Gtk.Box):
         self.context_selected_statuses: list[FileStatus] = []
         self.project_states: dict[str, _SCMTreeState] = {}
         self.current_project: str | None = None
+        self.blocked_projects: set[str] = set()
+        self.scanning_blocked_projects: set[str] = set()
         # 2026-08-17: bundled badges guarantee distinct colored repository
         # identities instead of falling back to a monochrome generic folder.
         self.repository_icons = {
@@ -173,6 +176,8 @@ class SCMPanel(Gtk.Box):
         self.error_bar.set_show_close_button(True)
         self.error_bar.connect("response", self._on_error_response)
         self.error_label = Gtk.Label()
+        # Consente di selezionare e copiare i dettagli degli errori SCM.
+        self.error_label.set_selectable(True)
         self.error_label.set_xalign(0)
         self.error_label.set_line_wrap(True)
         self.error_bar.get_content_area().add(self.error_label)
@@ -370,6 +375,51 @@ class SCMPanel(Gtk.Box):
         # 2026-08-17: migliaia di righe SCM restano associate al loro progetto;
         # lo switch cambia soltanto modello e non distrugge widget riga per riga.
         self.set_supported(supported)
+        self._apply_project_block()
+
+    def set_project_blocked(self, project: str, blocked: bool) -> None:
+        """Keep a per-project overload warning without clearing rows or user input."""
+
+        if blocked:
+            self.blocked_projects.add(project)
+        else:
+            self.blocked_projects.discard(project)
+        self.scanning_blocked_projects.discard(project)
+        if self.current_project == project:
+            self._apply_project_block()
+            if not blocked:
+                self.clear_error()
+
+    def set_limit_scan_running(self, project: str) -> None:
+        """Keep Scan disabled across project switches until recovery finishes."""
+
+        self.scanning_blocked_projects.add(project)
+        if self.current_project == project:
+            self.scan_button.set_sensitive(False)
+
+    def _apply_project_block(self) -> None:
+        """Disable revision actions while leaving manual Scan and other app views usable."""
+
+        blocked = self.current_project in self.blocked_projects
+        for widget in (self.tree, self.tool_actions, self.commit_actions, self.reset_button):
+            widget.set_sensitive(not blocked)
+        self.select_all_check.set_sensitive(not blocked)
+        self.scan_button.set_sensitive(self.current_project not in self.scanning_blocked_projects)
+        self.error_bar.set_show_close_button(not blocked)
+        self.error_bar.set_message_type(Gtk.MessageType.WARNING if blocked else Gtk.MessageType.ERROR)
+        if blocked:
+            # 2026-10-23: the warning is persistent and does not destroy the
+            # last coherent tree, selection, checkboxes or commit message.
+            self._cancel_pending_preview()
+            if self.active_context_menu is not None:
+                self.active_context_menu.popdown()
+            self.context_status = self.context_repository = None
+            self.context_add_statuses.clear()
+            self.context_forget_statuses.clear()
+            self.context_checkbox_statuses.clear()
+            self.context_selected_statuses.clear()
+            self.show_error("Too many changed or untracked files (at least 1,000). "
+                            "Resolve manually or update ignore rules, then press Scan.")
 
     def _capture_tree_view_state(self) -> None:
         """Store row selection and scroll before changing project model."""
@@ -453,6 +503,8 @@ class SCMPanel(Gtk.Box):
         """Release a cached SCM model after project removal."""
 
         self.project_states.pop(project_name, None)
+        self.blocked_projects.discard(project_name)
+        self.scanning_blocked_projects.discard(project_name)
 
     def set_repositories(
         self,
@@ -469,8 +521,8 @@ class SCMPanel(Gtk.Box):
             self._ensure_repository(repository)
         for repository in repositories:
             self._update_repository_label(repository)
-        self.scan_button.set_sensitive(not scanning)
-        self.reset_button.set_sensitive(not scanning)
+        self.scan_button.set_sensitive(not scanning and self.current_project not in self.scanning_blocked_projects)
+        self.reset_button.set_sensitive(not scanning and self.current_project not in self.blocked_projects)
         self.unsupported_scan_button.set_sensitive(not scanning)
         if repositories:
             self._update_summary()
@@ -729,6 +781,8 @@ class SCMPanel(Gtk.Box):
     ) -> None:
         """Apply one repository snapshot inside the active project's tree."""
 
+        if self.current_project in self.blocked_projects:
+            return
         self._ensure_repository(repository)
         qualified = [
             status
@@ -946,12 +1000,17 @@ class SCMPanel(Gtk.Box):
     def show_error(self, message: str) -> None:
         """Display a dismissible non-modal error without discarding model state."""
 
+        if self.current_project in self.blocked_projects and "at least 1,000" not in message:
+            message = ("Too many changed or untracked files (at least 1,000). "
+                       "Resolve manually or update ignore rules, then press Scan.\n" + message)
         self.error_label.set_text(message)
         self._show_conditional(self.error_bar)
 
     def clear_error(self) -> None:
         """Hide and clear the previous repository error."""
 
+        if self.current_project in self.blocked_projects:
+            return
         self.error_label.set_text("")
         self.error_bar.hide()
 
@@ -1170,6 +1229,9 @@ class SCMPanel(Gtk.Box):
     ) -> None:
         """Toggle one explicit operation checkbox without changing preview selection."""
 
+        if self.current_project in self.blocked_projects:
+            return None
+
         filtered_path = Gtk.TreePath.new_from_string(path_text)
         filtered_iter = self.filtered_store.get_iter(filtered_path)
         if not self.filtered_store.get_value(filtered_iter, self.COL_CHECKABLE):
@@ -1217,6 +1279,9 @@ class SCMPanel(Gtk.Box):
 
     def _on_select_all_toggled(self, button: Gtk.CheckButton) -> None:
         """Set every tracked file checkbox from the explicit master control."""
+
+        if self.current_project in self.blocked_projects:
+            return None
 
         if self.updating_select_all:
             return
@@ -1353,6 +1418,9 @@ class SCMPanel(Gtk.Box):
     def _show_repository_menu(self, event: Gdk.EventButton | None) -> bool:
         """Show tools whose working directory is the contextual repository."""
 
+        if self.current_project in self.blocked_projects:
+            return False
+
         if self.context_repository is None:
             return False
         menu = Gtk.Menu()
@@ -1397,6 +1465,7 @@ class SCMPanel(Gtk.Box):
         menu.append(tag_item)
         menu.append(Gtk.SeparatorMenuItem())
         menu.append(exclude_item)
+        self.active_context_menu = menu
         menu.show_all()
         if event is not None:
             menu.popup_at_pointer(event)
@@ -1438,6 +1507,7 @@ class SCMPanel(Gtk.Box):
                 self._status_key(anchor) not in self.checked_paths
             )
         menu = self._build_file_menu()
+        self.active_context_menu = menu
         menu.show_all()
         if event is not None:
             menu.popup_at_pointer(event)
@@ -1640,6 +1710,9 @@ class SCMPanel(Gtk.Box):
     def _on_tree_key_press(self, _tree: Gtk.TreeView, event: Gdk.EventKey) -> bool:
         """Dispatch single-key file actions and checkbox toggling from the tree."""
 
+        if self.current_project in self.blocked_projects:
+            return True
+
         if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK):
             return False
         keyval = Gdk.keyval_to_lower(event.keyval)
@@ -1744,6 +1817,9 @@ class SCMPanel(Gtk.Box):
     ) -> None:
         """Set tracked operation checkboxes uniformly and refresh their actions."""
 
+        if self.current_project in self.blocked_projects:
+            return None
+
         # 2026-08-17: tastiera e menu contestuale devono applicare la stessa
         # decisione atomica alla selezione, senza invertire separatamente gli
         # stati misti né coinvolgere righe prive di checkbox.
@@ -1840,6 +1916,9 @@ class SCMPanel(Gtk.Box):
     def _update_context_repository(self, repository: RepositoryRef) -> bool:
         """Open Update only after GTK has finished dispatching the context menu."""
 
+        if self.current_project in self.blocked_projects:
+            return GLib.SOURCE_REMOVE
+
         # 2026-08-17: deferring modal creation avoids nesting it in GTK's menu
         # activation stack, the same boundary needed by repository exclusion.
         self.on_update(repository)
@@ -1885,6 +1964,9 @@ class SCMPanel(Gtk.Box):
     ) -> bool:
         """Forward one explicit repository action after menu deactivation."""
 
+        if self.current_project in self.blocked_projects:
+            return GLib.SOURCE_REMOVE
+
         self.on_repository_action(action, repository)
         return GLib.SOURCE_REMOVE
 
@@ -1897,6 +1979,9 @@ class SCMPanel(Gtk.Box):
 
     def _exclude_context_repository(self, repository: RepositoryRef) -> bool:
         """Exclude a repository once its contextual menu is no longer active."""
+
+        if self.current_project in self.blocked_projects:
+            return GLib.SOURCE_REMOVE
 
         self.on_exclude(repository)
         return GLib.SOURCE_REMOVE
@@ -1927,6 +2012,9 @@ class SCMPanel(Gtk.Box):
     def _on_commit_clicked(self, _button: Gtk.Button) -> None:
         """Forward an explicit commit request to the owning window."""
 
+        if self.current_project in self.blocked_projects:
+            return None
+
         self.on_commit(self.message_text(), self.checked_statuses())
 
     def _on_message_key_press(
@@ -1940,7 +2028,7 @@ class SCMPanel(Gtk.Box):
         enter_keys = (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter)
         if event.keyval not in enter_keys or modifiers != Gdk.ModifierType.CONTROL_MASK:
             return False
-        if self.commit_button.get_sensitive():
+        if self.commit_button.is_sensitive():
             self._on_commit_clicked(self.commit_button)
         return True
 
@@ -1958,6 +2046,9 @@ class SCMPanel(Gtk.Box):
         self, _tree: Gtk.TreeView, path: Gtk.TreePath, _column: Gtk.TreeViewColumn
     ) -> None:
         """Open assisted diff editing for tracked files activated by keyboard."""
+
+        if self.current_project in self.blocked_projects:
+            return None
 
         self._cancel_pending_preview()
         tree_iter = self.filtered_store.get_iter(path)
