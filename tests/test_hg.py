@@ -74,6 +74,16 @@ class MercurialSCMTest(unittest.TestCase):
         self.assertEqual(self.scm.environment["HGPLAIN"], "1")
         self.assertEqual(self.scm.environment["LC_ALL"], "C")
 
+    def test_ignore_query_excludes_nested_repositories_as_literal_paths(self) -> None:
+        """The parent ignore read must not audit paths inside independent child repos."""
+
+        self.assertEqual(
+            self.scm.ignored_argv(["public/backoffice/atk", "folder/[literal]"]),
+            ["hg", "status", "-i", "-T", "{path}\\n",
+             "--exclude", "path:public/backoffice/atk",
+             "--exclude", "path:folder/[literal]"],
+        )
+
     def test_diff_enables_extdiff_without_editing_hgrc(self) -> None:
         """Meld uses the bundled extension only for the launched process."""
 
