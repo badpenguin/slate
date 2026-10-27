@@ -22,6 +22,12 @@ class GitSCMTest(unittest.TestCase):
 
         self.temporary.cleanup()
 
+    def test_ignore_query_excludes_literal_nested_repository_paths(self) -> None:
+        """Git applies the same repository boundary without treating names as globs."""
+
+        self.assertEqual(self.scm.ignored_argv(["nested/[literal]"])[-2:],
+                         ["--", ":(top,exclude,literal)nested/[literal]"])
+
     def test_status_collapses_index_and_worktree_without_staging_sections(self) -> None:
         """Both Git columns map to one selectable normalized status list."""
 
