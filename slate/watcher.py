@@ -47,9 +47,20 @@ class RepoWatcher:
         on_file_change: Callable[[str], None] | None = None,
         on_ignored: Callable[[set[str]], None] | None = None,
         on_history_change: Callable[[], None] | None = None,
+        *,
+        row_limit: int | None = None,
     ) -> None:
         """Discover ignores, mount monitors and publish status and file events."""
 
+        self.row_limit = row_limit
+        self.limited = False
+        self.probing = False
+        self.generation = 0
+        self.processing = False
+        self.parse_idle_id: int | None = None
+        self._mount_entries = None
+        self._mount_directory: str | None = None
+        self._mount_queued: set[str] = set()
         self.path = str(Path(path).resolve())
         self.scm = scm
         self.on_status = on_status
@@ -128,6 +139,12 @@ class RepoWatcher:
                 os.path.relpath(directory, self.path).replace(os.sep, "/")
             )
         )
+        self._mount_queued = set(self._mount_queue)
+        # 2026-10-27: a newly discovered nested repository also changes the
+        # ignore query boundary; retry the read even if its first run failed.
+        if not self.limited:
+            self._pending_ignored = True
+            self._schedule_pending()
         if removed_boundaries:
             self.request_full()
             return
@@ -142,7 +159,7 @@ class RepoWatcher:
     def request_paths(self, paths: Iterable[str]) -> None:
         """Queue one path-limited status, promoting large batches to a full scan."""
 
-        if self.closed:
+        if self.closed or self.limited:
             return
         if self._pending_full:
             self._schedule_pending()
@@ -167,7 +184,7 @@ class RepoWatcher:
     ) -> None:
         """Queue a full status and optionally refresh repository-wide metadata."""
 
-        if self.closed:
+        if self.closed or self.limited:
             return
         self._pending_full = True
         self._pending_paths.clear()
@@ -201,7 +218,7 @@ class RepoWatcher:
             GLib.source_remove(self.pending_id)
             self.pending_id = None
         self.ready = False
-        if self.command is None:
+        if self.command is None and not self.processing:
             self._schedule_pause_ready()
 
     def resume_with_full_refresh(self, *, refresh_branch: bool = True) -> None:
@@ -216,10 +233,59 @@ class RepoWatcher:
             self.pause_idle_id = None
         self.request_full(refresh_branch=refresh_branch)
 
+    def suspend_for_limit(self) -> None:
+        """Cancel automatic work and observers without losing the last good snapshot."""
+
+        # 2026-10-23: pausing command scheduling alone leaves the expensive
+        # directory/event work alive; a blocked project must release both.
+        waiting_operation = self.pause_callback
+        self.close()
+        self.closed = False
+        self.limited = True
+        self.probing = False
+        self._mount_queue.clear()
+        self._mount_queued.clear()
+        self._pending_paths.clear()
+        self._pending_full = self._pending_branch = self._pending_ignored = False
+        self.ready = False
+        # An already requested modal may be waiting for the current read.
+        # Release that ownership boundary even though automatic work is blocked.
+        if waiting_operation is not None:
+            self.pause_callback = waiting_operation
+            self._schedule_pause_ready()
+
+    def probe_limit(self) -> None:
+        """Run one explicit full scan without remounting any automatic observers."""
+
+        self.suspend_for_limit()
+        self.probing = True
+        self._published_snapshot = None
+        # Only this explicit entry point may enqueue work while limited;
+        # ordinary refresh requests remain suppressed even during a probe.
+        self._pending_full = self._pending_branch = self._pending_ignored = True
+        self._schedule_pending()
+
+    def resume_after_limit(self) -> None:
+        """Remount observers only after the whole project passes its manual scan."""
+
+        self.limited = self.probing = False
+        self._mount_scm_metadata_monitors()
+        self._queue_mount(self.path)
+        self.request_full()
+
     def close(self) -> None:
         """Cancel timers, monitors and commands owned by this watcher."""
 
         self.closed = True
+        self.generation += 1
+        self.processing = False
+        if self.parse_idle_id is not None:
+            GLib.source_remove(self.parse_idle_id)
+            self.parse_idle_id = None
+        if self._mount_entries is not None:
+            self._mount_entries.close()
+            self._mount_entries = None
+            self._mount_directory = None
         for source_id in (
             self.pending_id,
             self.mount_idle_id,
@@ -246,9 +312,13 @@ class RepoWatcher:
     ) -> None:
         """Start the sole automatic repository command and retain its lifetime."""
 
+        generation = self.generation
+
         def completed(result: CommandResult) -> None:
             """Release the command, apply its result and continue queued work."""
 
+            if self.closed or generation != self.generation:
+                return
             self.command = None
             if not self.closed:
                 callback(result)
@@ -288,7 +358,8 @@ class RepoWatcher:
             f"monitor reconciliation queued mounted={len(self.monitors)}"
         )
         self._mount_scm_metadata_monitors()
-        self._queue_mount(self.path)
+        if not self.limited:
+            self._queue_mount(self.path)
 
     def _on_branch(self, result: CommandResult) -> None:
         """Cache the named branch without coupling it to every status request."""
@@ -315,13 +386,66 @@ class RepoWatcher:
             if not paths and not self._initial_full_complete:
                 self._complete_initial_full_status()
             return
-        try:
-            statuses = self.scm.parse_status(result.stdout)
-        except (ValueError, TypeError) as error:
-            self.on_error(f"Invalid {self.scm.display_name} status: {error}")
-            if not paths and not self._initial_full_complete:
-                self._complete_initial_full_status()
-            return
+        generation = self.generation
+        incoming: dict[str, FileStatus] = {}
+        retained = {
+            path: status for path, status in self._statuses.items()
+            if paths and not any(path == root or path.startswith(f"{root}/") for root in paths)
+        }
+        iterator = self.scm.iter_status(result.stdout)
+        self.processing = True
+
+        def consume() -> bool:
+            """Parse at most 100 files or four milliseconds, then yield to GTK."""
+
+            self.parse_idle_id = None
+            if self.closed or generation != self.generation:
+                return GLib.SOURCE_REMOVE
+            started = GLib.get_monotonic_time()
+            exhausted = False
+            overflow = False
+            try:
+                # 2026-10-23: two raw entries may collapse into one move row.
+                # At twice the limit even that best case must block the UI.
+                for _index in range(100):
+                    status = next(iterator, None)
+                    if status is None:
+                        exhausted = True
+                        break
+                    if not self._is_nested_repository_path(status.path):
+                        incoming[status.path] = status
+                        retained[status.path] = status
+                    if self.row_limit is not None and len(retained) >= self.row_limit * 2:
+                        overflow = True
+                        break
+                    if GLib.get_monotonic_time() - started >= 4000:
+                        break
+            except (ValueError, TypeError) as error:
+                self.processing = False
+                self.on_error(f"Invalid {self.scm.display_name} status: {error}")
+                if not paths and not self._initial_full_complete:
+                    self._complete_initial_full_status()
+                if self.paused:
+                    self._schedule_pause_ready()
+                else:
+                    self._start_next()
+                return GLib.SOURCE_REMOVE
+            if not exhausted and not overflow:
+                self.parse_idle_id = GLib.idle_add(consume)
+                return GLib.SOURCE_REMOVE
+            self.processing = False
+            self._apply_status(paths, list(incoming.values()), overflow)
+            if self.paused:
+                self._schedule_pause_ready()
+            else:
+                self._start_next()
+            return GLib.SOURCE_REMOVE
+
+        consume()
+
+    def _apply_status(self, paths: tuple[str, ...], statuses: list[FileStatus], overflow: bool) -> None:
+        """Merge a bounded parsed snapshot before publishing its normalized row count."""
+
         if paths:
             # 2026-08-17: an empty incremental result means that every cached
             # row below the queried roots became clean and must disappear.
@@ -334,7 +458,7 @@ class RepoWatcher:
         else:
             self._statuses.clear()
         self._statuses.update({status.path: status for status in statuses})
-        if paths and any(status.source_path for status in statuses):
+        if paths and not overflow and any(status.source_path for status in statuses):
             # 2026-08-17: a path-limited result exposes the copy source but not
             # whether that source is removed. Publish only after a full, coherent
             # snapshot can distinguish a copy from a recorded move.
@@ -413,7 +537,7 @@ class RepoWatcher:
     def _schedule_pending(self) -> None:
         """Schedule pending work after the active or background quiet window."""
 
-        if self.closed or self.paused or not self._has_pending_work():
+        if self.closed or self.paused or (self.limited and not self.probing) or not self._has_pending_work():
             return
         if self.pending_id is not None:
             GLib.source_remove(self.pending_id)
@@ -441,7 +565,8 @@ class RepoWatcher:
     def _start_next(self) -> None:
         """Run the next queued command sequentially after debounce and lock release."""
 
-        if self.closed or self.paused or self.command is not None or not self.ready:
+        if (self.closed or self.paused or self.processing or (self.limited and not self.probing)
+                or self.command is not None or not self.ready):
             return
         if not self._has_pending_work():
             self.ready = False
@@ -449,7 +574,7 @@ class RepoWatcher:
         if self._pending_ignored:
             self._pending_ignored = False
             self._run(
-                self.scm.ignored_argv(),
+                self.scm.ignored_argv(tuple(sorted(self.nested_repositories))),
                 self._on_ignored,
             )
             return
@@ -492,7 +617,7 @@ class RepoWatcher:
     def _schedule_pause_ready(self) -> None:
         """Deliver exclusive-operation ownership on the next main-loop turn."""
 
-        if self.pause_idle_id is None and self.pause_callback is not None:
+        if not self.processing and self.pause_idle_id is None and self.pause_callback is not None:
             self.pause_idle_id = GLib.idle_add(self._deliver_pause_ready)
 
     def _deliver_pause_ready(self) -> bool:
@@ -519,15 +644,20 @@ class RepoWatcher:
         """Queue a subtree for non-blocking breadth-first monitor reconciliation."""
 
         resolved = str(Path(directory).resolve())
-        if resolved not in self._mount_queue:
+        if getattr(self, "limited", False) or self.closed:
+            return
+        if not hasattr(self, "_mount_queued"):
+            self._mount_queued = set(self._mount_queue)
+        if resolved not in self._mount_queued:
             self._mount_queue.append(resolved)
+            self._mount_queued.add(resolved)
         if self.mount_idle_id is None:
             self.mount_idle_id = GLib.idle_add(self._mount_batch)
 
     def _mount_scm_metadata_monitors(self) -> None:
         """Watch only explicit SCM metadata files that can affect visible state."""
 
-        if self.closed:
+        if self.closed or self.limited:
             return
         # 2026-08-24: osservare ricorsivamente le directory amministrative
         # consegna anche ogni temporaneo creato dai comandi di lettura. Monitor
@@ -572,7 +702,7 @@ class RepoWatcher:
     def _mount_git_branch_monitor(self) -> None:
         """Retarget the precise Git ref monitor to the currently named branch."""
 
-        if self.scm.kind != "git" or self.closed:
+        if self.scm.kind != "git" or self.closed or self.limited:
             return
         relative = f".git/refs/heads/{self._branch}" if self._branch else None
         path = os.path.join(self.path, relative) if relative is not None else None
@@ -599,6 +729,11 @@ class RepoWatcher:
 
         root = str(Path(directory).resolve())
         prefix = f"{root}{os.sep}"
+        current = getattr(self, "_mount_directory", None)
+        if current is not None and (current == root or current.startswith(prefix)):
+            self._mount_entries.close()
+            self._mount_entries = None
+            self._mount_directory = None
         for monitored, monitor in tuple(self.monitors.items()):
             if monitored == root or monitored.startswith(prefix):
                 self._debug(f"monitor dropped path={monitored}")
@@ -609,45 +744,61 @@ class RepoWatcher:
             for queued in self._mount_queue
             if queued != root and not queued.startswith(prefix)
         )
+        self._mount_queued = set(self._mount_queue)
 
     def _mount_batch(self) -> bool:
         """Mount monitors within a small count and wall-time main-loop budget."""
 
         processed = 0
+        entry_count = 0
         started_at = GLib.get_monotonic_time()
-        count_limit = (
-            self.MOUNT_ACTIVE_BATCH if self.active else self.MOUNT_INACTIVE_BATCH
-        )
+        count_limit = self.MOUNT_ACTIVE_BATCH if self.active else self.MOUNT_INACTIVE_BATCH
+        if not hasattr(self, "_mount_queued"):
+            self._mount_queued = set(self._mount_queue)
         # 2026-08-17: monitor_directory e scandir sono sincroni; un limite sia
         # temporale sia numerico impedisce ai repository grandi di congelare GTK.
-        while (
-            self._mount_queue
-            and processed < count_limit
-            and GLib.get_monotonic_time() - started_at < self.MOUNT_BUDGET_US
-            and not self.closed
-        ):
-            directory = self._mount_queue.popleft()
-            processed += 1
-            if self._should_prune(directory):
-                continue
+        # 2026-10-23: apply that budget inside a directory too, retaining the
+        # scandir iterator between turns rather than enumerating it all at once.
+        while (self._mount_queue or getattr(self, "_mount_entries", None) is not None) and not self.closed:
+            if (entry_count >= 100 or GLib.get_monotonic_time() - started_at >= self.MOUNT_BUDGET_US
+                    or getattr(self, "limited", False)):
+                break
+            if getattr(self, "_mount_entries", None) is None:
+                if processed >= count_limit:
+                    break
+                directory = self._mount_queue.popleft()
+                self._mount_queued.discard(directory)
+                processed += 1
+                if self._should_prune(directory):
+                    continue
+                try:
+                    if directory not in self.monitors:
+                        monitor = Gio.File.new_for_path(directory).monitor_directory(
+                            Gio.FileMonitorFlags.WATCH_MOVES, None)
+                        monitor.connect("changed", self._on_change)
+                        self.monitors[directory] = monitor
+                        self._debug(f"monitor mounted path={directory}")
+                    self._mount_entries = os.scandir(directory)
+                    self._mount_directory = directory
+                except (OSError, GLib.Error) as error:
+                    self.on_error(f"Monitor unavailable for {directory}: {error}")
+                    continue
             try:
-                if directory not in self.monitors:
-                    monitor = Gio.File.new_for_path(directory).monitor_directory(
-                        Gio.FileMonitorFlags.WATCH_MOVES, None
-                    )
-                    monitor.connect("changed", self._on_change)
-                    self.monitors[directory] = monitor
-                    self._debug(f"monitor mounted path={directory}")
-                with os.scandir(directory) as entries:
-                    for entry in entries:
-                        if (
-                            entry.is_dir(follow_symlinks=False)
-                            and entry.path not in self._mount_queue
-                        ):
-                            self._mount_queue.append(entry.path)
-            except (OSError, GLib.Error) as error:
-                self.on_error(f"Monitor unavailable for {directory}: {error}")
-        if self._mount_queue and not self.closed:
+                entry = next(self._mount_entries)
+                entry_count += 1
+                if entry.is_dir(follow_symlinks=False) and entry.path not in self._mount_queued:
+                    self._mount_queue.append(entry.path)
+                    self._mount_queued.add(entry.path)
+            except StopIteration:
+                self._mount_entries.close()
+                self._mount_entries = None
+                self._mount_directory = None
+            except OSError as error:
+                self._mount_entries.close()
+                self._mount_entries = None
+                self._mount_directory = None
+                self.on_error(f"Directory scan failed: {error}")
+        if (self._mount_queue or getattr(self, "_mount_entries", None) is not None) and not self.closed:
             # 2026-08-17: startup can observe a lock before the .hg monitor is
             # mounted; each mount batch rechecks release without a poll timer.
             if self.waiting_for_unlock and not self.scm.is_locked():
@@ -685,10 +836,9 @@ class RepoWatcher:
             (".git/objects/", ".git/logs/")
         ):
             return True
-        return any(
-            relative == ignored or relative.startswith(f"{ignored}/")
-            for ignored in self.ignored
-        )
+        # 2026-10-23: ignored sets can contain thousands of extracted files;
+        # checking only ancestors avoids a scan of that entire set per directory.
+        return any("/".join(parts[:index]) in self.ignored for index in range(1, len(parts) + 1))
 
     def _on_change(
         self,
@@ -700,7 +850,7 @@ class RepoWatcher:
         """Mount new directories and queue their relevant filesystem changes."""
 
         path = file.get_path()
-        if not path or self.closed:
+        if not path or self.closed or getattr(self, "limited", False):
             return
         relative = os.path.relpath(path, self.path).replace(os.sep, "/")
         if self._is_nested_repository_path(relative):
@@ -743,7 +893,7 @@ class RepoWatcher:
             Gio.FileMonitorEvent.MOVED_OUT,
             Gio.FileMonitorEvent.MOVED,
             Gio.FileMonitorEvent.RENAMED,
-        }:
+        } and (path in self.monitors or path in getattr(self, "_mount_queued", set())):
             self._drop_monitor_subtree(path)
         mount_path: str | None = None
         if event_type in {
@@ -761,7 +911,8 @@ class RepoWatcher:
         if mount_path is not None:
             # Un percorso ricreato può avere ancora in mappa il monitor morto
             # della directory precedente con lo stesso nome.
-            self._drop_monitor_subtree(mount_path)
+            if mount_path in self.monitors or mount_path in getattr(self, "_mount_queued", set()):
+                self._drop_monitor_subtree(mount_path)
             self._queue_mount(mount_path)
         paths = [relative]
         if other_path:
