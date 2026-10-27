@@ -29,6 +29,22 @@ def _make_git(root: Path) -> None:
 class RepositoryDiscoveryTest(unittest.TestCase):
     """Verify discovery boundaries, exclusions and stable relative identities."""
 
+    def test_wide_directory_yields_without_finishing_in_one_turn(self) -> None:
+        """A flat directory must respect entry budgets, not just directory counts."""
+
+        with tempfile.TemporaryDirectory(prefix="slate-discovery-", dir="/tmp") as directory:
+            root = Path(directory)
+            for index in range(250):
+                (root / f"file-{index}").touch()
+            found = []
+            completed = []
+            discovery = RepositoryDiscovery(str(root), set(), found.append, completed.append)
+            self.assertEqual(discovery._scan_batch(), GLib.SOURCE_CONTINUE)
+            self.assertIsNotNone(discovery.entries)
+            self.assertFalse(completed)
+            discovery.cancel()
+            self.assertIsNone(discovery.entries)
+
     def test_repository_reference_never_equals_an_untyped_path(self) -> None:
         """Repository identity always requires both its path and SCM type."""
 
