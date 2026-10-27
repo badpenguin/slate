@@ -1011,10 +1011,9 @@ class ProjectFileManager(Gtk.Box):
         parts = relative.split("/")
         if any(part in self.HARD_EXCLUDED for part in parts):
             return True
-        return any(
-            relative == ignored or relative.startswith(f"{ignored}/")
-            for ignored in self.ignored
-        )
+        # 2026-10-23: ignored-file lists can contain entire extracted trees;
+        # check only the path's ancestors instead of scanning that whole list.
+        return any("/".join(parts[:index]) in self.ignored for index in range(1, len(parts) + 1))
 
     def _append_entry(
         self,
