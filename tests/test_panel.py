@@ -65,6 +65,53 @@ class SCMPanelTest(unittest.TestCase):
             self._record_delete_missing,
         )
 
+    def test_project_limit_preserves_model_input_and_blocks_shortcuts(self) -> None:
+        """A limit warning disables actions without destroying the last good view."""
+
+        self.panel.bind_project("large", True)
+        self.panel.update_status([FileStatus("tracked.py", "modified")], "main")
+        self.panel.checked_paths.add("tracked.py")
+        self.panel.message.get_buffer().set_text("unfinished commit")
+        model = self.panel.store
+        self.panel.set_project_blocked("large", True)
+        self.assertIs(self.panel.store, model)
+        self.assertIn("tracked.py", self.panel.checked_paths)
+        self.assertEqual(self.panel.message_text(), "unfinished commit")
+        self.assertFalse(self.panel.tree.get_sensitive())
+        self.assertFalse(self.panel.commit_button.is_sensitive())
+        self.assertTrue(self.panel.scan_button.get_sensitive())
+        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+        self.assertTrue(self.panel._on_tree_key_press(self.panel.tree, event))
+        self.panel._on_commit_clicked(self.panel.commit_button)
+        self.assertIsNone(self.committed)
+        self.assertIsNone(self.edited_internal)
+        self.panel.clear_error()
+        self.assertTrue(self.panel.error_bar.get_visible())
+        self.panel.update_status([FileStatus("unexpected", "untracked")], "main")
+        self.assertNotIn("unexpected", self.panel.status_by_path)
+        self.panel.bind_project("other", True)
+        self.assertTrue(self.panel.tree.get_sensitive())
+        self.panel.bind_project("large", True)
+        self.assertFalse(self.panel.tree.get_sensitive())
+        self.assertIn("at least 1,000", self.panel.error_label.get_text())
+        self.assertEqual(self.panel.message_text(), "unfinished commit")
+        self.panel.set_project_blocked("large", False)
+        self.assertTrue(self.panel.tree.get_sensitive())
+        self.assertFalse(self.panel.error_bar.get_visible())
+
+    def test_limit_scan_state_survives_project_switches(self) -> None:
+        """Switching projects cannot accidentally enable concurrent recovery scans."""
+
+        self.panel.bind_project("large", True)
+        self.panel.set_project_blocked("large", True)
+        self.panel.set_limit_scan_running("large")
+        self.panel.bind_project("other", True)
+        self.panel.bind_project("large", True)
+        self.panel.set_repositories([RepositoryRef(".", "hg")])
+        self.assertFalse(self.panel.scan_button.get_sensitive())
+        self.panel.set_project_blocked("large", True)
+        self.assertTrue(self.panel.scan_button.get_sensitive())
+
     def _record_commit(self, message: str, statuses: list[FileStatus]) -> None:
         """Record commit signals for explicit-checkbox assertions."""
 
