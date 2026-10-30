@@ -71,6 +71,7 @@ class EditorDocument(Gtk.Box):
         self.etag: str | None = None
         self.loading = False
         self.saving = False
+        self.path_changing = False
         self.force_next_save = False
         self.external_conflict = False
         self.deleted_conflict = False
@@ -80,6 +81,7 @@ class EditorDocument(Gtk.Box):
         self.load_cancellable: Gio.Cancellable | None = None
         self.save_cancellable: Gio.Cancellable | None = None
         self.save_callbacks: list[Callable[[bool], None]] = []
+        self.saved_snapshot: str | None = None
         self.lint_command: AsyncCommand | None = None
         self.lint_serial = 0
         self.lint_dialog: Gtk.MessageDialog | None = None
@@ -111,6 +113,11 @@ class EditorDocument(Gtk.Box):
     def dirty(self) -> bool:
         """Return whether the source buffer contains unsaved edits."""
 
+        # 2026-10-30: dopo una scrittura concorrente il save-point nativo
+        # può indicare una versione precedente a quella realmente sul disco.
+        if self.saved_snapshot is not None:
+            text = self.buffer.get_text(self.buffer.get_start_iter(), self.buffer.get_end_iter(), True)
+            return text != self.saved_snapshot
         return self.buffer.get_modified()
 
     def _safe_path(self) -> str | None:
@@ -228,6 +235,8 @@ class EditorDocument(Gtk.Box):
         self.buffer.set_highlight_syntax(True)
         self.buffer.set_max_undo_levels(500)
         self.buffer.connect("modified-changed", self._on_modified_changed)
+        self.buffer.connect_after("undo", self._on_history_restored)
+        self.buffer.connect_after("redo", self._on_history_restored)
         # 2026-08-16: GtkSource aggiorna l'undo manager dopo il segnale changed;
         # le proprietà dedicate notificano invece lo stato definitivo utilizzabile.
         self.buffer.connect("notify::can-undo", self._on_history_capability_changed)
@@ -338,38 +347,68 @@ class EditorDocument(Gtk.Box):
         self.loading = True
         self.save_button.set_sensitive(False)
         self.load_cancellable = Gio.Cancellable()
-        self.file.load_contents_async(
-            self.load_cancellable,
-            self._on_loaded,
-            reason,
+        # 2026-10-30: rifiutare i file già troppo grandi prima di leggerli
+        # interamente; mantenere anche il controllo finale contro crescite tardive.
+        self.file.query_info_async(
+            "standard::size", Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT,
+            self.load_cancellable, self._on_load_info, (reason, self.load_cancellable),
         )
 
-    def _on_loaded(
-        self, source: Gio.File, result: Gio.AsyncResult, reason: str
-    ) -> None:
-        """Validate and install asynchronously loaded UTF-8 file contents."""
+    def _on_load_info(self, source: Gio.File, result: Gio.AsyncResult, request) -> None:
+        """Check file size asynchronously before starting the full text load."""
 
-        self.load_cancellable = None
+        reason, cancellable = request
+        if cancellable is not self.load_cancellable:
+            return
+        try:
+            info = source.query_info_finish(result)
+        except GLib.Error as error:
+            self.load_cancellable = None
+            self._load_failed(reason, error)
+            return
+        if info.get_size() > self.MAX_TEXT_BYTES:
+            self.load_cancellable = None
+            self._reject_loaded_file(reason, "File over 5 MiB: internal editing is unavailable.")
+            return
+        source.load_contents_async(cancellable, self._on_loaded, request)
+
+    def _load_failed(self, reason: str, error: GLib.Error) -> None:
+        """Report a failed metadata or content read using the same conflict rules."""
+
+        self.loading = False
+        if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+            return
+        if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND):
+            if reason == "initial":
+                self.on_removed(self, f"File no longer exists: {self.relative_path}")
+            else:
+                self._show_deleted_conflict()
+            return
+        message = f"Unable to read the file: {error}"
+        if reason == "initial":
+            self.on_removed(self, message)
+        else:
+            self._show_notice(message, Gtk.MessageType.ERROR)
+
+    def _on_loaded(
+        self, source: Gio.File, result: Gio.AsyncResult, request
+    ) -> None:
+        """Install only the contents belonging to the current asynchronous load."""
+
+        # 2026-10-30: il controllo d'identità copre entrambe le fasi della
+        # lettura; un callback annullato non può cancellare il token più recente.
+        reason, cancellable = request
         try:
             _success, contents, etag = source.load_contents_finish(result)
         except GLib.Error as error:
-            self.loading = False
-            if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+            if cancellable is not self.load_cancellable:
                 return
-            if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND):
-                if reason == "initial":
-                    self.on_removed(
-                        self, f"File no longer exists: {self.relative_path}"
-                    )
-                else:
-                    self._show_deleted_conflict()
-                return
-            message = f"Unable to read the file: {error}"
-            if reason == "initial":
-                self.on_removed(self, message)
-            else:
-                self._show_notice(message, Gtk.MessageType.ERROR)
+            self.load_cancellable = None
+            self._load_failed(reason, error)
             return
+        if cancellable is not self.load_cancellable:
+            return
+        self.load_cancellable = None
         if reason == "external" and self.etag is not None and etag == self.etag:
             # 2026-08-23: gli eventi prodotti dal salvataggio interno vengono
             # differiti oltre il mute; l'etag evita che il loro controllo
@@ -420,6 +459,7 @@ class EditorDocument(Gtk.Box):
         target_line = min(cursor_line, max(0, self.buffer.get_line_count() - 1))
         cursor = self.buffer.get_iter_at_line(target_line)
         self.buffer.place_cursor(cursor)
+        self.saved_snapshot = None
         self.buffer.set_modified(False)
         self.etag = etag
         self.loading = False
@@ -514,6 +554,8 @@ class EditorDocument(Gtk.Box):
         self.relative_path = relative_path
         self.path = self._safe_path()
         self.file = Gio.File.new_for_path(self.path) if self.path else None
+        if self.loading:
+            self._begin_load("initial" if self.etag is None else "external")
         self.path_label.set_text(relative_path)
         self.path_label.set_tooltip_text(f"{self.project_name} / {relative_path}")
         self._configure_language()
@@ -682,6 +724,10 @@ class EditorDocument(Gtk.Box):
         if self.historical or self.previewing:
             self._finish_save(False)
             return
+        if self.path_changing:
+            self._show_notice("A rename is in progress; save again when it finishes.", Gtk.MessageType.WARNING)
+            self._finish_save(False)
+            return
         if self.saving:
             return
         if not self.dirty:
@@ -721,7 +767,7 @@ class EditorDocument(Gtk.Box):
                 create_flags,
                 self.save_cancellable,
                 self._on_saved,
-                None,
+                text,
             )
         else:
             # 2026-08-19: the Python-bytes overload handles an empty payload;
@@ -733,13 +779,13 @@ class EditorDocument(Gtk.Box):
                 create_flags,
                 self.save_cancellable,
                 self._on_saved,
-                None,
+                text,
             )
 
     def _on_saved(
-        self, source: Gio.File, result: Gio.AsyncResult, _data: object
+        self, source: Gio.File, result: Gio.AsyncResult, saved_text: str
     ) -> None:
-        """Commit a successful save state or expose an external-write conflict."""
+        """Confirm the written snapshot without clearing newer unsaved changes."""
 
         self.save_cancellable = None
         try:
@@ -762,18 +808,38 @@ class EditorDocument(Gtk.Box):
             self._finish_save(False)
             return
         self.saving = False
+        # 2026-10-30: una scrittura avviata prima di un cambio di identità non
+        # prova che il nuovo path contenga il buffer. Proteggere anche chiamanti
+        # esterni al coordinamento delle rinomine della workspace.
+        if self.file is None or not source.equal(self.file):
+            self.saved_snapshot = None
+            self.buffer.set_modified(True)
+            self.external_conflict = True
+            self.attention = True
+            self._show_conflict(
+                "The file moved while a save was completing. Check the version at the new path.",
+                (("Use version on disk", self.RESPONSE_DISK), ("Keep my version", self.RESPONSE_MINE)),
+            )
+            self.on_state(self)
+            self._finish_save(False)
+            return
         self.etag = etag
         self.force_next_save = False
         self.external_conflict = False
         self.deleted_conflict = False
         self.attention = False
         self.mute_monitor_until = GLib.get_monotonic_time() // 1000 + 500
-        self.buffer.set_modified(False)
+        # 2026-10-30: Gio scrive lo snapshot acquisito da save(), non il buffer
+        # attuale. Una chiusura in attesa deve fermarsi se nel frattempo è cambiato.
+        current_text = self.buffer.get_text(self.buffer.get_start_iter(), self.buffer.get_end_iter(), True)
+        unchanged = current_text == saved_text
+        self.saved_snapshot = None if unchanged else saved_text
+        self.buffer.set_modified(not unchanged)
         self._ensure_monitor()
         self._hide_notice()
         self.on_state(self)
         self._start_php_lint()
-        self._finish_save(True)
+        self._finish_save(unchanged)
 
     def _start_php_lint(self) -> None:
         """Check a newly saved PHP file without blocking the GTK main loop."""
@@ -839,7 +905,7 @@ class EditorDocument(Gtk.Box):
         """Resolve and clear every callback waiting on the current save."""
 
         self.save_button.set_sensitive(
-            self.dirty and self.view.get_editable() and not self.saving
+            self.dirty and self.view.get_editable() and not self.saving and not self.path_changing
         )
         callbacks = tuple(self.save_callbacks)
         self.save_callbacks.clear()
@@ -1044,6 +1110,7 @@ class EditorDocument(Gtk.Box):
             self.monitor_source_id = None
         if self.load_cancellable is not None:
             self.load_cancellable.cancel()
+            self.load_cancellable = None
         if self.save_cancellable is not None:
             self.save_cancellable.cancel()
         if self.monitor is not None:
@@ -1054,10 +1121,23 @@ class EditorDocument(Gtk.Box):
         """Publish dirty-state changes to the corresponding project-tree row."""
 
         self.save_button.set_sensitive(
-            self.dirty and self.view.get_editable() and not self.loading and not self.saving
+            self.dirty and self.view.get_editable() and not self.loading and not self.saving and not self.path_changing
         )
         if not self.loading:
             self.on_state(self)
+
+    def _on_history_restored(self, buffer: GtkSource.Buffer) -> None:
+        """Reconcile undo and redo with the snapshot actually written during a concurrent save."""
+
+        if self.saved_snapshot is None:
+            return
+        dirty = self.dirty
+        if not dirty:
+            # 2026-10-30: raggiunta la versione su disco, set_modified(False)
+            # riallinea il save-point nativo; da qui basta di nuovo GtkSource.
+            self.saved_snapshot = None
+        buffer.set_modified(dirty)
+        self._on_modified_changed(buffer)
 
     def _on_history_capability_changed(
         self, _buffer: GtkSource.Buffer, _property: GObject.GParamSpec
@@ -1145,6 +1225,7 @@ class EditorWorkspace(Gtk.Stack):
         self.next_child_id = 1
         self.historical_document = None
         self.preview_entry = None
+        self.renaming_paths: set[tuple[str, str]] = set()
         # 2026-08-16: il terminal stack resta un unico child per non ricreare o
         # spostare i Vte.Terminal; gli editor sono sibling selezionati dall'albero.
         self.add_named(terminal_page, "__terminals__")
@@ -1295,6 +1376,9 @@ class EditorWorkspace(Gtk.Stack):
             self.on_definition,
         )
         entry.document = editor
+        editor.path_changing = any(
+            name == entry.project_name and (entry.relative_path == path or entry.relative_path.startswith(path + "/"))
+            for name, path in self.renaming_paths)
         child_name = f"editor-{self.next_child_id}"
         self.next_child_id += 1
         self.add_named(editor, child_name)
@@ -1348,6 +1432,37 @@ class EditorWorkspace(Gtk.Stack):
         self._persist()
         return True
 
+    def set_rename_pending(self, project_name: str, relative_path: str, pending: bool) -> bool:
+        """Lock affected editor saves for a rename, rejecting overlap with an active write."""
+
+        entries = list(self.editors.values())
+        if self.preview_entry is not None:
+            entries.append(self.preview_entry)
+        if pending:
+            for entry in entries:
+                if (entry.project_name == project_name
+                        and (entry.relative_path == relative_path or entry.relative_path.startswith(relative_path + "/"))
+                        and entry.document is not None and entry.document.saving):
+                    return False
+            if any(name == project_name and (path == relative_path or path.startswith(relative_path + "/")
+                                             or relative_path.startswith(path + "/"))
+                   for name, path in self.renaming_paths):
+                return False
+            self.renaming_paths.add((project_name, relative_path))
+        else:
+            self.renaming_paths.discard((project_name, relative_path))
+        # 2026-10-30: il lock copre anche directory e nuovi documenti aperti
+        # durante il move asincrono, senza disabilitare la digitazione nel buffer.
+        for entry in entries:
+            if entry.document is not None:
+                locked = any(
+                    name == entry.project_name and (entry.relative_path == path or entry.relative_path.startswith(path + "/"))
+                    for name, path in self.renaming_paths)
+                if entry.document.path_changing != locked:
+                    entry.document.path_changing = locked
+                    entry.document._on_modified_changed(entry.document.buffer)
+        return True
+
     def relocate_path(
         self, project_name: str, old_path: str, new_path: str
     ) -> None:
@@ -1373,6 +1488,17 @@ class EditorWorkspace(Gtk.Stack):
             self.editors[new_reference] = entry
             if self.active_ref == old_reference:
                 self.active_ref = new_reference
+        preview = self.preview_entry
+        if (preview is not None and preview.project_name == project_name
+                and (preview.relative_path == old_path or preview.relative_path.startswith(prefix))):
+            old_reference = (preview.project_name, preview.relative_path)
+            preview.relative_path = new_path + preview.relative_path[len(old_path):]
+            if preview.document is not None:
+                preview.document.relocate(preview.relative_path)
+            if self.active_ref == old_reference:
+                self.active_ref = (preview.project_name, preview.relative_path)
+            # 2026-10-30: aggiornare il documento temporaneo senza promuoverlo
+            # né pubblicare nuove righe o metadati persistenti nei Projects.
         if affected:
             # 2026-08-16: config e albero progetti condividono le identità degli
             # editor; pubblicarle insieme evita riferimenti al vecchio percorso.
@@ -1468,7 +1594,7 @@ class EditorWorkspace(Gtk.Stack):
     def _close_after_save(self, editor: EditorDocument, success: bool) -> None:
         """Remove an editor row only after its asynchronous save succeeds."""
 
-        if success:
+        if success and not editor.dirty:
             self._remove_editor(editor.reference)
 
     def request_close_all(self, callback: Callable[[bool], None]) -> None:
@@ -1485,6 +1611,8 @@ class EditorWorkspace(Gtk.Stack):
         self,
         dirty: list[EditorDocument],
         callback: Callable[[bool], None],
+        *,
+        project_name: str | None = None,
     ) -> None:
         """Present one aggregate save/discard decision for dirty editors."""
 
@@ -1509,7 +1637,7 @@ class EditorWorkspace(Gtk.Stack):
         if response == Gtk.ResponseType.REJECT:
             callback(True)
         elif response == Gtk.ResponseType.ACCEPT:
-            self._save_many(dirty, callback)
+            self._save_many(dirty, callback, project_name=project_name)
         else:
             callback(False)
 
@@ -1544,14 +1672,16 @@ class EditorWorkspace(Gtk.Stack):
                     self._remove_editor((entry.project_name, entry.relative_path))
             callback(success)
 
-        self._confirm_dirty(dirty, resolved)
+        self._confirm_dirty(dirty, resolved, project_name=project_name)
 
     def _save_many(
         self,
         editors: list[EditorDocument],
         callback: Callable[[bool], None],
+        *,
+        project_name: str | None = None,
     ) -> None:
-        """Save multiple dirty buffers and report aggregate success once."""
+        """Save dirty buffers and recheck the entire closing scope before approving closure."""
 
         pending = set(editors)
         failed = False
@@ -1563,7 +1693,13 @@ class EditorWorkspace(Gtk.Stack):
             failed = failed or not success
             pending.discard(editor)
             if not pending:
-                callback(not failed)
+                # 2026-10-30: durante l'ultima scrittura si può modificare un
+                # documento già salvato, o uno prima pulito. Ricontrollare anche
+                # gli editor aperti nel frattempo, nel solo ambito da chiudere.
+                current = [entry.document for entry in self.editors.values()
+                           if entry.document is not None
+                           and (project_name is None or entry.project_name == project_name)]
+                callback(not failed and not any(document.dirty for document in [*editors, *current]))
 
         for editor in editors:
             editor.save(partial(saved, editor))
