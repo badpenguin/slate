@@ -168,7 +168,6 @@ class ProjectSearchTest(unittest.TestCase):
 
         self.viewed: list[str] = []
         self.edited_internal: list[tuple[str, int | None]] = []
-        self.edited_external: list[str] = []
         self.melded: list[str] = []
         self.close_count = 0
         self.search = ProjectSearch(
