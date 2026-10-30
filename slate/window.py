@@ -25,6 +25,7 @@ from .config import (
     is_extra_command_icon,
     new_project_config,
 )
+from .editor_preferences import normalize_editor_appearance
 from .editor import EditorDocument, EditorWorkspace
 from .experimental_editor import ExperimentalEditor
 from .file_manager import ProjectFileManager
@@ -260,6 +261,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._on_editor_state_changed,
             self._start_definition_search,
         )
+        self.editor_workspace.set_appearance(settings["editor"])
         # 2026-08-17: il manager browser condivide soltanto lo stack centrale;
         # contesto WebKit e pagine restano lazy fino al click esplicito.
         self.browser_manager = BrowserManager(
@@ -537,7 +539,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self._create_terminal(command, name_prefix=label, icon_name=icon_name)
 
     def _on_settings(self, _item: Gtk.MenuItem) -> None:
-        """Open the modal settings dialog over the current SLATE window."""
+        """Open the non-modal settings dialog over the current SLATE window."""
 
         dialog = SettingsDialog(
             self,
@@ -547,6 +549,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._update_tmux_status_setting,
 
             self._update_extra_commands_setting,
+            on_editor_appearance_change=self._update_editor_appearance,
         )
         dialog.show_all()
 
@@ -613,7 +616,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         if project is None or path is None or not os.path.isfile(path):
             return None
         mime, _uncertain = Gio.content_type_guess(path, None)
-        if mime.startswith(("image/", "audio/", "video/")) or mime in {"application/pdf", "application/zip", "application/octet-stream"}:
+        # 2026-10-30: application/octet-stream indica anche nomi senza MIME
+        # noto (.hgignore, .gitignore, .env). La validazione UTF-8, NUL e size
+        # del loader asincrono distingue il testo dai binari senza whitelist di nomi.
+        if mime.startswith(("image/", "audio/", "video/")) or mime in {"application/pdf", "application/zip"}:
             return None
         focused = self.get_focus()
         self._experimental_opening = True
@@ -769,6 +775,17 @@ class SlateWindow(Gtk.ApplicationWindow):
             return
         self.config.data["settings"][section]["font_size"] = font_size
         target.set_font_size(font_size)
+        self.config.save()
+
+    def _update_editor_appearance(self, values: dict) -> None:
+        """Persist validated editor colors and scheme, applying them without recreating documents."""
+
+        appearance = normalize_editor_appearance(values)
+        editor = self.config.data["settings"]["editor"]
+        if all(editor.get(key) == value for key, value in appearance.items()):
+            return
+        editor.update(appearance)
+        self.editor_workspace.set_appearance(appearance)
         self.config.save()
 
     def _update_tmux_status_setting(self, enabled: bool) -> None:
