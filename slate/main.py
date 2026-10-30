@@ -23,6 +23,9 @@ from .preview import CMARK_DEPENDENCY_ERROR
 from .window import SlateWindow
 
 
+_RESTART_EXIT_CODE = 75
+
+
 def _quit_on_unix_signal(application: Gtk.Application) -> bool:
     """Release the GTK application promptly after terminal INT or TERM."""
 
@@ -46,7 +49,8 @@ def _run_application(argv: list[str]) -> int:
         for signum in (signal.SIGINT, signal.SIGTERM)
     ]
     try:
-        return application.run(argv)
+        result = application.run(argv)
+        return _RESTART_EXIT_CODE if application.restart_requested is True else result
     finally:
         for source_id in signal_sources:
             if GLib.MainContext.default().find_source_by_id(source_id) is not None:
@@ -69,6 +73,7 @@ class SlateApplication(Gtk.Application):
             flags=Gio.ApplicationFlags.FLAGS_NONE,
         )
         self.window: SlateWindow | None = None
+        self.restart_requested = False
 
     def do_activate(self) -> None:
         """Create the window once or present the existing instance."""
@@ -158,12 +163,28 @@ def _prepare_agent_debug(
     return clean_argv, debug_directory
 
 
-def main(argv: list[str] | None = None) -> int:
+def _restart_application(argv: list[str], debug_directory: str | None) -> None:
+    """Replace the stopped GUI interpreter while preserving its runtime namespace."""
+
+    # 2026-10-30: exec avviene soltanto dopo application.run e il rilascio del
+    # lock: niente seconda GUI concorrente né nuovo server tmux. Il percorso
+    # assoluto permette il riavvio dal checkout anche dopo il chdir del launcher.
+    package_parent = str(Path(__file__).resolve().parent.parent)
+    code = (
+        f"import sys; sys.path.insert(0, {package_parent!r}); "
+        "from slate.main import main; "
+        f"raise SystemExit(main({argv!r}, restart_debug_directory={debug_directory!r}))"
+    )
+    options = ["-X", "faulthandler"] if os.environ.get("SLATE_DEBUG") else []
+    os.execv(sys.executable, [sys.executable, *options, "-c", code])
+
+
+def main(argv: list[str] | None = None, *, restart_debug_directory: str | None = None) -> int:
     """Validate dependencies, acquire the local lock and run GTK."""
 
     arguments = list(sys.argv if argv is None else argv)
     clean_argv, debug_directory = _prepare_agent_debug(arguments)
-    agent_debug = debug_directory is not None
+    agent_debug = debug_directory is not None or restart_debug_directory is not None
     if not validate_dependencies():
         if debug_directory is not None:
             debug_directory.cleanup()
@@ -177,9 +198,20 @@ def main(argv: list[str] | None = None) -> int:
             # del client remoto; register()+activate() lasciava D-Bus registrato.
             return _run_application(clean_argv)
     try:
-        return _run_application(clean_argv)
+        result = _run_application(clean_argv)
+        if result == _RESTART_EXIT_CODE:
+            if instance_lock is not None:
+                instance_lock.close()
+                instance_lock = None
+            # Il processo sostitutivo prende in carico la directory isolata;
+            # exec non esegue i finally del processo sostituito.
+            isolated_root = debug_directory.name if debug_directory is not None else restart_debug_directory
+            _restart_application(clean_argv, isolated_root)
+        return result
     finally:
         if instance_lock is not None:
             instance_lock.close()
         if debug_directory is not None:
             debug_directory.cleanup()
+        elif restart_debug_directory is not None:
+            shutil.rmtree(restart_debug_directory, ignore_errors=True)
