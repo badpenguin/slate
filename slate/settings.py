@@ -203,7 +203,6 @@ class SettingsDialog(Gtk.Dialog):
         on_change: Callable[[str, int], None],
         on_close_to_tray_change: Callable[[bool], None],
         on_status_bar_change: Callable[[bool], None],
-        on_external_editor_change: Callable[[list[str]], None],
         on_commands_change: Callable[[list[dict[str, str]]], None],
     ) -> None:
         """Build the categorized global presentation preferences."""
@@ -217,12 +216,8 @@ class SettingsDialog(Gtk.Dialog):
         self.on_change = on_change
         self.on_close_to_tray_change = on_close_to_tray_change
         self.on_status_bar_change = on_status_bar_change
-        self.on_external_editor_change = on_external_editor_change
         self.on_commands_change = on_commands_change
         self.commands = [dict(item) for item in values["commands"]["items"]]
-        self.external_editor_command = list(
-            values["external_apps"]["editor_command"]
-        )
         self.font_spins: dict[str, Gtk.SpinButton] = {}
         self.set_default_size(680, 420)
         self.add_button("Close", Gtk.ResponseType.CLOSE)
@@ -253,11 +248,6 @@ class SettingsDialog(Gtk.Dialog):
             self._build_font_page("editor", int(values["editor"]["font_size"])),
             "editor",
             "Editor",
-        )
-        stack.add_titled(
-            self._build_external_apps_page(self.external_editor_command),
-            "external-apps",
-            "External apps",
         )
         stack.add_titled(
             self._build_terminal_page(bool(values["terminal"]["status_bar"])),
@@ -335,36 +325,6 @@ class SettingsDialog(Gtk.Dialog):
         page.pack_start(row, False, False, 0)
         return page
 
-    def _build_external_apps_page(
-        self, external_editor_command: list[str]
-    ) -> Gtk.Widget:
-        """Create the global page for commands delegated to external apps."""
-
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        page.get_style_context().add_class("settings-page")
-        title = Gtk.Label(label="File editor")
-        title.set_xalign(0)
-        title.get_style_context().add_class("settings-page-title")
-        editor_label = Gtk.Label(label="Command")
-        editor_label.set_xalign(0)
-        # 2026-08-20: il percorso del file viene aggiunto separatamente al
-        # vettore argv, quindi il campo non espone interpolazione o shell.
-        self.external_editor_entry = Gtk.Entry(
-            text=shlex.join(external_editor_command)
-        )
-        self.external_editor_entry.set_tooltip_text(
-            "Command and arguments; the file path is appended automatically"
-        )
-        self.external_editor_entry.connect(
-            "activate", self._on_external_editor_activated
-        )
-        self.external_editor_entry.connect(
-            "focus-out-event", self._on_external_editor_focus_out
-        )
-        page.pack_start(title, False, False, 0)
-        page.pack_start(editor_label, False, False, 0)
-        page.pack_start(self.external_editor_entry, False, False, 0)
-        return page
 
     def _build_terminal_page(self, status_bar: bool) -> Gtk.Widget:
         """Create the terminal page containing only the tmux status switch."""
@@ -601,43 +561,13 @@ class SettingsDialog(Gtk.Dialog):
 
         self.on_close_to_tray_change(switch.get_active())
 
-    def _publish_external_editor(self) -> None:
-        """Validate and publish the external-editor argument vector."""
 
-        try:
-            command = shlex.split(self.external_editor_entry.get_text())
-        except ValueError:
-            command = []
-        if not command or len(command) > 32 or any(
-            not argument or len(argument) > 4096 or "\0" in argument
-            for argument in command
-        ):
-            self.external_editor_entry.set_text(
-                shlex.join(self.external_editor_command)
-            )
-            return
-        if command == self.external_editor_command:
-            return
-        self.external_editor_command = command
-        self.on_external_editor_change(command)
 
-    def _on_external_editor_activated(self, _entry: Gtk.Entry) -> None:
-        """Apply a valid external-editor command when Enter is pressed."""
 
-        self._publish_external_editor()
-
-    def _on_external_editor_focus_out(
-        self, _entry: Gtk.Entry, _event: object
-    ) -> bool:
-        """Apply the external-editor command when its field loses focus."""
-
-        self._publish_external_editor()
-        return False
 
     def _on_response(
         self, _dialog: Gtk.Dialog, _response: Gtk.ResponseType
     ) -> None:
         """Apply the active editor field and destroy the settings dialog."""
 
-        self._publish_external_editor()
         self.destroy()
