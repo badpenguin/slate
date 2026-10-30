@@ -37,6 +37,7 @@ class AsyncCommand:
         cwd: str | None,
         env: Mapping[str, str] | None,
         callback: Callable[[CommandResult], None],
+        input_bytes: bytes | None = None,
     ) -> None:
         """Spawn a command without blocking and retain callback state."""
 
@@ -48,9 +49,11 @@ class AsyncCommand:
 
         # 2026-08-16: a launcher gives every VCS call deterministic cwd and
         # locale without modifying the process-wide environment.
-        launcher = Gio.SubprocessLauncher.new(
-            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
-        )
+        # 2026-10-30: worker requests use stdin so unsaved text stays in memory.
+        flags = Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+        if input_bytes is not None:
+            flags |= Gio.SubprocessFlags.STDIN_PIPE
+        launcher = Gio.SubprocessLauncher.new(flags)
         if cwd:
             launcher.set_cwd(cwd)
         for key, value in (env or {}).items():
@@ -62,7 +65,8 @@ class AsyncCommand:
             # arbitrari; l'API UTF-8 li tronca al primo NUL, quindi il trasporto
             # resta binario fino alla decodifica esplicita del risultato completo.
             self.process.communicate_async(
-                None, self.cancellable, self._on_communicated
+                GLib.Bytes.new(input_bytes) if input_bytes is not None else None,
+                self.cancellable, self._on_communicated
             )
         except Exception as error:  # GLib.Error is not the only startup error.
             # 2026-08-16: startup failures are delivered on the next main-loop
@@ -113,10 +117,13 @@ def run_async(
     *,
     cwd: str | None = None,
     env: Mapping[str, str] | None = None,
+    input_bytes: bytes | None = None,
 ) -> AsyncCommand:
     """Start a command and return the object that owns its lifetime."""
 
-    return AsyncCommand(argv, cwd, env, callback)
+    if input_bytes is None:
+        return AsyncCommand(argv, cwd, env, callback)
+    return AsyncCommand(argv, cwd, env, callback, input_bytes)
 
 
 def spawn_detached(
