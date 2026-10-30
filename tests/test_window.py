@@ -1359,6 +1359,77 @@ class WindowActionTest(unittest.TestCase):
         SlateWindow._handle_file_preview_action(owner, "edit-internal")
         owner._edit_project_file_internal.assert_called_once_with("file.txt")
 
+    def test_status_reuses_bases_and_history_invalidates_only_owning_repository(self) -> None:
+        """Only visible owning documents are configured; hidden bases invalidate without I/O."""
+
+        project = {"name": "repo", "path": "/tmp/repo"}
+        documents = []
+        for root, mapped in (("/tmp/repo", True), ("/tmp/repo", False), ("/tmp/repo/child", True)):
+            document = SimpleNamespace(
+                project_name="repo", experimental=SimpleNamespace(repository_root=root, base_identity=(root, "file")),
+                get_mapped=MagicMock(return_value=mapped),
+            )
+            documents.append(document)
+        historical = SimpleNamespace(
+            project_name="repo", history_status=FileStatus("deleted.txt", "removed"),
+            experimental=SimpleNamespace(repository_root="/tmp/repo", base_identity=("/tmp/repo", "deleted.txt")),
+            get_mapped=MagicMock(return_value=True),
+        )
+        owner = SimpleNamespace(
+            scm_by_repository={}, watchers={}, snapshots={}, repositories_by_project={},
+            project_limit=ProjectStatusLimit(MagicMock(), MagicMock()), ignored_by_repository={},
+            editor_workspace=SimpleNamespace(editors={
+                str(index): SimpleNamespace(document=document) for index, document in enumerate(documents)
+            }, preview_entry=None, historical_document=historical),
+            active_project_name="repo", panel=MagicMock(), file_manager=MagicMock(),
+            _repository_root=MagicMock(return_value="/tmp/repo"),
+            _update_repository_boundaries=MagicMock(), _status_owned_by_repository=MagicMock(return_value=True),
+            _update_active_revision_count=MagicMock(), _refresh_visible_preview=MagicMock(),
+            _configure_experimental=MagicMock(),
+        )
+        with patch("slate.window.RepoWatcher") as watchers:
+            SlateWindow._attach_repository(owner, project, RepositoryRef(".", "hg"))
+            status_changed = watchers.call_args.args[2]
+            history_changed = watchers.call_args.args[6]
+        original = [document.experimental.base_identity for document in documents]
+        status_changed([FileStatus("file", "modified")], "main")
+        self.assertEqual(owner._configure_experimental.call_args_list, [
+            call(documents[0]), call(historical, historical.history_status)])
+        self.assertEqual([document.experimental.base_identity for document in documents], original)
+        owner._configure_experimental.reset_mock()
+        history_changed()
+        owner._configure_experimental.assert_not_called()
+        self.assertIsNone(documents[0].experimental.base_identity)
+        self.assertIsNone(documents[1].experimental.base_identity)
+        self.assertEqual(documents[2].experimental.base_identity, original[2])
+
+        self.assertIsNone(historical.experimental.base_identity)
+        status_changed([FileStatus("file", "modified")], "main")
+        self.assertEqual(owner._configure_experimental.call_args_list, [
+            call(documents[0]), call(historical, historical.history_status)])
+
+    def test_rename_does_not_start_while_an_affected_editor_is_saving(self) -> None:
+        """The UI gate rejects a rename before launching any filesystem mutation."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            source = Path(root) / "old.txt"
+            source.write_text("original")
+            owner = SimpleNamespace(
+                active_project_name="project", _project_file_path=MagicMock(side_effect=[str(source), str(Path(root) / "new.txt")]),
+                editor_workspace=MagicMock(), project_file_operations=MagicMock(),
+                _show_file_error=MagicMock(), _on_project_entry_renamed=MagicMock(),
+            )
+            owner.editor_workspace.set_rename_pending.return_value = False
+            with patch("slate.window.Gtk.Dialog") as dialog, patch("slate.window.Gtk.Entry") as entry, patch(
+                    "slate.window.Gtk.Label"):
+                dialog.return_value.run.return_value = Gtk.ResponseType.OK
+                entry.return_value.get_text.return_value = "new.txt"
+                SlateWindow._rename_project_file(owner, "old.txt")
+            owner.editor_workspace.set_rename_pending.assert_called_once_with("project", "old.txt", True)
+            owner.project_file_operations.rename_entry.assert_not_called()
+            owner._show_file_error.assert_called_once()
+            self.assertEqual(source.read_text(), "original")
+
     def test_project_limit_checks_watcher_snapshots_before_touching_gtk(self) -> None:
         """Watcher callbacks from multiple repositories block before any oversized UI update."""
 
@@ -2132,7 +2203,7 @@ class WindowActionTest(unittest.TestCase):
         # messaggio può servire per commit successivi correlati.
         completed = run.call_args.args[1]
         completed(CommandResult(("hg", "commit", "a.py"), 0, "", ""))
-        watcher.request_full.assert_called_once_with()
+        watcher.request_full.assert_called_once_with(refresh_base=True)
         watcher.request_paths.assert_not_called()
         self.assertEqual(
             owner.unattended_verification_queue,
