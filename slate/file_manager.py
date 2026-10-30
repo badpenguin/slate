@@ -73,7 +73,6 @@ class ProjectFileManager(Gtk.Box):
         on_preview: Callable[[str | None], None],
         on_view: Callable[[str], None],
         on_edit_internal: Callable[[str], None],
-        on_edit_external: Callable[[str], None],
         on_new_file: Callable[[str], None],
         on_new_directory: Callable[[str], None],
         on_rename: Callable[[str], None],
@@ -88,7 +87,6 @@ class ProjectFileManager(Gtk.Box):
         self.on_preview = on_preview
         self.on_view = on_view
         self.on_edit_internal = on_edit_internal
-        self.on_edit_external = on_edit_external
         self.on_new_file = on_new_file
         self.on_new_directory = on_new_directory
         self.on_rename = on_rename
@@ -1229,9 +1227,6 @@ class ProjectFileManager(Gtk.Box):
         if keyval == Gdk.KEY_e and not directory:
             self.on_edit_internal(relative)
             return True
-        if keyval == Gdk.KEY_m and not directory:
-            self.on_edit_external(relative)
-            return True
         if keyval == Gdk.KEY_r:
             self.on_rename(relative)
             return True
@@ -1315,12 +1310,7 @@ class ProjectFileManager(Gtk.Box):
                     Gdk.KEY_e,
                     self._on_context_edit_internal,
                 ),
-                (
-                    "Edit in gVim",
-                    "gvim",
-                    Gdk.KEY_m,
-                    self._on_context_edit_external,
-                ),
+
             ):
                 item = self._menu_item(label, icon, keyval)
                 item.connect("activate", callback)
@@ -1381,12 +1371,6 @@ class ProjectFileManager(Gtk.Box):
         if relative:
             self.on_edit_internal(relative)
 
-    def _on_context_edit_external(self, _item: Gtk.MenuItem) -> None:
-        """Forward contextual editing to a separate gVim window."""
-
-        relative = self.context_relative
-        if relative:
-            self.on_edit_external(relative)
 
     def _on_context_delete(self, _item: Gtk.MenuItem) -> None:
         """Forward confirmed deletion for the contextual file or directory."""
