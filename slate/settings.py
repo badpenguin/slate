@@ -8,9 +8,12 @@ from typing import Callable
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk  # noqa: E402
+gi.require_version("GtkSource", "4")
+from gi.repository import Gdk, Gtk, GtkSource, Pango  # noqa: E402
 
 from .config import DEFAULT_EXTRA_COMMAND_ICON, is_extra_command_icon
+from .editor_preferences import normalize_editor_appearance
+from .editor_appearance import editor_scheme, editor_text_color, diff_colors, apply_editor_text_color, monospaced_font_families, editor_font_css, editor_scheme_manager
 
 
 def _command_icon_sort_key(name: str) -> str:
@@ -204,22 +207,29 @@ class SettingsDialog(Gtk.Dialog):
         on_close_to_tray_change: Callable[[bool], None],
         on_status_bar_change: Callable[[bool], None],
         on_commands_change: Callable[[list[dict[str, str]]], None],
+        *,
+        on_editor_appearance_change: Callable[[dict], None] | None = None,
     ) -> None:
         """Build the categorized global presentation preferences."""
 
+        # TODO: 2026-10-30 — comportamento sperimentale: Settings non modale
+        # per consentire il trascinamento indipendente dalla finestra in Cinnamon.
         super().__init__(
             title="Settings",
             transient_for=parent,
-            modal=True,
+            modal=False,
             destroy_with_parent=True,
         )
         self.on_change = on_change
         self.on_close_to_tray_change = on_close_to_tray_change
         self.on_status_bar_change = on_status_bar_change
         self.on_commands_change = on_commands_change
+        self.on_editor_appearance_change = on_editor_appearance_change
+        self.editor_appearance = normalize_editor_appearance(values["editor"])
+        self.updating_editor_controls = False
         self.commands = [dict(item) for item in values["commands"]["items"]]
         self.font_spins: dict[str, Gtk.SpinButton] = {}
-        self.set_default_size(680, 420)
+        self.set_default_size(480, 520)
         self.add_button("Close", Gtk.ResponseType.CLOSE)
 
         # 2026-08-16: StackSidebar lascia spazio a nuove categorie future senza
@@ -245,7 +255,7 @@ class SettingsDialog(Gtk.Dialog):
             "Files",
         )
         stack.add_titled(
-            self._build_font_page("editor", int(values["editor"]["font_size"])),
+            self._build_editor_page(int(values["editor"]["font_size"])),
             "editor",
             "Editor",
         )
@@ -325,6 +335,195 @@ class SettingsDialog(Gtk.Dialog):
         page.pack_start(row, False, False, 0)
         return page
 
+
+    def _build_editor_page(self, font_size: int) -> Gtk.Widget:
+        """Add native theme and color selectors with a small isolated syntax/diff preview."""
+
+        page = self._build_font_page("editor", font_size)
+        page.set_spacing(10)
+        font_row = page.get_children()[1]
+        font_row.set_spacing(4)
+        font_label = font_row.get_children()[0]
+        font_label.set_text("Font")
+        font_row.set_child_packing(font_label, False, False, 0, Gtk.PackType.START)
+        self.editor_font = Gtk.ComboBoxText()
+        self.editor_font.append("monospace", "System monospace")
+        for family in monospaced_font_families():
+            self.editor_font.append(family, family)
+        self.editor_font.set_hexpand(True)
+        for renderer in self.editor_font.get_cells():
+            renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
+            renderer.set_property("max-width-chars", 24)
+        self.editor_font.connect("changed", self._on_editor_font_changed)
+        font_row.pack_start(self.editor_font, True, True, 0)
+        font_row.reorder_child(self.editor_font, 1)
+        size_label = Gtk.Label(label="Size")
+        font_row.pack_start(size_label, False, False, 4)
+        font_row.reorder_child(size_label, 2)
+        theme_row = Gtk.Box(spacing=4)
+        theme_row.pack_start(Gtk.Label(label="Syntax theme", xalign=0), True, True, 0)
+        self.editor_theme = Gtk.ComboBoxText()
+        self.editor_theme.append("", "System default")
+        manager = editor_scheme_manager()
+        for identifier in sorted(manager.get_scheme_ids()):
+            scheme = manager.get_scheme(identifier)
+            self.editor_theme.append(identifier, scheme.get_name())
+        self.editor_theme.connect("changed", self._on_editor_theme_changed)
+        theme_row.pack_end(self.editor_theme, False, False, 0)
+        page.pack_start(theme_row, False, False, 0)
+        self.editor_color_buttons = {}
+        for key, title in (("text_color", "Plain text color"),
+                           ("diff_added_color", "Added lines background"),
+                           ("diff_removed_color", "Removed lines background")):
+            row = Gtk.Box(spacing=4)
+            row.pack_start(Gtk.Label(label=title, xalign=0), True, True, 0)
+            button = Gtk.ColorButton()
+            button.set_title(title)
+            Gtk.ColorChooser.set_use_alpha(button, False)
+            button.set_tooltip_text("Syntax colors follow the selected theme" if key == "text_color" else title)
+            button.connect("color-set", self._on_editor_color_changed, key)
+            self.editor_color_buttons[key] = button
+            row.pack_end(button, False, False, 0)
+            page.pack_start(row, False, False, 0)
+        # 2026-10-30: il sample è un buffer in memoria, senza file, editor
+        # persistiti o risorse del progetto. La preview segue le stesse funzioni
+        # di tema e colore usate dai documenti veri.
+        page.pack_start(Gtk.Label(label="Preview", xalign=0), False, False, 0)
+        self.editor_preview_buffer = GtkSource.Buffer()
+        self.editor_preview_buffer.set_text(
+            '# Syntax and diff preview\n'
+            'from decimal import Decimal\n'
+            '\n'
+            'def calculate_total(price, quantity):\n'
+            '    """Return the discounted total."""\n'
+            '    subtotal = price * quantity\n'
+            '    old_discount = 0.10  # Removed line\n'
+            '    discount = 0.15      # Added line\n'
+            '    total = subtotal * (1 - discount)\n'
+            '    if total <= 0:\n'
+            '        return 0.0\n'
+            '    return round(total, 2)\n'
+            '\n'
+            'amount = calculate_total(12.50, 3)\n'
+            'print(f"Total: {amount:.2f}")\n'
+        )
+        self.editor_preview_buffer.set_language(GtkSource.LanguageManager.get_default().get_language("python"))
+        self.editor_preview_buffer.set_highlight_syntax(True)
+        self.editor_preview = GtkSource.View.new_with_buffer(self.editor_preview_buffer)
+        self.editor_preview.set_editable(False)
+        self.editor_preview.set_cursor_visible(False)
+        self.editor_preview.set_show_line_numbers(True)
+        self.editor_preview.set_monospace(True)
+        self.editor_preview_color = Gtk.CssProvider()
+        self.editor_preview_font = Gtk.CssProvider()
+        self.editor_preview_font.load_from_data(editor_font_css(self.editor_appearance, font_size))
+        self.editor_preview.get_style_context().add_provider(self.editor_preview_font, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.editor_preview.get_style_context().add_provider(self.editor_preview_color, Gtk.STYLE_PROVIDER_PRIORITY_USER)
+        self.editor_preview_removed = self.editor_preview_buffer.create_tag(None)
+        self.editor_preview_added = self.editor_preview_buffer.create_tag(None)
+        self.editor_preview_buffer.apply_tag(self.editor_preview_removed,
+            self.editor_preview_buffer.get_iter_at_line(6), self.editor_preview_buffer.get_iter_at_line(7))
+        self.editor_preview_buffer.apply_tag(self.editor_preview_added,
+            self.editor_preview_buffer.get_iter_at_line(7), self.editor_preview_buffer.get_iter_at_line(8))
+        preview = Gtk.ScrolledWindow()
+        preview.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        preview.set_shadow_type(Gtk.ShadowType.IN)
+        self.editor_preview_scroller = preview
+        preview.add(self.editor_preview)
+        page.pack_start(preview, False, False, 0)
+        reset = Gtk.Button(label="Reset colors and theme")
+        reset.set_halign(Gtk.Align.END)
+        reset.connect("clicked", self._on_editor_colors_reset)
+        page.pack_start(reset, False, False, 0)
+        self._sync_editor_appearance_controls()
+        self._refresh_editor_preview()
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.add(page)
+        return scroller
+
+    def _sync_editor_appearance_controls(self) -> None:
+        """Show effective theme defaults without turning them into saved overrides."""
+
+        self.updating_editor_controls = True
+        try:
+            if not self.editor_font.set_active_id(self.editor_appearance["font_family"]):
+                self.editor_font.set_active_id("monospace")
+            if not self.editor_theme.set_active_id(self.editor_appearance["style_scheme"]):
+                self.editor_theme.set_active(0)
+            scheme = editor_scheme(self.editor_appearance)
+            added, removed = diff_colors(self.editor_appearance, scheme)
+            for key, value in (("text_color", editor_text_color(self.editor_appearance, scheme)),
+                               ("diff_added_color", added), ("diff_removed_color", removed)):
+                rgba = Gdk.RGBA()
+                rgba.parse(value)
+                self.editor_color_buttons[key].set_rgba(rgba)
+        finally:
+            self.updating_editor_controls = False
+
+    def _refresh_editor_preview(self) -> None:
+        """Apply theme and RGB overrides to the syntax and diff code sample."""
+
+        scheme = editor_scheme(self.editor_appearance)
+        self.editor_preview_font.load_from_data(editor_font_css(
+            self.editor_appearance, self.font_spins["editor"].get_value_as_int()))
+        # 2026-10-30: aggiungere due righe reali rispetto ai 240 px iniziali,
+        # seguendo le metriche del font scelto invece di fissare un delta arbitrario.
+        font = self.editor_preview.get_style_context().get_property("font", Gtk.StateFlags.NORMAL)
+        metrics = self.editor_preview.get_pango_context().get_metrics(font, None)
+        line_height = (metrics.get_ascent() + metrics.get_descent() + Pango.SCALE - 1) // Pango.SCALE
+        self.editor_preview_scroller.set_size_request(-1, 240 + 2 * line_height)
+        self.editor_preview_buffer.set_style_scheme(scheme)
+        apply_editor_text_color(self.editor_preview_color, self.editor_appearance)
+        added, removed = diff_colors(self.editor_appearance, scheme)
+        self.editor_preview_added.set_property("background", added)
+        self.editor_preview_removed.set_property("background", removed)
+        self.editor_preview_buffer.ensure_highlight(
+            self.editor_preview_buffer.get_start_iter(), self.editor_preview_buffer.get_end_iter())
+
+    def _publish_editor_appearance(self) -> None:
+        """Refresh the isolated preview and publish one validated appearance change."""
+
+        self._refresh_editor_preview()
+        if self.on_editor_appearance_change is not None:
+            self.on_editor_appearance_change(dict(self.editor_appearance))
+
+    def _on_editor_font_changed(self, combo: Gtk.ComboBoxText) -> None:
+        """Apply one installed monospaced family to the preview and all editor presentations."""
+
+        if self.updating_editor_controls:
+            return
+        self.editor_appearance["font_family"] = combo.get_active_id() or "monospace"
+        self._publish_editor_appearance()
+
+    def _on_editor_theme_changed(self, combo: Gtk.ComboBoxText) -> None:
+        """Switch the native syntax theme without overwriting explicit color choices."""
+
+        if self.updating_editor_controls:
+            return
+        self.editor_appearance["style_scheme"] = combo.get_active_id() or ""
+        self._sync_editor_appearance_controls()
+        self._publish_editor_appearance()
+
+    def _on_editor_color_changed(self, button: Gtk.ColorButton, key: str) -> None:
+        """Persist a solid RGB choice while leaving syntax-specific foreground tags alone."""
+
+        if self.updating_editor_controls:
+            return
+        color = button.get_rgba()
+        self.editor_appearance[key] = "#{:02x}{:02x}{:02x}".format(
+            round(color.red * 255), round(color.green * 255), round(color.blue * 255))
+        self._publish_editor_appearance()
+
+    def _on_editor_colors_reset(self, _button: Gtk.Button) -> None:
+        """Restore automatic theme and colors without changing editor font size."""
+
+        # 2026-10-30: questo pulsante ripristina colori e tema, non font e dimensione.
+        family = self.editor_appearance["font_family"]
+        self.editor_appearance = normalize_editor_appearance(None)
+        self.editor_appearance["font_family"] = family
+        self._sync_editor_appearance_controls()
+        self._publish_editor_appearance()
 
     def _build_terminal_page(self, status_bar: bool) -> Gtk.Widget:
         """Create the terminal page containing only the tmux status switch."""
@@ -546,6 +745,8 @@ class SettingsDialog(Gtk.Dialog):
         """Publish an integer point size as soon as the control changes."""
 
         self.on_change(section, spin.get_value_as_int())
+        if section == "editor":
+            self._refresh_editor_preview()
 
     def _on_status_bar_changed(
         self, switch: Gtk.Switch, _property: object
