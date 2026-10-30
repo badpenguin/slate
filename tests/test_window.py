@@ -223,11 +223,12 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._protect_preview_background.__get__(owner)
         )
 
-        SlateWindow._preview_file(owner, status)
+        SlateWindow._preview_legacy_status(owner, status)
 
         preview.show_status.assert_not_called()
         owner._update_preview_geometry.assert_not_called()
         preview.grab_focus.assert_not_called()
+
 
     def test_revision_preview_preserves_sidebar_focus_when_shown(self) -> None:
         """A displayed revision preview blocks the background without grabbing focus."""
@@ -249,12 +250,13 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._protect_preview_background.__get__(owner)
         )
 
-        SlateWindow._preview_file(owner, status)
+        SlateWindow._preview_legacy_status(owner, status)
 
         preview.show_status.assert_called_once()
         preview.grab_focus.assert_not_called()
         owner.project_tree.set_sensitive.assert_called_once_with(False)
         owner.editor_workspace.set_sensitive.assert_called_once_with(False)
+
 
     def test_revision_preview_does_not_redirect_focused_text_input(self) -> None:
         """Showing preview content never redirects an already focused text input."""
@@ -277,9 +279,10 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._protect_preview_background.__get__(owner)
         )
 
-        SlateWindow._preview_file(owner, status)
+        SlateWindow._preview_legacy_status(owner, status)
 
         preview.grab_focus.assert_not_called()
+
 
     def test_preview_disables_covered_widgets_until_it_closes(self) -> None:
         """GTK cannot deliver keys to the covered editor or sidebar."""
@@ -328,12 +331,13 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._protect_preview_background.__get__(owner)
         )
 
-        SlateWindow._preview_file(owner, status, force=True)
+        SlateWindow._preview_legacy_status(owner, status, force=True)
 
         preview.show_status.assert_called_once()
         preview.grab_focus.assert_not_called()
         owner.project_tree.set_sensitive.assert_called_once_with(False)
         owner.editor_workspace.set_sensitive.assert_called_once_with(False)
+
 
     def test_revision_watcher_forces_current_preview_reload(self) -> None:
         """A watcher refresh reloads content even when the row identity is unchanged."""
@@ -363,10 +367,11 @@ class WindowActionTest(unittest.TestCase):
             _close_preview=MagicMock(),
         )
 
-        SlateWindow._preview_file(owner, status)
+        SlateWindow._preview_legacy_status(owner, status)
 
         owner._close_preview.assert_called_once_with()
         owner.preview.show_status.assert_not_called()
+
 
     def test_shared_preview_routes_revision_and_file_actions(self) -> None:
         """The shared preview resolves shortcuts from its originating surface."""
@@ -394,7 +399,7 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._handle_file_preview_action(owner, action)
         owner._view_status.assert_called_once_with(status)
         owner._edit_status_internal.assert_called_once_with(status)
-        owner._edit_status_external.assert_called_once_with(status)
+        owner._edit_status_external.assert_not_called()
         owner._delete_status.assert_called_once_with(status)
         owner._open_diff.assert_called_once_with(
             RepositoryRef(".", "hg"), ("tracked.py",)
@@ -405,7 +410,7 @@ class WindowActionTest(unittest.TestCase):
             SlateWindow._handle_file_preview_action(owner, action)
         owner._view_project_file.assert_called_once_with("tracked.py")
         owner._edit_project_file_internal.assert_called_once_with("tracked.py")
-        owner._edit_project_file_external.assert_called_once_with("tracked.py")
+        owner._edit_project_file_external.assert_not_called()
         owner._delete_project_file.assert_called_once_with("tracked.py")
         owner._open_search_result_meld.assert_called_once_with("tracked.py")
 
@@ -461,61 +466,7 @@ class WindowActionTest(unittest.TestCase):
 
         owner._edit_status_internal.assert_called_once_with(status, 37)
 
-    @patch("slate.window.run_async")
-    def test_diff_editor_loads_a_separate_compact_patch(
-        self, run_async_mock: MagicMock
-    ) -> None:
-        """Edit with diff uses the SCM's compact command and preserves target line."""
 
-        status = FileStatus("tracked.py", "modified")
-        scm = MagicMock(
-            root="/repo",
-            environment={"LC_ALL": "C"},
-        )
-        scm.editor_diff_argv.return_value = ["scm", "diff", "-U3"]
-        owner = SimpleNamespace(
-            _repository_scm=MagicMock(return_value=scm),
-            _on_direct_diff_editor_loaded=MagicMock(),
-        )
-
-        SlateWindow._load_diff_editor_patch(owner, status, 37)
-
-        scm.editor_diff_argv.assert_called_once_with("tracked.py")
-        run_async_mock.assert_called_once()
-        self.assertEqual(run_async_mock.call_args.args[0], ["scm", "diff", "-U3"])
-        callback = run_async_mock.call_args.args[1]
-        result = CommandResult(
-            ("scm", "diff", "-U3"),
-            0,
-            "@@ -1 +1 @@\n-old\n+new\n",
-            "",
-        )
-        callback(result)
-        owner._on_direct_diff_editor_loaded.assert_called_once_with(
-            status, 37, result
-        )
-
-    def test_direct_diff_editor_targets_first_changed_line(self) -> None:
-        """Opening from Revision skips hunk context when positioning the editor."""
-
-        status = FileStatus("tracked.py", "modified")
-        result = CommandResult(
-            ("scm", "diff", "-U3"),
-            0,
-            "@@ -3,3 +3,4 @@\n context\n+changed\n tail\n",
-            "",
-        )
-        owner = SimpleNamespace(
-            _show_diff_editor=MagicMock(),
-            _show_file_error=MagicMock(),
-        )
-
-        SlateWindow._on_direct_diff_editor_loaded(owner, status, None, result)
-
-        owner._show_diff_editor.assert_called_once()
-        arguments = owner._show_diff_editor.call_args.args
-        self.assertEqual(arguments[3], 2)
-        self.assertEqual(arguments[4], 4)
 
     def test_extra_command_closes_popover_and_creates_named_terminal(self) -> None:
         """Configured command buttons preserve their shell line, label and icon."""
@@ -582,31 +533,6 @@ class WindowActionTest(unittest.TestCase):
         self.assertTrue(SlateWindow._on_key_press(owner, None, event))
         owner._show_project_search.assert_called_once_with()
 
-    def test_diff_editor_owns_go_to_definition_before_hidden_preview(self) -> None:
-        """Ctrl+B resolves from the visible diff editor, never the preview below."""
-
-        surface = MagicMock()
-        surface.go_to_definition.return_value = True
-        owner = SimpleNamespace(
-            project_search=MagicMock(),
-            browser_manager=MagicMock(),
-            diff_editor_surface=surface,
-            preview=MagicMock(),
-            _show_error=MagicMock(),
-            get_focus=MagicMock(return_value=surface),
-            panel=SimpleNamespace(message=Gtk.TextView()),
-        )
-        owner.project_search.get_visible.return_value = False
-        owner.browser_manager.handle_key.return_value = False
-        event = SimpleNamespace(
-            keyval=Gdk.KEY_b,
-            state=Gdk.ModifierType.CONTROL_MASK,
-        )
-
-        self.assertTrue(SlateWindow._on_key_press(owner, None, event))
-
-        surface.go_to_definition.assert_called_once_with()
-        owner.preview.go_to_definition.assert_not_called()
 
     def test_visible_preview_receives_keys_before_hidden_editor(self) -> None:
         """Window dispatch cannot let contextual keys reach the covered editor."""
@@ -684,77 +610,14 @@ class WindowActionTest(unittest.TestCase):
         owner.preview.handle_key.assert_called_once_with(event)
 
     def test_revision_preview_e_opens_editor_and_cancels_pending_preview(self) -> None:
-        """E traverses window and preview routing without reopening the overlay."""
+        """An explicit revision Edit promotes through the unified opening boundary."""
 
-        status = FileStatus("tracked.py", "modified")
-        project = {"name": "repo", "path": "/tmp/repo"}
-        editor = SimpleNamespace(relative_path="tracked.py")
-        panel = Gtk.Box()
-        panel.message = Gtk.TextView()
-        panel._cancel_pending_preview = MagicMock()
-        preview = FilePreview(MagicMock())
-        preview.current_path = status.path
-        # Un diff reale termina con una riga non mappabile: è il caso normale
-        # che la precedente preview vuota non esercitava.
-        preview._set_diff_text(
-            "diff --git a/tracked.py b/tracked.py\n"
-            "--- a/tracked.py\n+++ b/tracked.py\n@@ -1 +1 @@\n-old\n+new\n"
-        )
-        preview.set_no_show_all(False)
-        preview.show_all()
-        preview.set_no_show_all(True)
-        owner = SimpleNamespace(
-            panel=panel,
-            preview=preview,
-            preview_status=status,
-            get_focus=MagicMock(return_value=preview),
-            project_search=MagicMock(),
-            browser_manager=MagicMock(),
-            editor_workspace=SimpleNamespace(
-                open_file=MagicMock(return_value=editor),
-                handle_key=MagicMock(),
-                set_sensitive=MagicMock(),
-            ),
-            project_tree=MagicMock(),
-            active_project_name="repo",
-            config=SimpleNamespace(
-                find_project=MagicMock(return_value=project),
-                save=MagicMock(),
-            ),
-            _workspace_repository_path=MagicMock(return_value="tracked.py"),
-            _project_file_path=MagicMock(return_value="/tmp/repo/tracked.py"),
-            _append_project_item=MagicMock(return_value=False),
-            _select_tree_row=MagicMock(),
-        )
-        owner._close_preview = SlateWindow._close_preview.__get__(owner)
-        owner._edit_project_file_internal = (
-            SlateWindow._edit_project_file_internal.__get__(owner)
-        )
-        owner._edit_status_internal = SlateWindow._edit_status_internal.__get__(owner)
-        owner._handle_file_preview_action = (
-            SlateWindow._handle_file_preview_action.__get__(owner)
-        )
-        preview.on_action = MagicMock(wraps=owner._handle_file_preview_action)
-        owner.project_search.get_visible.return_value = False
-        event = SimpleNamespace(keyval=Gdk.KEY_e, state=Gdk.ModifierType(0))
+        editor = MagicMock()
+        owner = SimpleNamespace(_workspace_repository_path=MagicMock(return_value="file.py"),
+                                _edit_project_file_internal=MagicMock(return_value=editor))
+        self.assertIs(SlateWindow._edit_status_internal(owner, FileStatus("file.py", "modified")), editor)
+        owner._edit_project_file_internal.assert_called_once_with("file.py")
 
-        with patch("slate.window.os.path.isfile", return_value=True):
-            self.assertTrue(SlateWindow._on_key_press(owner, None, event))
-
-        self.assertTrue(preview.diff_edit_lines)
-        preview.on_action.assert_called_once_with("edit-internal")
-        owner._project_file_path.assert_called_once_with("tracked.py")
-        panel._cancel_pending_preview.assert_called_once_with()
-        owner.editor_workspace.open_file.assert_called_once_with(
-            "repo", "/tmp/repo", "tracked.py"
-        )
-        owner._select_tree_row.assert_called_once_with(
-            "repo", "tracked.py", "editor"
-        )
-        self.assertFalse(preview.get_visible())
-        owner.project_tree.set_sensitive.assert_called_once_with(True)
-        owner.editor_workspace.set_sensitive.assert_called_once_with(True)
-        owner.editor_workspace.handle_key.assert_not_called()
 
     def test_commit_message_keys_are_never_dispatched_to_preview(self) -> None:
         """Typing in the commit text view bypasses preview and global shortcuts."""
@@ -1024,28 +887,14 @@ class WindowActionTest(unittest.TestCase):
         )
         owner._show_error.assert_not_called()
 
-    def test_search_result_closes_or_saves_diff_before_changing_file(self) -> None:
-        """Search navigation cannot expose another editor below a stale surface."""
+    def test_search_result_promotes_without_a_separate_diff_surface(self) -> None:
+        """Search results navigate the shared document without an obsolete save boundary."""
 
-        surface = MagicMock(path="current.py")
-        surface.finish_before_navigation.return_value = False
-        target_editor = MagicMock()
-        owner = SimpleNamespace(
-            diff_editor_surface=surface,
-            _edit_project_file_internal=MagicMock(return_value=target_editor),
-        )
-
-        result = SlateWindow._edit_search_result_internal(owner, "other.py", 12)
-
-        surface.finish_before_navigation.assert_called_once()
+        editor = MagicMock()
+        owner = SimpleNamespace(_edit_project_file_internal=MagicMock(return_value=editor))
+        self.assertIs(SlateWindow._edit_search_result_internal(owner, "other.py", 12), editor)
         owner._edit_project_file_internal.assert_called_once_with("other.py", 12)
-        self.assertIs(result, target_editor)
 
-        owner._edit_project_file_internal.reset_mock()
-        surface.finish_before_navigation.return_value = True
-        result = SlateWindow._edit_search_result_internal(owner, "third.py", 20)
-        owner._edit_project_file_internal.assert_not_called()
-        self.assertIsNone(result)
 
     def test_sequence_move_rejects_invalid_and_unchanged_positions(self) -> None:
         """The shared reorder primitive returns only effective stable moves."""
@@ -1518,6 +1367,7 @@ class WindowActionTest(unittest.TestCase):
         owner = SimpleNamespace(
             scm_by_repository={}, watchers={}, snapshots={}, repositories_by_project={},
             project_limit=ProjectStatusLimit(block, MagicMock()), ignored_by_repository={},
+            editor_workspace=SimpleNamespace(editors={}, preview_entry=None),
             active_project_name="repo", panel=MagicMock(), file_manager=MagicMock(),
             _repository_root=MagicMock(return_value="/tmp/repo"),
             _update_repository_boundaries=MagicMock(), _status_owned_by_repository=MagicMock(return_value=True),
@@ -1791,7 +1641,7 @@ class WindowActionTest(unittest.TestCase):
             terminals=terminals,
             attention_terminals=set(),
             manual_attention=set(),
-            editor_workspace=SimpleNamespace(editors={}),
+            editor_workspace=SimpleNamespace(editors={}, preview_entry=None),
             _ordered_project_items=SlateWindow._ordered_project_items.__get__(
                 SimpleNamespace(editor_workspace=SimpleNamespace(editors={}))
             ),
@@ -1830,7 +1680,7 @@ class WindowActionTest(unittest.TestCase):
             manual_attention=set(),
             attention_terminals=set(),
             terminals=SimpleNamespace(terminals={}),
-            editor_workspace=SimpleNamespace(editors={}),
+            editor_workspace=SimpleNamespace(editors={}, preview_entry=None),
             COL_KIND=SlateWindow.COL_KIND,
             COL_PROJECT=SlateWindow.COL_PROJECT,
             COL_ITEM=SlateWindow.COL_ITEM,
@@ -1865,7 +1715,7 @@ class WindowActionTest(unittest.TestCase):
             project_name="repo", identifier="browser-1", private=True
         )
         owner = SimpleNamespace(
-            editor_workspace=SimpleNamespace(editors={}),
+            editor_workspace=SimpleNamespace(editors={}, preview_entry=None),
             browser_manager=SimpleNamespace(pages={browser.identifier: browser}),
         )
         ordered = SlateWindow._ordered_project_items(owner, project)
@@ -1896,7 +1746,7 @@ class WindowActionTest(unittest.TestCase):
             project_name="repo", identifier="browser-2", private=False
         )
         owner = SimpleNamespace(
-            editor_workspace=SimpleNamespace(editors={}),
+            editor_workspace=SimpleNamespace(editors={}, preview_entry=None),
             browser_manager=SimpleNamespace(
                 pages={("repo", browser.identifier): browser}
             ),
@@ -2112,114 +1962,27 @@ class WindowActionTest(unittest.TestCase):
         owner.hide.assert_called_once_with()
         owner._request_close.assert_not_called()
 
-    def test_external_editor_setting_persists_only_valid_changed_argv(self) -> None:
-        """The editor command remains shell-free and avoids redundant saves."""
 
-        config = SimpleNamespace(
-            data={
-                "settings": {
-                    "external_apps": {"editor_command": ["gvim", "-f"]},
-                }
-            },
-            save=MagicMock(),
-        )
-        owner = SimpleNamespace(config=config)
-        SlateWindow._update_external_editor_setting(owner, ["code", "--wait"])
-        self.assertEqual(
-            config.data["settings"]["external_apps"]["editor_command"],
-            ["code", "--wait"],
-        )
-        config.save.assert_called_once_with()
-        config.save.reset_mock()
-        SlateWindow._update_external_editor_setting(owner, ["code", "--wait"])
-        SlateWindow._update_external_editor_setting(owner, [])
-        config.save.assert_not_called()
-
-    def test_external_editor_launch_appends_the_safe_absolute_path(self) -> None:
-        """The configured argv receives the file path without shell interpolation."""
-
-        project = {"name": "repo", "path": "/tmp/repo"}
-        config = SimpleNamespace(
-            data={
-                "settings": {
-                    "external_apps": {"editor_command": ["code", "--wait"]},
-                }
-            },
-            find_project=MagicMock(return_value=project),
-        )
-        owner = SimpleNamespace(
-            active_project_name="repo",
-            config=config,
-            _project_file_path=MagicMock(return_value="/tmp/repo/file name.py"),
-            _show_file_error=MagicMock(),
-        )
-        with patch("slate.window.spawn_detached") as spawn:
-            SlateWindow._edit_project_file_external(owner, "file name.py")
-        spawn.assert_called_once_with(
-            ("code", "--wait", "/tmp/repo/file name.py"),
-            cwd="/tmp/repo",
-        )
 
     def test_definition_line_is_applied_after_final_editor_activation(self) -> None:
-        """Sidebar remapping completes before Go to Definition positions the view."""
+        """Definition navigation promotes first and positions the resulting shared buffer."""
 
-        project = {"name": "repo", "path": "/tmp/repo"}
         editor = MagicMock()
-        editor.relative_path = "target.py"
-        owner = SimpleNamespace(
-            active_project_name="repo",
-            config=SimpleNamespace(
-                find_project=MagicMock(return_value=project),
-                save=MagicMock(),
-            ),
-            editor_workspace=SimpleNamespace(open_file=MagicMock(return_value=editor)),
-            _project_file_path=MagicMock(return_value="/tmp/repo/target.py"),
-            panel=SimpleNamespace(_cancel_pending_preview=MagicMock()),
-            _close_preview=MagicMock(),
-            _append_project_item=MagicMock(return_value=False),
-            _select_tree_row=MagicMock(),
-        )
-        calls = MagicMock()
-        calls.attach_mock(owner._select_tree_row, "activate")
-        calls.attach_mock(editor.goto_line_number, "goto")
+        owner = SimpleNamespace(_open_experimental_file=MagicMock(return_value=editor))
+        self.assertIs(SlateWindow._edit_project_file_internal(owner, "target.py", 37), editor)
+        owner._open_experimental_file.assert_called_once_with("target.py", focus=True)
+        editor.goto_line_number.assert_called_once_with(37, focus=False)
 
-        with patch("slate.window.os.path.isfile", return_value=True):
-            SlateWindow._edit_project_file_internal(owner, "target.py", 37)
-
-        self.assertEqual(
-            calls.mock_calls,
-            [call.activate("repo", "target.py", "editor"), call.goto(37)],
-        )
-        owner._close_preview.assert_called_once_with()
 
     def test_symlink_alias_selects_existing_editor_row(self) -> None:
-        """An alias opening an existing buffer does not add a second sidebar row."""
+        """Alias promotion goes through the workspace's shared physical-file lookup."""
 
-        project = {"name": "repo", "path": "/tmp/repo"}
-        editor = SimpleNamespace(relative_path="src/file.php")
-        owner = SimpleNamespace(
-            active_project_name="repo",
-            config=SimpleNamespace(
-                find_project=MagicMock(return_value=project), save=MagicMock()
-            ),
-            editor_workspace=SimpleNamespace(open_file=MagicMock(return_value=editor)),
-            _project_file_path=MagicMock(return_value="/tmp/repo/alias.php"),
-            panel=SimpleNamespace(_cancel_pending_preview=MagicMock()),
-            _close_preview=MagicMock(),
-            _append_project_item=MagicMock(return_value=False),
-            _select_tree_row=MagicMock(),
-        )
-
-        with patch("slate.window.os.path.isfile", return_value=True):
-            result = SlateWindow._edit_project_file_internal(owner, "alias.php")
-
+        editor = MagicMock(relative_path="src/file.php")
+        owner = SimpleNamespace(_open_experimental_file=MagicMock(return_value=editor))
+        result = SlateWindow._edit_project_file_internal(owner, "alias.php")
         self.assertIs(result, editor)
-        owner._append_project_item.assert_called_once_with(
-            project, "editor", "src/file.php"
-        )
-        owner._select_tree_row.assert_called_once_with(
-            "repo", "src/file.php", "editor"
-        )
+        owner._open_experimental_file.assert_called_once_with("alias.php", focus=True)
+
 
     def test_editor_state_persists_only_when_it_changes(self) -> None:
         """Editor-row references update config without redundant writes."""
@@ -2237,6 +2000,30 @@ class WindowActionTest(unittest.TestCase):
         SlateWindow._persist_editor_state(owner, list(state["tabs"]), None)
         self.assertIsNone(config.data["editor"]["active_tab"])
         config.save.assert_called_once_with()
+
+    def test_restart_protects_dirty_files_and_preserves_every_tmux_session(self) -> None:
+        """Restart never queries, retires or terminates sessions and honors editor cancellation."""
+
+        for approved in (False, True):
+            with self.subTest(approved=approved):
+                application = SimpleNamespace(restart_requested=False)
+                owner = SimpleNamespace(
+                    closing=False, editor_workspace=MagicMock(), terminals=MagicMock(),
+                    _after_restart_editors=MagicMock(), _save_window_state=MagicMock(),
+                    _final_destroy=MagicMock(), get_application=MagicMock(return_value=application),
+                )
+                SlateWindow._on_restart(owner, None)
+                self.assertTrue(owner.closing)
+                owner.editor_workspace.request_close_all.assert_called_once_with(owner._after_restart_editors)
+                SlateWindow._after_restart_editors(owner, approved)
+                self.assertEqual(application.restart_requested, approved)
+                self.assertEqual(owner.closing, approved)
+                self.assertEqual(owner._save_window_state.call_count, int(approved))
+                self.assertEqual(owner._final_destroy.call_count, int(approved))
+                self.assertEqual(owner.terminals.begin_shutdown.call_count, int(approved))
+                owner.terminals.query_panes.assert_not_called()
+                owner.terminals.retire_idle_shells.assert_not_called()
+                owner.terminals.kill_session.assert_not_called()
 
     def test_window_close_resolves_dirty_editors_before_querying_tmux(self) -> None:
         """The terminal shutdown flow cannot begin before editor approval."""
@@ -3308,10 +3095,11 @@ class WindowActionTest(unittest.TestCase):
             _update_preview_geometry=MagicMock(),
         )
 
-        SlateWindow._preview_project_file(owner, "src/app.py")
+        SlateWindow._preview_legacy_project_file(owner, "src/app.py")
 
         owner._edit_project_file_internal.assert_called_once_with("src/app.py")
         owner.preview.show_file.assert_not_called()
+
 
     def test_file_click_activates_editor_opened_through_another_symlink(self) -> None:
         """A file alias selects the existing editor rather than a preview."""
@@ -3331,11 +3119,12 @@ class WindowActionTest(unittest.TestCase):
             _update_preview_geometry=MagicMock(),
         )
 
-        SlateWindow._preview_project_file(owner, "alias.py")
+        SlateWindow._preview_legacy_project_file(owner, "alias.py")
 
         find_open.assert_called_once_with("repo", "/tmp/repo", "alias.py")
         owner._edit_project_file_internal.assert_called_once_with("alias.py")
         owner.preview.show_file.assert_not_called()
+
 
     def test_file_click_previews_a_file_without_an_editor(self) -> None:
         """Files not open in the editor retain the existing quick-preview flow."""
@@ -3344,7 +3133,7 @@ class WindowActionTest(unittest.TestCase):
         owner = SimpleNamespace(
             active_project_name="repo",
             config=SimpleNamespace(find_project=MagicMock(return_value=project)),
-            editor_workspace=SimpleNamespace(editors={}),
+            editor_workspace=SimpleNamespace(editors={}, preview_entry=None),
             preview=MagicMock(),
             _edit_project_file_internal=MagicMock(),
             _close_preview=MagicMock(),
@@ -3352,7 +3141,7 @@ class WindowActionTest(unittest.TestCase):
             _protect_preview_background=MagicMock(),
         )
 
-        SlateWindow._preview_project_file(owner, "src/app.py")
+        SlateWindow._preview_legacy_project_file(owner, "src/app.py")
 
         owner.preview.show_file.assert_called_once_with(
             "/tmp/repo", "src/app.py"
@@ -3360,29 +3149,16 @@ class WindowActionTest(unittest.TestCase):
         self.assertIsNone(owner.preview_status)
         owner._edit_project_file_internal.assert_not_called()
 
+
     def test_files_preview_edit_ignores_previous_revision_status(self) -> None:
-        """E on a Files preview targets its path, never a stale Revision row."""
+        """A standby Files preview still edits its own target instead of stale SCM state."""
 
-        project = {"name": "repo", "path": "/tmp/repo"}
-        stale_status = FileStatus("old.php", "modified")
-        owner = SimpleNamespace(
-            active_project_name="repo",
-            config=SimpleNamespace(find_project=MagicMock(return_value=project)),
-            editor_workspace=SimpleNamespace(editors={}),
-            preview=MagicMock(current_path="src/app.php"),
-            preview_status=stale_status,
-            _edit_project_file_internal=MagicMock(),
-            _edit_status_internal=MagicMock(),
-            _close_preview=MagicMock(),
-            _update_preview_geometry=MagicMock(),
-            _protect_preview_background=MagicMock(),
-        )
-
-        SlateWindow._preview_project_file(owner, "src/app.php")
+        owner = SimpleNamespace(preview=SimpleNamespace(current_path="current.md"), preview_status=None,
+                                _edit_project_file_internal=MagicMock(), _edit_status_internal=MagicMock())
         SlateWindow._handle_file_preview_action(owner, "edit-internal")
-
-        owner._edit_project_file_internal.assert_called_once_with("src/app.php")
+        owner._edit_project_file_internal.assert_called_once_with("current.md")
         owner._edit_status_internal.assert_not_called()
+
 
     def test_exited_active_terminal_selects_configured_fallback(self) -> None:
         """Removing an ended shell updates config and activates its sibling."""
