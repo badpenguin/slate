@@ -941,7 +941,6 @@ class FilePreview(Gtk.Box):
         actions = {
             Gdk.KEY_v: "view",
             Gdk.KEY_e: "edit-internal",
-            Gdk.KEY_m: "edit-external",
             Gdk.KEY_d: "meld",
             Gdk.KEY_r: "rename",
             Gdk.KEY_a: "add",
