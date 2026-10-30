@@ -181,11 +181,17 @@ class RepoWatcher:
         *,
         refresh_branch: bool = False,
         refresh_ignored: bool = False,
+        refresh_base: bool = False,
     ) -> None:
         """Queue a full status and optionally refresh repository-wide metadata."""
 
         if self.closed or self.limited:
             return
+        # 2026-10-30: la base dei diff cambia per storia/scan, non per ogni
+        # status. Pubblicare anche uno snapshot uguale dopo un cambio di parent.
+        if refresh_base:
+            self._published_snapshot = None
+            self.on_history_change()
         self._pending_full = True
         self._pending_paths.clear()
         self._pending_branch = self._pending_branch or refresh_branch
@@ -199,6 +205,7 @@ class RepoWatcher:
         self.request_full(
             refresh_branch=True,
             refresh_ignored=True,
+            refresh_base=True,
         )
 
     def mute_metadata_events(self, milliseconds: int = 500) -> None:
@@ -231,7 +238,7 @@ class RepoWatcher:
         if self.pause_idle_id is not None:
             GLib.source_remove(self.pause_idle_id)
             self.pause_idle_id = None
-        self.request_full(refresh_branch=refresh_branch)
+        self.request_full(refresh_branch=refresh_branch, refresh_base=True)
 
     def suspend_for_limit(self) -> None:
         """Cancel automatic work and observers without losing the last good snapshot."""
@@ -980,19 +987,14 @@ class RepoWatcher:
                 self.request_full()
             return
         if relative == ".hg/branch":
-            self.on_history_change()
-            self.request_full(
-                refresh_branch=True,
-            )
+            self.request_full(refresh_branch=True, refresh_base=True)
             return
         if (
             relative == ".hg/dirstate"
             or relative == ".hg/merge/state"
             or relative == ".hg/store/00changelog.i"
         ):
-            if relative in {".hg/dirstate", ".hg/store/00changelog.i"}:
-                self.on_history_change()
-            self.request_full()
+            self.request_full(refresh_base=True)
 
     def _on_git_metadata_change(
         self, relative: str, event_type: Gio.FileMonitorEvent
@@ -1011,8 +1013,7 @@ class RepoWatcher:
                 self.request_full()
             return
         if relative == ".git/HEAD":
-            self.on_history_change()
-            self.request_full(refresh_branch=True)
+            self.request_full(refresh_branch=True, refresh_base=True)
             return
         if relative == ".git/FETCH_HEAD":
             self.on_history_change()
@@ -1020,7 +1021,7 @@ class RepoWatcher:
         if relative == ".git/packed-refs" or relative.startswith(".git/refs/"):
             # 2026-08-19: local and remote ref movements make a previous
             # explicit comparison stale without authorizing another fetch.
-            self.on_history_change()
+            self.request_full(refresh_base=True)
             return
         if relative == ".git/index":
             self.request_full()
