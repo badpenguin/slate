@@ -40,28 +40,6 @@ def project_diff(before: str, current: str) -> list[DiffRow]:
     return rows
 
 
-def editable_ranges(rows: list[DiffRow], current: str, start: int, end: int) -> list[tuple[int, int]]:
-    """Map a visual character selection to editable canonical ranges only."""
-
-    lines = current.splitlines(keepends=True)
-    offsets = [0]
-    for line in lines:
-        offsets.append(offsets[-1] + len(line))
-    ranges: list[tuple[int, int]] = []
-    visual = 0
-    for row in rows:
-        finish = visual + len(row.text)
-        if row.new_line is not None and start < finish and end > visual:
-            left = offsets[row.new_line] + max(0, start - visual)
-            right = offsets[row.new_line] + min(len(row.text), end - visual)
-            if ranges and ranges[-1][1] == left:
-                ranges[-1] = (ranges[-1][0], right)
-            else:
-                ranges.append((left, right))
-        visual = finish
-    return ranges
-
-
 def compact_rows(rows: list[DiffRow], context: int = 3,
                  expanded: set[tuple[int, int]] | None = None) -> list[DiffRow]:
     """Keep changed blocks with context and represent omitted ranges explicitly."""
