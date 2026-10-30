@@ -1112,6 +1112,35 @@ class WindowActionTest(unittest.TestCase):
                 else:
                     owner._on_tree_selection.assert_not_called()
 
+    def test_selected_workspace_row_click_reactivates_covered_content(self) -> None:
+        """Clicking a selected terminal, browser or project restores its content."""
+
+        for kind in ("terminal", "browser", "project"):
+            with self.subTest(kind=kind):
+                tree = MagicMock()
+                path = Gtk.TreePath.new_from_indices([0])
+                tree.get_path_at_pos.return_value = (path, object(), 0, 0)
+                selection = tree.get_selection.return_value
+                selection.path_is_selected.return_value = True
+                owner = SimpleNamespace(
+                    project_store=MagicMock(),
+                    project_expander_column=object(),
+                    COL_KIND=SlateWindow.COL_KIND,
+                    COL_PROJECT=SlateWindow.COL_PROJECT,
+                    COL_ITEM=SlateWindow.COL_ITEM,
+                    _clear_manual_attention=MagicMock(),
+                    _on_tree_selection=MagicMock(),
+                )
+                owner.project_store.get_value.return_value = kind
+                event = SimpleNamespace(
+                    button=1, state=Gdk.ModifierType(0),
+                    type=Gdk.EventType.BUTTON_PRESS, x=24, y=12,
+                )
+
+                self.assertFalse(SlateWindow._on_tree_button(owner, tree, event))
+                selection.select_path.assert_called_once_with(path)
+                owner._on_tree_selection.assert_called_once_with(selection)
+
     def test_editor_row_double_click_reveals_it_in_files(self) -> None:
         """Double-clicking a sidebar editor switches to Files and locates it."""
 
