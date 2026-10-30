@@ -16,7 +16,9 @@ files inside working directories.
 - quick launch of Codex or any shell command;
 - status and essential operations for Git and Mercurial repositories;
 - file browsing with previews and context actions;
-- an integrated GtkSourceView editor and cmark-gfm Markdown preview;
+- one GtkSourceView editor with editable compact, unified, and side-by-side diffs,
+  plus Markdown and HTML rendering;
+- GUI restart without interrupting tmux sessions;
 - a WebKitGTK browser with regular, incognito, and responsive preview modes;
 - on-demand loading: no terminals, editors, or web pages are opened at startup
   until they are selected.
@@ -69,32 +71,31 @@ These tools enable additional features but are not required to launch SLATE.
 On Debian, Ubuntu, and Linux Mint, install them with:
 
 ```console
-sudo apt install meld mercurial ripgrep tortoisehg vim-gtk3 xdg-utils
+sudo apt install meld mercurial ripgrep tortoisehg xdg-utils
 ```
 
 On Fedora, install them with:
 
 ```console
-sudo dnf install meld mercurial ripgrep tortoisehg vim-X11 xdg-utils
+sudo dnf install meld mercurial ripgrep tortoisehg xdg-utils
 ```
 
 On Arch Linux, install the tools available from the official repositories
 with:
 
 ```console
-sudo pacman -S --needed gvim meld mercurial ripgrep xdg-utils
+sudo pacman -S --needed meld mercurial ripgrep xdg-utils
 ```
 
 TortoiseHg is available separately from the Arch User Repository (AUR).
 
-| Tool         | Feature                                   |
-|--------------|-------------------------------------------|
-| Meld         | Graphical comparisons                     |
-| Mercurial    | Mercurial repositories                    |
-| TortoiseHg   | TortoiseHg interface for Mercurial repos  |
-| gVim         | External editing with gVim                |
-| ripgrep      | Project file-content search               |
-| `xdg-open`   | Open with the default desktop application |
+| Tool           | Feature                                     |
+| -------------- | ------------------------------------------- |
+| Meld           | Graphical comparisons                       |
+| Mercurial      | Mercurial repositories                      |
+| TortoiseHg     | TortoiseHg interface for Mercurial repos    |
+| ripgrep        | Project file-content search                 |
+| `xdg-open`     | Open with the default desktop application   |
 
 The **Codex** button requires the
 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), already installed and
@@ -150,8 +151,14 @@ New Project | New Terminal | Execute ▾ | Codex | Open URL | Incognito
 ```
 
 The active project keeps its terminals, open files, and web pages separate.
-The text sizes for the terminal, Revisions, Files, and Editor views can be
-adjusted in **Settings**.
+The text sizes for Revisions, Files, and Editor can be adjusted in **Settings**.
+The Terminal settings control the tmux status bar.
+
+The **More actions** menu includes **Restart** immediately before **Quit**.
+Restart saves the window state and restarts only the GUI, retaining every tmux
+session, including idle shells. Unsaved editor files still require a save or
+discard decision; cancelling keeps SLATE open. Restart does not ask whether to
+keep tmux running.
 
 ## Terminals
 
@@ -174,16 +181,21 @@ session is still active, it simply reconnects to it; if the session no longer
 exists, SLATE recreates it when it is first selected. Running `exit` removes
 the finished terminal from the list.
 
-A terminal can be renamed with **Rename** or `F2`.
+Plain shell terminals have separate history files for each terminal and project,
+kept outside the working directory. Their history identity survives renaming.
+Codex and custom-command terminals use their existing shell history settings.
+
+A terminal can be renamed with **Rename** or `F2`. When Codex is running in that
+terminal, SLATE also submits `/rename NAME` to rename its conversation.
 
 ### Shortcuts
 
-| Action                | Shortcuts                       |
-|-----------------------|---------------------------------|
-| Copy                  | `Ctrl+Shift+C` or `Ctrl+Insert`  |
-| Paste                 | `Ctrl+Shift+V` or `Shift+Insert` |
-| Interrupt the process | `Ctrl+C`                        |
-| Rename the terminal   | `F2`                            |
+| Action                  | Shortcuts                         |
+| ----------------------- | --------------------------------- |
+| Copy                    | `Ctrl+Shift+C` or `Ctrl+Insert`   |
+| Paste                   | `Ctrl+Shift+V` or `Shift+Insert`  |
+| Interrupt the process   | `Ctrl+C`                          |
+| Rename the terminal     | `F2`                              |
 
 `Ctrl+C` without Shift always reaches the process running in the terminal.
 
@@ -193,10 +205,16 @@ The **Revisions** tab detects Git and Mercurial repositories in the
 project directory and its subdirectories. Status is updated automatically when
 files or repository metadata change.
 
-Selecting a modified file displays a diff preview. Supported images instead
-fit their current working-copy content inside the available preview area. New files show their current
-contents; removed files show their base version; recognized moves appear as
-`source → destination`.
+Selecting a modified text file opens the unified editor in **Compact** mode,
+initially read-only. The same opening behavior applies in **Files**. Supported
+images retain their dedicated preview, fitted to the available area. New files
+show their current contents; removed files show immutable repository history;
+recognized moves appear as `source → destination`.
+
+Automatic status updates are limited to 1,000 entries per project. Reaching
+the limit blocks the Revisions panel for that project and displays a diagnostic.
+Resolve the excess manually, for example by ignoring generated files, then use
+**Scan** to retry. Scan diagnostics can be selected and copied.
 
 ### Commit and revert
 
@@ -246,14 +264,13 @@ Git worktrees and submodules where `.git` is a file are not supported.
 
 ### Quick file actions
 
-| Action                                 | Shortcut |
-|----------------------------------------|----------|
-| View with the default application      | `V`      |
-| Edit in the built-in editor            | `E`      |
-| Edit with gVim                         | `M`      |
-| Add a new file                         | `A`      |
-| Delete with confirmation               | `Delete` |
-| Match checkboxes for highlighted files | `Space`  |
+| Action                                   | Shortcut   |
+| ---------------------------------------- | ---------- |
+| View with the default application        | `V`        |
+| Edit in the built-in editor              | `E`        |
+| Add a new file                           | `A`        |
+| Delete with confirmation                 | `Delete`   |
+| Match checkboxes for highlighted files   | `Space`    |
 
 ## Files and editor
 
@@ -266,16 +283,48 @@ and retain their expansion and position when switching between projects.
 - **Hidden** shows hidden files;
 - **Excluded** shows files ignored by the repository;
 - **Expand** recursively opens the tree while stopping at large
-  excluded directories.
+  excluded directories;
+- the refresh icon or `F5` rescans the file tree manually.
 
 The `.git`, `.hg`, and `.svn` metadata directories are never displayed.
-Symbolic links and paths that leave the project directory cannot be used to
-read, edit, or delete external files.
+Files can browse directory symlinks outside the project and show their files
+in a read-only preview. Editing, terminals, context actions, and mutations are
+blocked on those external branches. Internal aliases of the same physical file
+reuse the same editor document.
 
-**Edit in SLATE** opens a file in the central column with
-syntax highlighting, line numbers, search, undo/redo, and atomic saving. If the
-file also changes on disk, SLATE asks which version to keep instead of
-overwriting it automatically.
+### One editor, five views
+
+Selecting a text file in Files or Revisions shows a temporary read-only document
+in the workspace. Selection alone does not add an editor row to **Projects**.
+Use **Edit**, **Edit in SLATE**, or `E` to enable editing and keep the document in
+Projects. All views share the same source buffer, undo history, and save operation.
+
+The icon-and-text buttons appear in this order:
+
+| View               | Content                                                              |
+| ------------------ | -------------------------------------------------------------------- |
+| **Compact**        | Editable unified diff with three context lines around each change.   |
+| **Unified**        | Editable diff with the full file and removed lines.                  |
+| **Side by side**   | Repository version on the left, editable current file on the right.  |
+| **Editor**         | Current source with syntax highlighting and line numbers.            |
+| **Renderer**       | Rendered Markdown or HTML; available only for those file types.      |
+
+**Compact** is the default for changed files. Files without changes open in
+Renderer for Markdown/HTML, or Editor otherwise. Untracked files open in Editor.
+Mode choices belong to the open document and are not saved between restarts.
+Changing to a diff mode positions it at the first difference; ordinary refreshes
+preserve navigation. Previous/next-change buttons move between changed blocks.
+
+Double-click an omitted block in Compact to expand unchanged lines. Current
+lines can be edited directly in any diff mode; removed lines and repository
+history are read-only. Saving writes only the current source, including any
+unchanged lines hidden by Compact. Rendering uses a separate local-document
+context with scripts and remote resources blocked.
+
+The editor provides search, undo/redo, and atomic saving. If the file also changes
+on disk, SLATE asks which version to keep instead of overwriting it automatically.
+After a PHP file is saved, an asynchronous `php -l` check reports syntax failures
+in an error dialog; the file remains saved.
 
 `Ctrl+B` or **Go to Definition** in the editor and quick-preview context menus
 searches declaration-shaped matches with ripgrep. A unique result opens at its
@@ -294,8 +343,8 @@ smart-case matching, and respects ignored files, excluded directories, and the
 
 Results show the matching source line on the left and its relative path and
 line number on the right. Moving the selection centers that line in a read-only contextual preview. At most 100
-results are shown. The context menu and `V`, `E`, `M`, and `D` respectively
-open the file, edit it in SLATE, edit it with the configured external editor,
+results are shown. The context menu and `V`, `E`, and `D` respectively
+open the file with its desktop application, edit it in SLATE,
 or open an available patch in Meld. `Esc` closes search.
 
 When `rg` is unavailable, SLATE still starts normally and disables only this
@@ -315,14 +364,14 @@ scales it down when it does not fit the available space. It does not emulate
 touch, DPR, or the user agent. `F12` or `Ctrl+Shift+I` opens the WebKit developer
 tools.
 
-| Action                   | Shortcut               |
-|--------------------------|------------------------|
-| Focus the URL bar        | `Ctrl+L`               |
-| Back/Forward             | `Alt+←` / `Alt+→`      |
-| Reload                   | `Ctrl+R` or `F5`        |
-| Stop                     | `Esc`                  |
-| Close the page           | `Ctrl+W`               |
-| Open the developer tools | `F12` or `Ctrl+Shift+I` |
+| Action                     | Shortcut                 |
+| -------------------------- | ------------------------ |
+| Focus the URL bar          | `Ctrl+L`                 |
+| Back/Forward               | `Alt+←` / `Alt+→`        |
+| Reload                     | `Ctrl+R` or `F5`         |
+| Stop                       | `Esc`                    |
+| Close the page             | `Ctrl+W`                 |
+| Open the developer tools   | `F12` or `Ctrl+Shift+I`  |
 
 ## Data and tmux sessions
 
