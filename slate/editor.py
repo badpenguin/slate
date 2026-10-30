@@ -15,6 +15,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, GtkSource, Pango  # noqa: E402
 
+from .editor_preferences import normalize_editor_appearance
+from .editor_appearance import editor_scheme, apply_editor_text_color, editor_font_css
 from .processes import AsyncCommand, CommandResult, run_async
 from .search import source_symbol_at_cursor
 
@@ -53,11 +55,13 @@ class EditorDocument(Gtk.Box):
         on_definition: Callable[[str, str, str], None] | None = None,
         *,
         historical: bool = False,
+        appearance: dict | None = None,
     ) -> None:
         """Build one editor and begin loading its working-copy file."""
 
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.historical = historical
+        self.appearance = normalize_editor_appearance(appearance)
         self.previewing = False
         self.on_edit = None
         self.project_name = project_name
@@ -252,6 +256,9 @@ class EditorDocument(Gtk.Box):
         self.view.connect("button-press-event", self._on_view_button_press)
         self.view.connect("populate-popup", self._on_populate_popup)
         self.font_provider = Gtk.CssProvider()
+        self.appearance_provider = Gtk.CssProvider()
+        apply_editor_text_color(self.appearance_provider, self.appearance)
+        self.view.get_style_context().add_provider(self.appearance_provider, Gtk.STYLE_PROVIDER_PRIORITY_USER)
         self.view.get_style_context().add_provider(
             self.font_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
@@ -330,9 +337,8 @@ class EditorDocument(Gtk.Box):
 
         # 2026-08-16: un provider locale evita override_font deprecato e non
         # altera terminale, preview o altri GtkTextView dell'applicazione.
-        self.font_provider.load_from_data(
-            f"textview {{ font-family: monospace; font-size: {points}pt; }}".encode()
-        )
+        self.font_size = points
+        self.font_provider.load_from_data(editor_font_css(self.appearance, points))
         self.view.queue_resize()
         self.view.queue_draw()
 
@@ -505,12 +511,20 @@ class EditorDocument(Gtk.Box):
         )
         self.buffer.set_language(language)
         self.buffer.set_highlight_syntax(language is not None)
-        settings = Gtk.Settings.get_default()
-        theme = str(settings.get_property("gtk-theme-name") if settings else "")
-        scheme_name = "oblivion" if "dark" in theme.lower() else "classic"
-        scheme = GtkSource.StyleSchemeManager.get_default().get_scheme(scheme_name)
+        scheme = editor_scheme(self.appearance)
         if scheme is not None:
             self.buffer.set_style_scheme(scheme)
+
+    def set_appearance(self, values: dict) -> None:
+        """Apply a scheme and optional plain-text and diff colors to this live document."""
+
+        self.appearance = normalize_editor_appearance(values)
+        self.set_font_size(self.font_size)
+        self._configure_language()
+        apply_editor_text_color(self.appearance_provider, self.appearance)
+        if self.experimental is not None:
+            self.experimental.syntax.configure(self.experimental.mode)
+
 
     def _ensure_monitor(self) -> None:
         """Monitor the parent directory so atomic file replacements stay visible."""
@@ -1212,6 +1226,7 @@ class EditorWorkspace(Gtk.Stack):
         super().__init__()
         self.set_transition_type(Gtk.StackTransitionType.NONE)
         self.font_size = font_size
+        self.appearance = normalize_editor_appearance(None)
         self.on_persist = on_persist
         self.on_error = on_error
         self.on_collection_changed = on_collection_changed
@@ -1324,7 +1339,7 @@ class EditorWorkspace(Gtk.Stack):
             previous.destroy()
         editor = EditorDocument(project_name, root, relative_path, self.font_size,
                                 self._on_editor_state, self._on_editor_removed,
-                                self.on_definition, historical=True)
+                                self.on_definition, historical=True, appearance=self.appearance)
         self.historical_document = editor
         self.add_named(editor, "__historical__")
         # 2026-10-30: la presentazione viene collegata dal chiamante; non
@@ -1374,6 +1389,7 @@ class EditorWorkspace(Gtk.Stack):
             self._on_editor_state,
             self._on_editor_removed,
             self.on_definition,
+            appearance=self.appearance,
         )
         entry.document = editor
         editor.path_changing = any(
@@ -1731,6 +1747,23 @@ class EditorWorkspace(Gtk.Stack):
         for entry in entries:
             if entry.document is not None:
                 entry.document.set_font_size(points)
+        if self.historical_document is not None:
+            self.historical_document.set_font_size(points)
+
+    def set_appearance(self, values: dict) -> None:
+        """Update existing, temporary and future documents without loading lazy editor entries."""
+
+        # 2026-10-30: conservare buffer, undo e caricamento lazy: si applica
+        # la preferenza solo ai widget già materializzati e ai futuri costruttori.
+        self.appearance = normalize_editor_appearance(values)
+        documents = [entry.document for entry in self.editors.values() if entry.document is not None]
+        if self.preview_entry is not None:
+            documents.append(self.preview_entry.document)
+        if self.historical_document is not None:
+            documents.append(self.historical_document)
+        for document in documents:
+            if document is not None:
+                document.set_appearance(self.appearance)
 
     def serialized_state(self) -> tuple[list[dict[str, str]], dict[str, str] | None]:
         """Return ordered editor references and the currently visible editor."""
