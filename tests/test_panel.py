@@ -35,7 +35,6 @@ class SCMPanelTest(unittest.TestCase):
         self.viewed: FileStatus | None = None
         self.edited_internal: FileStatus | None = None
         self.edited_with_diff: FileStatus | None = None
-        self.edited_external: FileStatus | None = None
         self.deleted: FileStatus | None = None
         self.deleted_missing: list[FileStatus] = []
         self.diffed_repository: RepositoryRef | None = None
@@ -183,10 +182,6 @@ class SCMPanelTest(unittest.TestCase):
 
         self.edited_with_diff = status
 
-    def _record_edit_external(self, status: FileStatus) -> None:
-        """Record gVim requests from menus and keyboard shortcuts."""
-
-        self.edited_external = status
 
     def _record_delete(self, status: FileStatus) -> None:
         """Record confirmed-delete requests forwarded to the window."""
@@ -1054,7 +1049,6 @@ class SCMPanelTest(unittest.TestCase):
 
         self.assertIsNone(self.viewed)
         self.assertIsNone(self.edited_internal)
-        self.assertIsNone(self.edited_external)
         self.assertIsNone(self.deleted)
 
     def test_d_opens_meld_for_repository_root(self) -> None:
@@ -1283,7 +1277,6 @@ class SCMPanelTest(unittest.TestCase):
         for label, icon, keyval in (
             ("Visualizza", "document-open", Gdk.KEY_v),
             ("Modifica in SLATE", "accessories-text-editor", Gdk.KEY_e),
-            ("Modifica in gVim", "gvim", Gdk.KEY_m),
             ("Aggiungi", "list-add", Gdk.KEY_a),
             ("Annulla aggiunta", "list-remove", None),
             ("Elimina", "edit-delete", Gdk.KEY_Delete),
