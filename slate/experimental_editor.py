@@ -8,7 +8,7 @@ import sys
 import gi
 
 gi.require_version("GtkSource", "4")
-from gi.repository import Gdk, Gio, GLib, GObject, Gtk, GtkSource
+from gi.repository import Gdk, GLib, GObject, Gtk, GtkSource
 
 from .browser import WebKit2
 from .editor_diff_model import DiffRow, compact_rows
