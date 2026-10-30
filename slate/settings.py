@@ -561,13 +561,9 @@ class SettingsDialog(Gtk.Dialog):
 
         self.on_close_to_tray_change(switch.get_active())
 
-
-
-
-
     def _on_response(
         self, _dialog: Gtk.Dialog, _response: Gtk.ResponseType
     ) -> None:
-        """Apply the active editor field and destroy the settings dialog."""
+        """Close the settings dialog; active controls already publish their changes."""
 
         self.destroy()
