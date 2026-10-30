@@ -550,8 +550,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         dialog.show_all()
 
 
-    def _configure_experimental(self, document: EditorDocument, status: FileStatus | None = None,
-                                preserve_mode: bool = False) -> None:
+    def _configure_experimental(self, document: EditorDocument, status: FileStatus | None = None) -> None:
         """Attach one lazy presentation to the already registered physical document."""
 
         if document.experimental is None:
@@ -598,7 +597,6 @@ class SlateWindow(Gtk.ApplicationWindow):
         if mime.startswith(("image/", "audio/", "video/")) or mime in {"application/pdf", "application/zip", "application/octet-stream"}:
             return None
         focused = self.get_focus()
-        existing = self.editor_workspace.find_open_reference(project["name"], project["path"], relative_path)
         self._experimental_opening = True
         try:
             self._close_preview()
@@ -608,7 +606,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 document = self.editor_workspace.open_preview(project["name"], project["path"], relative_path)
         finally:
             self._experimental_opening = False
-        self._configure_experimental(document, status, preserve_mode=existing is not None and document.experimental is None)
+        self._configure_experimental(document, status)
         self.active_editor_ref = document.reference
         if focus:
             self._select_tree_row(project["name"], document.relative_path, "editor")
@@ -633,7 +631,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self._close_preview()
                 self.editor_workspace.set_visible_child(document)
                 self.editor_workspace.active_ref = document.reference
-                self._configure_experimental(document, status, preserve_mode=True)
+                self._configure_experimental(document, status)
                 return
         self._close_preview()
         document = self.editor_workspace.open_historical(project["name"], project["path"], relative)
@@ -2507,7 +2505,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.active_editor_ref = (project["name"], relative_path)
         document = self.editor_workspace.current_editor()
         if document is not None:
-            self._configure_experimental(document, preserve_mode=True)
+            self._configure_experimental(document)
 
     def _activate_browser(self, project: dict, identifier: str) -> None:
         """Show a browser row while aligning its shared project-side context."""
