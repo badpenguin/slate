@@ -70,7 +70,7 @@ class ProjectFileManagerTest(unittest.TestCase):
             self._record_preview,
             self._record_view,
             self._record_edit_internal,
-            self._record_edit_external,
+
             self._record_new_file,
             self._record_new_directory,
             self._record_rename,
@@ -316,8 +316,7 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.assertTrue(self._press(Gdk.KEY_e))
         self.assertEqual(self.edited_internal, "normal.txt")
         self.assertIsNone(self.edited_external)
-        self.assertTrue(self._press(Gdk.KEY_m))
-        self.assertEqual(self.edited_external, "normal.txt")
+        self.assertFalse(self._press(Gdk.KEY_m))
         self.assertTrue(self._press(Gdk.KEY_r))
         self.assertFalse(self._press(Gdk.KEY_t))
         self.assertTrue(self._press(Gdk.KEY_Delete))
@@ -599,14 +598,12 @@ class ProjectFileManagerTest(unittest.TestCase):
         for keyval in (
             Gdk.KEY_v,
             Gdk.KEY_e,
-            Gdk.KEY_m,
             Gdk.KEY_r,
             Gdk.KEY_Delete,
         ):
             self.assertTrue(self._press(keyval))
         self.assertEqual(self.viewed, "normal.txt")
         self.assertEqual(self.edited_internal, "normal.txt")
-        self.assertEqual(self.edited_external, "normal.txt")
         self.assertEqual(self.renamed, "normal.txt")
         self.assertEqual(self.deleted, "normal.txt")
 
