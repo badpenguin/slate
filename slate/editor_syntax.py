@@ -4,6 +4,8 @@ from operator import methodcaller
 
 from gi.repository import GLib
 
+from .editor_appearance import diff_colors
+
 
 class DiffSyntaxHighlighter:
     """Keep both versions lexically separate while preserving diff and read-only tags."""
@@ -53,10 +55,11 @@ class DiffSyntaxHighlighter:
         self.baseline.set_highlight_syntax(language is not None and mode in {"unified", "side"})
         self.projection.set_highlight_syntax(False)
         self.projection.set_style_scheme(scheme)
-        dark = scheme is not None and scheme.get_id() == "oblivion"
-        colors = ("#205c32", "#702d38") if dark and mode != "compact" else ("#a8eba8", "#f5a3ab")
+        preferences = self.presentation.editor.appearance
+        colors = diff_colors(preferences, scheme, compact=mode == "compact")
         for kind, color in zip(("added", "removed"), colors):
             self.presentation.tags[kind].set_property("background", color)
+            self.presentation.tags[kind].set_property("foreground", preferences.get("text_color") or "#172017")
             self.presentation.tags[kind].set_property("foreground-set", mode == "compact")
         self.presentation.new_tag.set_property("background", colors[0])
         self.presentation.old_tag.set_property("background", colors[1])
