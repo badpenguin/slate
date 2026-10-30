@@ -25,11 +25,11 @@ from .config import (
     is_extra_command_icon,
     new_project_config,
 )
-from .diff_editor import DiffEditorSurface
 from .editor import EditorDocument, EditorWorkspace
+from .experimental_editor import ExperimentalEditor
 from .file_manager import ProjectFileManager
 from .panel import SCMPanel
-from .preview import FilePreview, map_diff_lines
+from .preview import FilePreview
 from .processes import CommandResult, run_async, spawn_detached
 from .project_files import DirectoryInspection, ProjectFileOperations
 from .repository_actions import (
@@ -228,7 +228,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._view_status,
             self._edit_status_internal,
             self._open_diff_editor_from_status,
-            self._edit_status_external,
+
             self._delete_status,
             self._delete_missing_statuses,
         )
@@ -236,7 +236,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._preview_project_file,
             self._view_project_file,
             self._edit_project_file_internal,
-            self._edit_project_file_external,
+
             self._new_project_file,
             self._new_project_directory,
             self._rename_project_file,
@@ -302,7 +302,6 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._start_definition_search,
             self._handle_file_preview_action,
         )
-        self.diff_editor_surface: DiffEditorSurface | None = None
         self.preview.set_halign(Gtk.Align.START)
         self.preview.set_valign(Gtk.Align.FILL)
         self.content_overlay.add_overlay(self.preview)
@@ -312,7 +311,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._close_project_search,
             self._view_project_file,
             self._edit_search_result_internal,
-            self._edit_project_file_external,
+
             self._can_open_search_result_meld,
             self._open_search_result_meld,
             self._start_definition_search,
@@ -367,6 +366,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         header.set_show_close_button(True)
         header.get_style_context().add_class("slate-header")
         self.headerbar = header
+        self._experimental_opening = False
 
         add_project = self._header_action_button(
             "New Project", "folder-new", self._on_add_project
@@ -459,6 +459,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         menu.append(Gtk.SeparatorMenuItem())
         menu.append(orphans)
         menu.append(Gtk.SeparatorMenuItem())
+        restart_item = Gtk.MenuItem(label="Restart")
+        restart_item.connect("activate", self._on_restart)
+        menu.append(restart_item)
         quit_item = Gtk.MenuItem(label="Quit")
         # L'uscita esplicita usa le stesse conferme della tray anche quando
         # la chiusura della finestra è configurata per nascondere l'app.
@@ -541,10 +544,101 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._update_font_setting,
             self._update_close_to_tray_setting,
             self._update_tmux_status_setting,
-            self._update_external_editor_setting,
+
             self._update_extra_commands_setting,
         )
         dialog.show_all()
+
+
+    def _configure_experimental(self, document: EditorDocument, status: FileStatus | None = None,
+                                preserve_mode: bool = False) -> None:
+        """Attach one lazy presentation to the already registered physical document."""
+
+        if document.experimental is None:
+            document.experimental = ExperimentalEditor(document)
+            # 2026-10-30: non esiste più un editor classico da preservare:
+            # anche le schede ripristinate scelgono la vista prima di mostrarsi.
+        presentation = document.experimental
+        presentation.attach()
+        scm = None
+        relative = document.relative_path
+        if status is not None:
+            scm = self.scm_by_repository.get((document.project_name, RepositoryRef(status.repository, status.scm_type)))
+            relative = status.path
+        else:
+            project_root = Path(document.root).resolve()
+            physical = Path(document.path).resolve() if document.path else project_root / relative
+            # Explicit file opening may precede repository discovery. Inspect
+            # only ancestors, never start another recursive watcher or scan.
+            parent = physical.parent
+            while parent == project_root or project_root in parent.parents:
+                kind = "hg" if is_normal_repository(parent, "hg") else (
+                    "git" if is_normal_repository(parent, "git") else None)
+                if kind is not None:
+                    scm = MercurialSCM(str(parent)) if kind == "hg" else GitSCM(str(parent))
+                    relative = physical.relative_to(parent).as_posix()
+                    break
+                if parent == project_root:
+                    break
+                parent = parent.parent
+            found = self._search_result_status(document.relative_path) if document.project_name == self.active_project_name else None
+            if found is not None:
+                _repository, status = found
+        presentation.configure_base(scm, relative, status.state if status else None, status.source_path if status else None)
+
+    def _open_experimental_file(self, relative_path: str, status: FileStatus | None = None,
+                                focus: bool = False) -> EditorDocument | None:
+        """Open from either sidebar, preserving its keyboard ownership on selection."""
+
+        project = self.config.find_project(self.active_project_name or "")
+        path = self._project_file_path(relative_path)
+        if project is None or path is None or not os.path.isfile(path):
+            return None
+        mime, _uncertain = Gio.content_type_guess(path, None)
+        if mime.startswith(("image/", "audio/", "video/")) or mime in {"application/pdf", "application/zip", "application/octet-stream"}:
+            return None
+        focused = self.get_focus()
+        existing = self.editor_workspace.find_open_reference(project["name"], project["path"], relative_path)
+        self._experimental_opening = True
+        try:
+            self._close_preview()
+            if focus:
+                document = self.editor_workspace.open_file(project["name"], project["path"], relative_path, focus=False)
+            else:
+                document = self.editor_workspace.open_preview(project["name"], project["path"], relative_path)
+        finally:
+            self._experimental_opening = False
+        self._configure_experimental(document, status, preserve_mode=existing is not None and document.experimental is None)
+        self.active_editor_ref = document.reference
+        if focus:
+            self._select_tree_row(project["name"], document.relative_path, "editor")
+            document.experimental.focus_editor()
+        elif focused is not None and focused.get_mapped() and focused.is_sensitive():
+            focused.grab_focus()
+        return document
+
+    def _open_experimental_history(self, status: FileStatus) -> None:
+        """Present a removed file as immutable history instead of creating a working copy."""
+
+        project = self.config.find_project(self.active_project_name or "")
+        relative = self._workspace_repository_path(status.repository, status.path)
+        if project is None or self._project_file_path(relative) is None:
+            return
+        # A dirty editor for a deleted file owns its existing conflict choices,
+        # even when strict path lookup can no longer resolve the deleted target.
+        target = str((Path(project["path"]) / relative).resolve())
+        for entry in self.editor_workspace.editors.values():
+            document = entry.document
+            if document is not None and document.project_name == project["name"] and document.path == target:
+                self._close_preview()
+                self.editor_workspace.set_visible_child(document)
+                self.editor_workspace.active_ref = document.reference
+                self._configure_experimental(document, status, preserve_mode=True)
+                return
+        self._close_preview()
+        document = self.editor_workspace.open_historical(project["name"], project["path"], relative)
+        document.history_status = status
+        self._configure_experimental(document, status)
 
     def _update_close_to_tray_setting(self, enabled: bool) -> None:
         """Persist close behavior and immediately synchronize the tray icon."""
@@ -617,6 +711,27 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.show()
         self.present()
 
+    def _on_restart(self, _item: Gtk.MenuItem) -> None:
+        """Resolve unsaved files before restarting only the GUI process."""
+
+        if self.closing:
+            return
+        self.closing = True
+        self.editor_workspace.request_close_all(self._after_restart_editors)
+
+    def _after_restart_editors(self, proceed: bool) -> None:
+        """Save UI state and retain every tmux session after editor approval."""
+
+        if not proceed:
+            self.closing = False
+            return
+        # 2026-10-30: Restart conserva anche le shell inattive; non passa dalla
+        # scelta di uscita né dal ritiro delle shell che ne terminerebbe alcune.
+        self._save_window_state()
+        self.terminals.begin_shutdown()
+        self.get_application().restart_requested = True
+        self._final_destroy()
+
     def _on_tray_quit(self, _item: Gtk.MenuItem) -> None:
         """Start the existing protected shutdown flow from the tray menu."""
 
@@ -646,32 +761,6 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.terminals.set_status_bar_enabled(enabled)
         self.config.save()
 
-    def _update_external_editor_setting(self, command: list[str]) -> None:
-        """Persist one validated external-editor argument vector."""
-
-        if (
-            not command
-            or len(command) > 32
-            or any(
-                not isinstance(argument, str)
-                or not argument
-                or len(argument) > 4096
-                or "\0" in argument
-                for argument in command
-            )
-        ):
-            return
-        if (
-            self.config.data["settings"]["external_apps"]["editor_command"]
-            == command
-        ):
-            return
-        # 2026-08-20: persistere argv separati mantiene modificabile l'editor
-        # senza interpretare metacaratteri o concatenare il path in una shell.
-        self.config.data["settings"]["external_apps"]["editor_command"] = list(
-            command
-        )
-        self.config.save()
 
     def _update_extra_commands_setting(
         self, commands: list[dict[str, str]]
@@ -744,6 +833,8 @@ class SlateWindow(Gtk.ApplicationWindow):
             for project in self.config.data["projects"]
         }
         self._populate_projects()
+        if getattr(self, "_experimental_opening", False):
+            return
         current_orders = {
             project["name"]: tuple(
                 (item.get("kind", ""), item.get("value", ""))
@@ -1496,6 +1587,16 @@ class SlateWindow(Gtk.ApplicationWindow):
             if not self.project_limit.accept(repo_key[0], repo_key[1], qualified, branch):
                 return
             self.snapshots[repo_key] = (qualified, branch)
+            # 2026-10-30: anche il documento temporaneo segue il nuovo stato SCM,
+            # senza promuoverlo a scheda persistente nel pannello Progetti.
+            entries = list(self.editor_workspace.editors.values())
+            if self.editor_workspace.preview_entry is not None:
+                entries.append(self.editor_workspace.preview_entry)
+            for entry in entries:
+                document = entry.document
+                if document is not None and document.project_name == repo_key[0] and document.experimental is not None:
+                    document.experimental.base_identity = None
+                    self._configure_experimental(document)
             if repo_key[0] == self.active_project_name:
                 self.panel.update_status(qualified, branch, repo_key[1])
                 self._update_active_revision_count()
@@ -2404,6 +2505,9 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._activate(project, terminal_name_value)
             return
         self.active_editor_ref = (project["name"], relative_path)
+        document = self.editor_workspace.current_editor()
+        if document is not None:
+            self._configure_experimental(document, preserve_mode=True)
 
     def _activate_browser(self, project: dict, identifier: str) -> None:
         """Show a browser row while aligning its shared project-side context."""
@@ -3134,24 +3238,10 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self._prompt_terminal_rename(send_codex_rename=True)
                 return True
             return False
-        surface = getattr(self, "diff_editor_surface", None)
-        if event.keyval == Gdk.KEY_Escape and surface is not None:
-            surface.close_if_clean()
-            return True
-        if (
-            surface is not None
-            and focused is not None
-            and SlateWindow._is_widget_below(focused, surface)
-            and Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_b
-            and modifiers == Gdk.ModifierType.CONTROL_MASK
-        ):
-            if not surface.go_to_definition():
-                self._show_error("Place the diff editor cursor on a source symbol first.")
-            return True
         # 2026-10-13: GTK può lasciare il focus all'editor coperto quando la
         # preview è visibile; i suoi tasti appartengono alla preview, mentre la
         # colonna Revisioni/File mantiene i propri comandi contestuali.
-        preview_visible = self.preview.get_visible() and surface is None
+        preview_visible = self.preview.get_visible()
         preview_has_focus = focused is not None and SlateWindow._is_widget_below(
             focused, self.preview
         )
@@ -3171,7 +3261,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         # 2026-10-13: una vista centrale visibile non possiede necessariamente
         # il focus; F5 in Files e i comandi della sidebar non vanno al browser.
         if (
-            not preview_visible and surface is None and workspace_focused
+            not preview_visible and workspace_focused
             and self.browser_manager.handle_key(event)
         ):
             return True
@@ -3186,7 +3276,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 self._show_error("Place the preview cursor on a source symbol first.")
             return True
         if (
-            not preview_visible and surface is None and workspace_focused
+            not preview_visible and workspace_focused
             and self.editor_workspace.handle_key(event)
         ):
             return True
@@ -4010,6 +4100,18 @@ class SlateWindow(Gtk.ApplicationWindow):
     ) -> None:
         """Show one asynchronous file preview unless it is already current."""
 
+        if status is not None:
+            relative = self._workspace_repository_path(status.repository, status.path)
+            if status.state in {"missing", "removed"}:
+                self._open_experimental_history(status)
+                return
+            if self._open_experimental_file(relative, status) is not None:
+                return
+        self._preview_legacy_status(status, force)
+
+    def _preview_legacy_status(self, status: FileStatus | None, force: bool = False) -> None:
+        """Keep the old read-only preview available for non-text fallback only."""
+
         repository = (
             RepositoryRef(status.repository, status.scm_type) if status else None
         )
@@ -4017,15 +4119,6 @@ class SlateWindow(Gtk.ApplicationWindow):
         if status is None or scm is None:
             self._close_preview()
             return
-        surface = getattr(self, "diff_editor_surface", None)
-        if surface is not None:
-            relative_path = self._workspace_repository_path(
-                status.repository, status.path
-            )
-            if relative_path != surface.path:
-                continuation = partial(self._preview_file, status, force)
-                if surface.finish_before_navigation(continuation):
-                    return
         if status.state == "missing":
             # Un path fisicamente assente non ha contenuto corrente da mostrare;
             # chiudere l'overlay lascia inoltre accessibile il menu Revisioni.
@@ -4053,6 +4146,23 @@ class SlateWindow(Gtk.ApplicationWindow):
 
     def _preview_project_file(self, relative_path: str | None) -> None:
         """Preview a normal file selected from the active project's file tree."""
+
+        project = self.config.find_project(self.active_project_name or "")
+        if relative_path is None or project is None:
+            self._close_preview()
+            return
+        inside = False
+        try:
+            (Path(project["path"]) / relative_path).resolve().relative_to(Path(project["path"]).resolve())
+            inside = True
+        except (OSError, RuntimeError, ValueError):
+            pass
+        if inside and self._open_experimental_file(relative_path) is not None:
+            return
+        self._preview_legacy_project_file(relative_path)
+
+    def _preview_legacy_project_file(self, relative_path: str | None) -> None:
+        """Retain the original file preview as a fallback, without making it the editor."""
 
         project = self.config.find_project(self.active_project_name or "")
         if relative_path is None or project is None:
@@ -4116,9 +4226,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 else:
                     self._edit_status_internal(status, line)
             elif action == "edit-with-diff":
-                self._open_diff_editor(status)
-            elif action == "edit-external":
-                self._edit_status_external(status)
+                self._open_diff_editor_from_status(status)
             elif action == "add" and status.state == "untracked":
                 self._add_statuses([status])
             elif action == "toggle-selection" and status.state not in {
@@ -4149,8 +4257,6 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._view_project_file(path)
         elif action == "edit-internal":
             self._edit_project_file_internal(path)
-        elif action == "edit-external":
-            self._edit_project_file_external(path)
         elif action == "rename":
             self._rename_project_file(path)
         elif action == "delete":
@@ -4220,9 +4326,6 @@ class SlateWindow(Gtk.ApplicationWindow):
         # the outer divider position yields the right edge of column two.
         width = self.outer_paned.get_position() + self.inner_paned.get_position()
         self.preview.set_size_request(max(320, width), -1)
-        surface = getattr(self, "diff_editor_surface", None)
-        if surface is not None:
-            surface.set_size_request(max(320, width), -1)
 
     def _on_window_button_press(
         self, _window: Gtk.Widget, event: Gdk.EventButton
@@ -4407,156 +4510,13 @@ class SlateWindow(Gtk.ApplicationWindow):
                 f"Unable to view {relative_path}: {error}"
             )
 
-    def _open_diff_editor(self, status: FileStatus) -> None:
-        """Load a compact patch for the persistent sidebar editor surface."""
-
-        if not self.preview.diff_edit_lines:
-            return
-        target_line = self.preview.edit_line_at_cursor()
-        self._load_diff_editor_patch(status, target_line)
 
     def _open_diff_editor_from_status(self, status: FileStatus) -> None:
-        """Load a tracked patch requested directly by the Revision context menu."""
+        """Promote the selected document and explicitly show its editable diff."""
 
-        self._load_diff_editor_patch(status, None)
-
-    def _load_diff_editor_patch(
-        self, status: FileStatus, target_line: int | None
-    ) -> None:
-        """Request one three-context-line patch without changing normal preview."""
-
-        if status.state in {"untracked", "added", "missing", "removed"}:
-            return
-        repository = RepositoryRef(status.repository, status.scm_type)
-        scm = self._repository_scm(repository)
-        if scm is None:
-            return
-        # 2026-09-27: la preview conserva otto righe per la revisione, mentre
-        # l'editor richiede un nuovo diff -U3 per ottenere hunk realmente compatti
-        # senza tentare di ricostruirli in modo ambiguo dal testo già caricato.
-        argv = (
-            scm.editor_move_diff_argv(status.source_path, status.path)
-            if status.state == "moved" and status.source_path
-            else scm.editor_diff_argv(status.path)
-        )
-        run_async(
-            argv,
-            partial(self._on_direct_diff_editor_loaded, status, target_line),
-            cwd=scm.root,
-            env=scm.environment,
-        )
-
-    def _on_direct_diff_editor_loaded(
-        self,
-        status: FileStatus,
-        target_line: int | None,
-        result: CommandResult,
-    ) -> None:
-        """Validate a compact diff and open its persistent editor view."""
-
-        if not result.ok:
-            self._show_file_error(
-                result.stderr.strip() or "Unable to generate the diff."
-            )
-            return
-        if len(result.stdout.encode("utf-8", "replace")) > FilePreview.MAX_TEXT_BYTES:
-            self._show_file_error("Diff too large for Edit with diff.")
-            return
-        edit_lines = map_diff_lines(result.stdout)
-        hunk_line = 0
-        if target_line is not None and target_line in edit_lines:
-            hunk_line = next(
-                (
-                    index
-                    for index, line in enumerate(result.stdout.splitlines())
-                    if edit_lines[index] == target_line
-                    and line.startswith(("+", "-"))
-                    and not line.startswith(("+++", "---"))
-                ),
-                edit_lines.index(target_line),
-            )
-        else:
-            first_hunk = next(
-                (
-                    index
-                    for index, line in enumerate(result.stdout.splitlines())
-                    if line.startswith("@@")
-                ),
-                0,
-            )
-            hunk_line = next(
-                (
-                    index
-                    for index, line in enumerate(result.stdout.splitlines())
-                    if index > first_hunk
-                    and line.startswith(("+", "-"))
-                    and not line.startswith(("+++", "---"))
-                ),
-                first_hunk,
-            )
-            target_line = edit_lines[hunk_line] if edit_lines else None
-        self._show_diff_editor(
-            status, result.stdout, edit_lines, hunk_line, target_line
-        )
-
-    def _show_diff_editor(
-        self,
-        status: FileStatus,
-        diff_text: str,
-        edit_lines: tuple[int | None, ...],
-        diff_line: int,
-        target_line: int | None,
-    ) -> None:
-        """Create the two-column diff session from already validated text."""
-
-        if not edit_lines or not any(
-            line.startswith("@@") for line in diff_text.splitlines()
-        ):
-            self._show_file_error("No textual changes available for Edit with diff.")
-            return
-        relative_path = self._workspace_repository_path(
-            status.repository, status.path
-        )
-        existing = getattr(self, "diff_editor_surface", None)
-        if existing is not None:
-            if existing.path != relative_path:
-                continuation = partial(
-                    self._show_diff_editor,
-                    status,
-                    diff_text,
-                    edit_lines,
-                    diff_line,
-                    target_line,
-                )
-                if existing.finish_before_navigation(continuation):
-                    return
-            else:
-                existing.destroy()
-        editor = self._edit_status_internal(status, target_line)
-        if editor is None:
-            return
-        # 2026-09-27: la superficie copre soltanto le prime due colonne, così
-        # Revisioni resta visibile per cambiare file senza duplicare il documento.
-        surface = DiffEditorSurface(
-            editor,
-            relative_path,
-            diff_text,
-            edit_lines,
-            diff_line,
-        )
-        surface.set_halign(Gtk.Align.START)
-        surface.set_valign(Gtk.Align.FILL)
-        surface.connect("destroy", self._on_diff_editor_destroyed)
-        self.content_overlay.add_overlay(surface)
-        self.diff_editor_surface = surface
-        self._update_preview_geometry()
-        surface.show_all()
-
-    def _on_diff_editor_destroyed(self, surface: Gtk.Widget) -> None:
-        """Forget only the internal diff-editor surface that has just closed."""
-
-        if getattr(self, "diff_editor_surface", None) is surface:
-            self.diff_editor_surface = None
+        document = self._open_experimental_file(self._workspace_repository_path(status.repository, status.path), status, focus=True)
+        if document is not None and document.experimental.mode not in {"unified", "side", "compact"}:
+            document.experimental.set_mode("compact")
 
     def _edit_status_internal(
         self, status: FileStatus, line: int | None = None
@@ -4570,79 +4530,19 @@ class SlateWindow(Gtk.ApplicationWindow):
             return self._edit_project_file_internal(relative_path)
         return self._edit_project_file_internal(relative_path, line)
 
-    def _edit_status_external(self, status: FileStatus) -> None:
-        """Open a working-copy status file in a new default gVim window."""
 
-        self._edit_project_file_external(
-            self._workspace_repository_path(status.repository, status.path)
-        )
+    def _edit_project_file_internal(self, relative_path: str, line: int | None = None) -> EditorDocument | None:
+        """Promote a selected file into a persistent editable document."""
 
-    def _edit_project_file_internal(
-        self, relative_path: str, line: int | None = None
-    ) -> EditorDocument | None:
-        """Open one safe active-project file in the persistent internal editor."""
-
-        path = self._project_file_path(relative_path)
-        project = self.config.find_project(self.active_project_name or "")
-        if path is None or project is None or not os.path.isfile(path):
-            return None
-        self._close_preview()
-        editor = self.editor_workspace.open_file(
-            project["name"], project["path"], relative_path
-        )
-        # 2026-10-12: open_file può riusare una scheda raggiunta tramite link;
-        # l'albero deve selezionare il suo percorso originale, non creare un alias.
-        editor_path = editor.relative_path
-        order_changed = self._append_project_item(project, "editor", editor_path)
-        if order_changed:
-            self.config.save()
-        # 2026-08-16: la riga creata nell'albero, non il contenitore centrale,
-        # governa sempre il cambio di vista e il focus del documento aperto.
-        self._select_tree_row(project["name"], editor_path, "editor")
-        # 2026-09-12: applicare la destinazione dopo la riattivazione finale
-        # impedisce al remap della vista di riportare lo scroll a inizio file.
-        if line is not None:
-            editor.goto_line_number(line)
+        editor = self._open_experimental_file(relative_path, focus=True)
+        if editor is not None and line is not None:
+            editor.goto_line_number(line, focus=False)
         return editor
 
-    def _edit_search_result_internal(
-        self, relative_path: str, line: int | None = None
-    ) -> EditorDocument | None:
-        """Open a search result without leaving a stale diff-editor above it."""
+    def _edit_search_result_internal(self, relative_path: str, line: int | None = None) -> EditorDocument | None:
+        """Open a search result in the shared editor and promote it for editing."""
 
-        surface = getattr(self, "diff_editor_surface", None)
-        if surface is None:
-            return self._edit_project_file_internal(relative_path, line)
-        if surface.path == relative_path:
-            if line is not None:
-                surface.editor.goto_line_number(line)
-            surface.editor.view.grab_focus()
-            return surface.editor
-        continuation = partial(
-            self._edit_project_file_internal, relative_path, line
-        )
-        if surface.finish_before_navigation(continuation):
-            return None
         return self._edit_project_file_internal(relative_path, line)
-
-    def _edit_project_file_external(self, relative_path: str) -> None:
-        """Open one safe project file with the configured external editor."""
-
-        path = self._project_file_path(relative_path)
-        project = self.config.find_project(self.active_project_name or "")
-        if path is None or project is None:
-            return
-        try:
-            command = self.config.data["settings"]["external_apps"][
-                "editor_command"
-            ]
-            # 2026-08-20: il path è sempre l'ultimo argomento separato e non può
-            # modificare il comando configurato tramite interpretazione shell.
-            spawn_detached((*command, path), cwd=project["path"])
-        except (GLib.Error, OSError) as error:
-            self._show_file_error(
-                f"Unable to open {relative_path} with the external editor: {error}"
-            )
 
     def _delete_status(self, status: FileStatus) -> None:
         """Delete one Revision path and record tracked removal in its SCM."""
