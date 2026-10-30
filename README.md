@@ -154,6 +154,23 @@ The active project keeps its terminals, open files, and web pages separate.
 The text sizes for Revisions, Files, and Editor can be adjusted in **Settings**.
 The Terminal settings control the tmux status bar.
 
+**Settings → Editor** lets you choose an installed monospaced font and its
+size, alongside syntax themes, a plain-text color, and backgrounds for added
+and removed diff lines. The font list excludes proportional families; an
+unavailable font falls back to system monospace. Font and size apply to all
+code views and the preview.
+
+The preview contains 15 lines of highlighted code, including added and removed
+lines, and updates as you make choices. The text override leaves syntax colors
+unchanged; those follow the selected theme. **Reset colors and theme** restores
+automatic colors and theme while keeping your font and size. These preferences
+apply globally and are remembered for existing and future documents.
+
+**IntelliJ Light (PhpStorm)** is bundled with SLATE and needs no separate
+installation. Additional GtkSourceView 4 XML themes can be copied to
+`~/.local/share/gtksourceview-4/styles/`; restart SLATE to find them in the theme
+selector.
+
 The **More actions** menu includes **Restart** immediately before **Quit**.
 Restart saves the window state and restarts only the GUI, retaining every tmux
 session, including idle shells. Unsaved editor files still require a save or
@@ -291,6 +308,10 @@ Files can browse directory symlinks outside the project and show their files
 in a read-only preview. Editing, terminals, context actions, and mutations are
 blocked on those external branches. Internal aliases of the same physical file
 reuse the same editor document.
+
+UTF-8 text files can be edited regardless of their extension, including
+`.hgignore`, `.gitignore`, `.env`, and extensionless files. Binary files and
+files larger than 5 MiB are rejected by the asynchronous loader.
 
 ### One editor, five views
 
