@@ -2,7 +2,7 @@
 
 import html
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, unquote, urldefrag, urlsplit
 
 from gi.repository import Gio, GLib
 
@@ -21,6 +21,7 @@ class DocumentRenderer:
         self.root = Path(root).resolve()
         self.relative_path = relative_path
         self.closed = False
+        self.resource_paths = set()
         self.cancellable = Gio.Cancellable()
         self.context = WebKit2.WebContext.new_ephemeral()
         # 2026-10-30: file:// would grant pages access beyond the project.
@@ -47,6 +48,7 @@ class DocumentRenderer:
                   "style-src 'unsafe-inline' slate-editor:; font-src slate-editor: data:; "
                   "script-src 'none'; connect-src 'none'; frame-src 'none'; "
                   "base-uri 'none'; form-action 'none'")
+        self.resource_paths.clear()
         document = '<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' \
                    + html.escape(policy, quote=True) + '">' + text
         self.uri = "slate-editor://preview/" + quote(self.relative_path, safe="/")
@@ -60,8 +62,12 @@ class DocumentRenderer:
             relative = unquote(parsed.path).lstrip("/")
             if self.closed or parsed.netloc != "preview" or ".." in Path(relative).parts:
                 raise ValueError("Resource is outside this document")
+            # 2026-10-30: il watcher di progetto invalida il rendering solo
+            # per risorse effettivamente richieste, senza monitor aggiuntivi.
+            self.resource_paths.add(relative)
             target = (self.root / relative).resolve(strict=True)
             target.relative_to(self.root)
+            self.resource_paths.add(target.relative_to(self.root).as_posix())
             if not target.is_file():
                 raise ValueError("Resource is not a file")
         except (ValueError, OSError, RuntimeError):
@@ -92,7 +98,10 @@ class DocumentRenderer:
             return False
         action = decision.get_navigation_action()
         uri = action.get_request().get_uri()
-        if not action.is_user_gesture() and uri == getattr(self, "uri", None):
+        # 2026-10-30: i frammenti dello stesso documento servono a indici e
+        # link interni, senza concedere accesso ad altre pagine o al filesystem.
+        if (kind == WebKit2.PolicyDecisionType.NAVIGATION_ACTION
+                and urldefrag(uri).url == getattr(self, "uri", None)):
             return False
         decision.ignore()
         if action.is_user_gesture() and urlsplit(uri).scheme in {"http", "https", "mailto"}:
