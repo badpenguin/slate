@@ -60,7 +60,7 @@ class SCMPanelTest(unittest.TestCase):
             self._record_view,
             self._record_edit_internal,
             self._record_edit_with_diff,
-            self._record_edit_external,
+
             self._record_delete,
             self._record_delete_missing,
         )
@@ -928,8 +928,7 @@ class SCMPanelTest(unittest.TestCase):
         self.assertEqual(self.viewed, tracked)
         self.assertTrue(press(Gdk.KEY_e))
         self.assertEqual(self.edited_internal, tracked)
-        self.assertTrue(press(Gdk.KEY_m))
-        self.assertEqual(self.edited_external, tracked)
+        self.assertFalse(press(Gdk.KEY_m))
         self.assertTrue(press(Gdk.KEY_d))
         self.assertEqual(self.diffed_repository, RepositoryRef(".", "hg"))
         self.assertEqual(self.diffed_paths, ("tracked.py",))
@@ -1046,7 +1045,6 @@ class SCMPanelTest(unittest.TestCase):
 
         for keyval in (
             Gdk.KEY_v,
-            Gdk.KEY_m,
             Gdk.KEY_e,
             Gdk.KEY_d,
             Gdk.KEY_Delete,
