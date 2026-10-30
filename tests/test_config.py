@@ -328,6 +328,28 @@ class ConfigStoreTest(unittest.TestCase):
             self.assertTrue(settings["terminal"]["status_bar"])
 
 
+    def test_editor_appearance_round_trips_valid_values_and_rejects_css_or_invalid_colors(self) -> None:
+        """Appearance stays in the global JSON as bounded RGB values and a scheme ID."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"settings": {"editor": {
+                "font_size": 17, "font_family": "JetBrains Mono", "style_scheme": "oblivion", "text_color": "#ABCDEF",
+                "diff_added_color": "#123456", "diff_removed_color": "#654321",
+            }}}))
+            store = ConfigStore(path)
+            self.assertEqual(store.data["settings"]["editor"]["text_color"], "#abcdef")
+            self.assertEqual(store.data["settings"]["editor"]["font_family"], "JetBrains Mono")
+            store.save()
+            self.assertEqual(ConfigStore(path).data["settings"]["editor"], store.data["settings"]["editor"])
+            path.write_text(json.dumps({"settings": {"editor": {
+                "font_size": 17, "font_family": "invalid\nfamily", "style_scheme": "../invalid", "text_color": "red; background: blue",
+                "diff_added_color": "#abc", "diff_removed_color": ["#123456"],
+            }}}))
+            editor = ConfigStore(path).data["settings"]["editor"]
+            self.assertEqual(editor, {"font_size": 17, "font_family": "monospace", "style_scheme": "", "text_color": None,
+                                      "diff_added_color": None, "diff_removed_color": None})
+
     def test_obsolete_external_editor_settings_are_dropped_on_save(self) -> None:
         """Old external-editor preferences disappear without losing active settings."""
 
