@@ -51,10 +51,15 @@ class EditorDocument(Gtk.Box):
         on_state: Callable[["EditorDocument"], None],
         on_removed: Callable[["EditorDocument", str], None],
         on_definition: Callable[[str, str, str], None] | None = None,
+        *,
+        historical: bool = False,
     ) -> None:
         """Build one editor and begin loading its working-copy file."""
 
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.historical = historical
+        self.previewing = False
+        self.on_edit = None
         self.project_name = project_name
         self.root = str(Path(root).resolve())
         self.relative_path = relative_path
@@ -89,7 +94,12 @@ class EditorDocument(Gtk.Box):
         self._build_search_bar()
         # 2026-08-16: l'idle lascia al workspace il tempo di registrare il child
         # prima che un path non valido possa richiederne la rimozione.
-        self.initial_load_id = GLib.idle_add(self._start_initial_load)
+        # 2026-10-30: removed-file presentations never materialize a file or
+        # monitor; their immutable repository text is loaded by the derived view.
+        if historical:
+            self.view.set_editable(False)
+        else:
+            self.initial_load_id = GLib.idle_add(self._start_initial_load)
 
     @property
     def reference(self) -> EditorRef:
@@ -158,6 +168,11 @@ class EditorDocument(Gtk.Box):
         self.path_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.path_label.set_tooltip_text(f"{self.project_name} / {self.relative_path}")
         toolbar.pack_start(self.path_label, True, True, 0)
+        # 2026-10-30: selection opens a read-only transient document; only an
+        # explicit edit action promotes it to the persistent project sidebar.
+        self.edit_button = self._tool_button("document-edit-symbolic", "Edit this file (E)", self._on_edit_clicked)
+        self.edit_button.set_no_show_all(True)
+        toolbar.pack_start(self.edit_button, False, False, 0)
         # 2026-08-16: Salva rappresenta un'azione applicabile soltanto a un
         # buffer dirty; conservarlo visibile ma disabilitato evita falsi stati.
         self.save_button = self._tool_button(
@@ -181,6 +196,14 @@ class EditorDocument(Gtk.Box):
         ):
             toolbar.pack_start(self._tool_button(icon, tooltip, callback), False, False, 0)
         self.pack_start(toolbar_container, False, False, 0)
+
+    def _on_edit_clicked(self, _button) -> None:
+        """Promote this transient document through its owning workspace."""
+
+        if self.on_edit is not None:
+            self.on_edit(self)
+            if self.experimental is not None:
+                self.experimental.focus_editor()
 
     @staticmethod
     def _tool_button(
@@ -227,6 +250,8 @@ class EditorDocument(Gtk.Box):
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.view)
+        self.source_scroller = scroller
+        self.experimental = None
         self.pack_start(scroller, True, True, 0)
 
     def _on_view_button_press(
@@ -381,7 +406,7 @@ class EditorDocument(Gtk.Box):
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             self._reject_loaded_file(
-                reason, "The file is not UTF-8: use gVim to edit it."
+                reason, "The file is not UTF-8: internal editing is unavailable."
             )
             return
         cursor_line = self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line()
@@ -401,7 +426,7 @@ class EditorDocument(Gtk.Box):
         self.external_conflict = False
         self.deleted_conflict = False
         self.force_next_save = False
-        self.view.set_editable(True)
+        self.view.set_editable(not self.previewing)
         self._ensure_monitor()
         if reason == "external":
             # Un buffer pulito può seguire il disco senza richiedere attenzione:
@@ -412,6 +437,8 @@ class EditorDocument(Gtk.Box):
             if reason == "conflict-disk":
                 self.attention = False
             self._hide_notice()
+        if self.experimental is not None:
+            self.experimental._document_ready(self.buffer)
         self.on_state(self)
         if self.pending_line is not None:
             line = self.pending_line
@@ -652,6 +679,9 @@ class EditorDocument(Gtk.Box):
 
         if callback is not None:
             self.save_callbacks.append(callback)
+        if self.historical or self.previewing:
+            self._finish_save(False)
+            return
         if self.saving:
             return
         if not self.dirty:
@@ -819,6 +849,9 @@ class EditorDocument(Gtk.Box):
     def show_search(self) -> None:
         """Reveal the search entry and seed it from the current selection."""
 
+        if self.experimental is not None and self.experimental.enabled and self.experimental.show_search():
+            return
+
         bounds = self.buffer.get_selection_bounds()
         if bounds:
             self.search_entry.set_text(self.buffer.get_text(bounds[0], bounds[1], True))
@@ -912,7 +945,9 @@ class EditorDocument(Gtk.Box):
         self.view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
         # 2026-10-13: un caricamento tardivo posiziona il cursore senza rubare
         # il focus alla sidebar o alla preview aperta nel frattempo.
-        if focus:
+        if self.experimental is not None and self.experimental.enabled and self.experimental.mode in {"unified", "compact"}:
+            self.experimental.align_line(line, focus)
+        elif focus:
             self.view.grab_focus()
         if self.line_navigation_id is not None:
             GLib.source_remove(self.line_navigation_id)
@@ -974,17 +1009,23 @@ class EditorDocument(Gtk.Box):
         if self.buffer.can_redo():
             self.buffer.redo()
 
-    def mark_activated(self) -> None:
+    def mark_activated(self, *, focus: bool = True) -> None:
         """Clear informational attention while preserving unresolved conflicts."""
 
         if not self.external_conflict:
             self.attention = False
             self.on_state(self)
-        self.view.grab_focus()
+        if focus:
+            if self.experimental is not None and self.experimental.enabled:
+                self.experimental.focus_view()
+            else:
+                self.view.grab_focus()
 
     def close(self) -> None:
         """Cancel asynchronous operations and release the retained file monitor."""
 
+        if self.experimental is not None:
+            self.experimental.shutdown()
         self.lint_serial += 1
         if self.lint_command is not None:
             self.lint_command.cancel()
@@ -1102,6 +1143,8 @@ class EditorWorkspace(Gtk.Stack):
         self.active_ref: EditorRef | None = None
         self.restoring = False
         self.next_child_id = 1
+        self.historical_document = None
+        self.preview_entry = None
         # 2026-08-16: il terminal stack resta un unico child per non ricreare o
         # spostare i Vte.Terminal; gli editor sono sibling selezionati dall'albero.
         self.add_named(terminal_page, "__terminals__")
@@ -1109,9 +1152,18 @@ class EditorWorkspace(Gtk.Stack):
         self.terminal_page = terminal_page
 
     def open_file(
-        self, project_name: str, root: str, relative_path: str
+        self, project_name: str, root: str, relative_path: str, *, focus: bool = True
     ) -> EditorDocument:
         """Create or activate the editor for one physical project file."""
+
+        preview = self.preview_entry
+        if (preview is not None and preview.project_name == project_name
+                and (Path(preview.root) / preview.relative_path).resolve() == (Path(root) / relative_path).resolve()):
+            editor = preview.document
+            self.promote(editor)
+            self.set_visible_child(editor)
+            editor.mark_activated(focus=focus)
+            return editor
 
         key = self.find_open_reference(project_name, root, relative_path)
         if key is None:
@@ -1125,11 +1177,82 @@ class EditorWorkspace(Gtk.Stack):
             entry.root = root
         editor = self._materialize(entry)
         self.set_visible_child(editor)
-        editor.mark_activated()
+        editor.mark_activated(focus=focus)
         self.active_ref = key
         self._persist()
         if created:
             self.on_collection_changed()
+        return editor
+
+    def open_preview(self, project_name: str, root: str, relative_path: str) -> EditorDocument:
+        """Reuse a pinned document or show one non-persistent read-only selection."""
+
+        existing = self.find_open_reference(project_name, root, relative_path)
+        if existing is not None:
+            return self.open_file(project_name, root, relative_path, focus=False)
+        entry = self.preview_entry
+        same = (entry is not None and entry.project_name == project_name
+                and (Path(entry.root) / entry.relative_path).resolve() == (Path(root) / relative_path).resolve())
+        if not same:
+            self._close_preview_document()
+            entry = EditorEntry(project_name, root, relative_path)
+            self.preview_entry = entry
+        editor = self._materialize(entry)
+        editor.previewing = True
+        editor.on_edit = self.promote
+        editor.view.set_editable(False)
+        editor.edit_button.show()
+        self.set_visible_child(editor)
+        self.active_ref = editor.reference
+        return editor
+
+    def promote(self, editor: EditorDocument) -> None:
+        """Pin a transient selection without reloading its buffer or changing its mode."""
+
+        if self.preview_entry is None or self.preview_entry.document is not editor:
+            return
+        entry = self.preview_entry
+        self.preview_entry = None
+        self.editors[editor.reference] = entry
+        editor.previewing = False
+        editor.view.set_editable(not editor.loading and not editor.historical)
+        editor.edit_button.hide()
+        self.active_ref = editor.reference
+        self._persist()
+        self.on_collection_changed()
+
+    def _close_preview_document(self) -> None:
+        """Release a read-only transient buffer without prompting or altering pinned tabs."""
+
+        entry = self.preview_entry
+        self.preview_entry = None
+        if entry is not None and entry.document is not None:
+            document = entry.document
+            if document.get_parent() is self:
+                self.remove(document)
+            document.close()
+            document.destroy()
+
+    def open_historical(self, project_name: str, root: str, relative_path: str) -> EditorDocument:
+        """Show a temporary read-only removed file without persisting an editor tab."""
+
+        if self.historical_document is not None:
+            previous = self.historical_document
+            previous.close()
+            self.remove(previous)
+            previous.destroy()
+        editor = EditorDocument(project_name, root, relative_path, self.font_size,
+                                self._on_editor_state, self._on_editor_removed,
+                                self.on_definition, historical=True)
+        self.historical_document = editor
+        self.add_named(editor, "__historical__")
+        # 2026-10-30: la presentazione viene collegata dal chiamante; non
+        # mappare prima il sorgente grezzo per poi sostituirlo con il diff.
+        editor.source_scroller.set_no_show_all(True)
+        editor.source_scroller.hide()
+        editor.show_all()
+        editor.info_bar.hide()
+        self.set_visible_child(editor)
         return editor
 
     def find_open_reference(
@@ -1175,6 +1298,10 @@ class EditorWorkspace(Gtk.Stack):
         child_name = f"editor-{self.next_child_id}"
         self.next_child_id += 1
         self.add_named(editor, child_name)
+        # 2026-10-30: la presentazione viene collegata dal chiamante; non
+        # mappare prima il sorgente grezzo per poi sostituirlo con il diff.
+        editor.source_scroller.set_no_show_all(True)
+        editor.source_scroller.hide()
         editor.show_all()
         editor.info_bar.hide()
         return editor
@@ -1187,7 +1314,10 @@ class EditorWorkspace(Gtk.Stack):
     def _on_editor_removed(self, editor: EditorDocument, message: str) -> None:
         """Close a missing editor row and report why it disappeared."""
 
-        self._remove_editor(editor.reference)
+        if self.preview_entry is not None and self.preview_entry.document is editor:
+            self._close_preview_document()
+        else:
+            self._remove_editor(editor.reference)
         self.on_error(message)
 
     def show_terminal(self) -> None:
@@ -1261,6 +1391,9 @@ class EditorWorkspace(Gtk.Stack):
         editor = self.current_editor()
         if editor is None or not event.state & Gdk.ModifierType.CONTROL_MASK:
             return False
+        if editor.experimental is not None and editor.experimental.enabled:
+            if editor.experimental.handle_key(event):
+                return True
         keyval = Gdk.keyval_to_lower(event.keyval)
         if keyval == Gdk.KEY_s:
             editor.save()
@@ -1285,6 +1418,17 @@ class EditorWorkspace(Gtk.Stack):
     def request_close(self, editor: EditorDocument) -> bool:
         """Close one editor immediately or protect its unsaved buffer."""
 
+        if self.preview_entry is not None and self.preview_entry.document is editor:
+            self._close_preview_document()
+            self.show_terminal()
+            return True
+        if editor is self.historical_document:
+            editor.close()
+            self.remove(editor)
+            editor.destroy()
+            self.historical_document = None
+            self.show_terminal()
+            return True
         if not editor.dirty:
             self._remove_editor(editor.reference)
             return True
@@ -1374,6 +1518,8 @@ class EditorWorkspace(Gtk.Stack):
     ) -> None:
         """Protect dirty project editors before project removal."""
 
+        if self.preview_entry is not None and self.preview_entry.project_name == project_name:
+            self._close_preview_document()
         entries = [
             entry
             for entry in self.editors.values()
@@ -1443,7 +1589,10 @@ class EditorWorkspace(Gtk.Stack):
         """Apply one editor font size to current and future documents."""
 
         self.font_size = points
-        for entry in self.editors.values():
+        entries = list(self.editors.values())
+        if self.preview_entry is not None:
+            entries.append(self.preview_entry)
+        for entry in entries:
             if entry.document is not None:
                 entry.document.set_font_size(points)
 
@@ -1507,6 +1656,9 @@ class EditorWorkspace(Gtk.Stack):
     def shutdown(self) -> None:
         """Release every editor monitor during final window destruction."""
 
+        self._close_preview_document()
+        if self.historical_document is not None:
+            self.historical_document.close()
         for entry in tuple(self.editors.values()):
             if entry.document is not None:
                 entry.document.close()
