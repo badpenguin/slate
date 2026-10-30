@@ -436,7 +436,6 @@ class ProjectSearch(Gtk.Box):
         on_close: Callable[[], None],
         on_view: Callable[[str], None],
         on_edit_internal: Callable[[str, int | None], None],
-        on_edit_external: Callable[[str], None],
         can_open_meld: Callable[[str], bool],
         on_open_meld: Callable[[str], None],
         on_definition: Callable[[str, str, str], None] | None = None,
@@ -447,7 +446,6 @@ class ProjectSearch(Gtk.Box):
         self.on_close = on_close
         self.on_view = on_view
         self.on_edit_internal = on_edit_internal
-        self.on_edit_external = on_edit_external
         self.can_open_meld = can_open_meld
         self.on_open_meld = on_open_meld
         self.on_definition = on_definition
@@ -990,12 +988,7 @@ class ProjectSearch(Gtk.Box):
                 Gdk.KEY_e,
                 self._on_context_edit_internal,
             ),
-            (
-                "Edit in external editor",
-                "accessories-text-editor",
-                Gdk.KEY_m,
-                self._on_context_edit_external,
-            ),
+
             ("Open in Meld", "document-open", Gdk.KEY_d, self._on_context_meld),
         ):
             item = self._menu_item(label, icon, keyval)
@@ -1129,9 +1122,6 @@ class ProjectSearch(Gtk.Box):
             # ricerca, che va chiuso per rendere visibile il documento aperto.
             self.on_close()
             return True
-        if keyval == Gdk.KEY_m:
-            self.on_edit_external(result.path)
-            return True
         if keyval == Gdk.KEY_d:
             if self.can_open_meld(result.path):
                 self.on_open_meld(result.path)
@@ -1153,11 +1143,6 @@ class ProjectSearch(Gtk.Box):
             )
             self.on_close()
 
-    def _on_context_edit_external(self, _item: Gtk.MenuItem) -> None:
-        """Open the contextual result with the configured external editor."""
-
-        if self.context_result is not None:
-            self.on_edit_external(self.context_result.path)
 
     def _on_context_meld(self, _item: Gtk.MenuItem) -> None:
         """Open Meld only when the contextual result owns a tracked patch."""
