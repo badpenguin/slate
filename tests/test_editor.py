@@ -521,6 +521,10 @@ class EditorTest(unittest.TestCase):
                 owner.project_search.get_visible.return_value = False
                 owner._close_preview = SlateWindow._close_preview.__get__(owner)
                 owner._edit_status_internal = SlateWindow._edit_status_internal.__get__(owner)
+                owner._open_experimental_file = SlateWindow._open_experimental_file.__get__(owner)
+                owner._configure_experimental = SlateWindow._configure_experimental.__get__(owner)
+                owner.scm_by_repository = {}
+                owner._search_result_status = MagicMock(return_value=None)
                 owner._edit_project_file_internal = SlateWindow._edit_project_file_internal.__get__(owner)
                 preview.on_action = SlateWindow._handle_file_preview_action.__get__(owner)
                 SlateWindow._protect_preview_background(owner)
@@ -569,6 +573,7 @@ class EditorTest(unittest.TestCase):
         """The complete Ctrl shortcut matrix reaches only its intended command."""
 
         editor = MagicMock()
+        editor.experimental = None
         editor.go_to_definition.return_value = True
         owner = SimpleNamespace(
             current_editor=MagicMock(return_value=editor),
