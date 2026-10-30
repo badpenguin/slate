@@ -14,7 +14,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk
 
-from slate.editor import EditorWorkspace
+from slate.editor import EditorEntry, EditorWorkspace
 from slate.editor_diff_model import project_diff
 from slate.experimental_editor import ExperimentalEditor
 from slate.scm.base import FileStatus, RepositoryRef
@@ -111,6 +111,68 @@ class UnifiedLifecycleTest(unittest.TestCase):
             self.assertIn("12px", view.projection.get_text(
                 view.projection.get_start_iter(), view.projection.get_end_iter(), True))
             self.assertFalse(view.split.get_child_visible())
+
+    def test_unknown_mime_text_files_open_and_promote_through_the_real_window_route(self) -> None:
+        """Ignore files, dotfiles and extensionless UTF-8 text remain editable without MIME guesses."""
+
+        owner = SimpleNamespace(
+            active_project_name="project", config=SimpleNamespace(find_project=MagicMock(
+                return_value={"name": "project", "path": str(self.root)})),
+            scm_by_repository={}, editor_workspace=self.workspace, get_focus=MagicMock(return_value=None),
+            _show_file_error=MagicMock(), _close_preview=MagicMock(), _select_tree_row=MagicMock(),
+            _search_result_status=MagicMock(return_value=None),
+        )
+        owner._project_file_path = SlateWindow._project_file_path.__get__(owner)
+        owner._configure_experimental = SlateWindow._configure_experimental.__get__(owner)
+        for relative in (".hgignore", ".gitignore", ".env", "notes-without-extension"):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.write_text("# Plain UTF-8 text\npattern\n")
+                document = SlateWindow._open_experimental_file(owner, relative)
+                self.assertIsNotNone(document)
+                self._loaded(document)
+                self.assertTrue(document.previewing)
+                promoted = SlateWindow._open_experimental_file(owner, relative, focus=True)
+                self.assertIs(promoted, document)
+                self.assertTrue(document.view.get_editable())
+                document.buffer.insert(document.buffer.get_end_iter(), "edited\n")
+                saved = []
+                document.save(saved.append)
+                deadline = time.monotonic() + 3
+                context = GLib.MainContext.default()
+                while not saved and time.monotonic() < deadline:
+                    while context.pending():
+                        context.iteration(False)
+                    time.sleep(0.002)
+                self.assertEqual(saved, [True])
+                self.assertEqual(path.read_text(), "# Plain UTF-8 text\npattern\nedited\n")
+
+    def test_unknown_mime_binary_files_are_still_rejected_by_the_loader(self) -> None:
+        """Accepting an unknown filename never makes NUL-containing binary contents editable."""
+
+        path = self.root / "unknown-data"
+        path.write_bytes(b"binary\0contents")
+        owner = SimpleNamespace(
+            active_project_name="project", config=SimpleNamespace(find_project=MagicMock(
+                return_value={"name": "project", "path": str(self.root)})),
+            scm_by_repository={}, editor_workspace=self.workspace, get_focus=MagicMock(return_value=None),
+            _show_file_error=MagicMock(), _close_preview=MagicMock(), _select_tree_row=MagicMock(),
+            _search_result_status=MagicMock(return_value=None),
+        )
+        owner._project_file_path = SlateWindow._project_file_path.__get__(owner)
+        owner._configure_experimental = SlateWindow._configure_experimental.__get__(owner)
+        document = SlateWindow._open_experimental_file(owner, "unknown-data")
+        self.assertIsNotNone(document)
+        deadline = time.monotonic() + 3
+        context = GLib.MainContext.default()
+        while self.workspace.preview_entry is not None and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            time.sleep(0.002)
+        self.assertIsNone(self.workspace.preview_entry)
+        self.assertEqual(self.workspace.editors, {})
+        self.assertIn("Binary file", self.workspace.on_error.call_args.args[0])
+        self.assertEqual(path.read_bytes(), b"binary\0contents")
 
     def test_selection_is_readonly_and_never_creates_a_project_tab(self) -> None:
         """Selecting a file must not persist an editor or expose a writable buffer."""
@@ -257,6 +319,36 @@ class UnifiedLifecycleTest(unittest.TestCase):
         self.assertEqual(self.workspace.renaming_paths, set())
         self.assertEqual(document.relative_path, "file.css")
         owner._show_file_error.assert_called_once()
+
+    def test_appearance_updates_existing_temporary_historical_and_future_documents_lazily(self) -> None:
+        """Global appearance reaches every document category without loading unopened entries."""
+
+        (self.root / "pinned.css").write_text("pinned {}")
+        pinned = self.workspace.open_file("project", str(self.root), "pinned.css", focus=False)
+        self._loaded(pinned)
+        preview = self.workspace.open_preview("project", str(self.root), "file.css")
+        self._loaded(preview)
+        historical = self.workspace.open_historical("project", str(self.root), "deleted.css")
+        lazy = EditorEntry("project", str(self.root), "lazy.css")
+        self.workspace.editors[("project", "lazy.css")] = lazy
+        appearance = {"font_family": "monospace", "style_scheme": "oblivion", "text_color": "#aabbcc",
+                      "diff_added_color": "#123456", "diff_removed_color": "#654321"}
+        self.workspace.set_appearance(appearance)
+        for document in (pinned, preview, historical):
+            self.assertEqual(document.appearance, appearance)
+            self.assertEqual(document.buffer.get_style_scheme().get_id(), "oblivion")
+        self.workspace.set_font_size(18)
+        for document in (pinned, preview, historical):
+            self.assertEqual(document.font_size, 18)
+        self.assertIsNone(lazy.document)
+        self.assertTrue(preview.previewing)
+        self.assertTrue(historical.historical)
+        (self.root / "future.css").write_text("future {}")
+        future = self.workspace.open_file("project", str(self.root), "future.css", focus=False)
+        self._loaded(future)
+        self.assertEqual(future.appearance, appearance)
+        self.assertEqual(future.font_size, 18)
+        self.assertEqual(future.buffer.get_style_scheme().get_id(), "oblivion")
 
     def test_alias_promotion_and_next_selection_do_not_duplicate_or_pin(self) -> None:
         """A symlink alias promotes the original reference and another selection stays transient."""
