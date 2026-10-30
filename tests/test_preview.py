@@ -183,7 +183,7 @@ class FilePreviewTest(unittest.TestCase):
         preview = FilePreview(self._ignore_close, on_action=actions.append)
         preview.current_path = "src/app.php"
         for keyval in (
-            Gdk.KEY_v, Gdk.KEY_e, Gdk.KEY_m, Gdk.KEY_d,
+            Gdk.KEY_v, Gdk.KEY_e, Gdk.KEY_d,
             Gdk.KEY_r, Gdk.KEY_a, Gdk.KEY_space,
             Gdk.KEY_Delete, Gdk.KEY_F5,
         ):
@@ -194,7 +194,7 @@ class FilePreviewTest(unittest.TestCase):
         self.assertEqual(
             actions,
             [
-                "view", "edit-internal", "edit-external", "meld",
+                "view", "edit-internal", "meld",
                 "rename", "add", "toggle-selection", "delete", "refresh",
             ],
         )
