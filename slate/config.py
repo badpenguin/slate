@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .editor_preferences import EDITOR_APPEARANCE_DEFAULTS, normalize_editor_appearance
+
 
 @dataclass(frozen=True, slots=True)
 class BrowserViewportPreset:
@@ -64,7 +66,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "general": {"close_to_tray": True},
         "revisions": {"font_size": 10},
         "files": {"font_size": 10},
-        "editor": {"font_size": 10},
+        "editor": {"font_size": 10, **EDITOR_APPEARANCE_DEFAULTS},
         "terminal": {"status_bar": False},
         "commands": {"items": []},
     },
@@ -264,6 +266,7 @@ class ConfigStore:
                     data["settings"][section]["font_size"] = _normalize_font_size(
                         raw_section.get("font_size"), fallback
                     )
+            data["settings"]["editor"].update(normalize_editor_appearance(raw_settings.get("editor")))
             # 2026-10-30: la vecchia sezione external_apps non viene più
             # importata: gVim è stato rimosso e il prossimo salvataggio ne elimina
             # le preferenze obsolete senza modificare le impostazioni in uso.
