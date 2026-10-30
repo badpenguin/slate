@@ -175,7 +175,7 @@ class ProjectSearchTest(unittest.TestCase):
             self._ignore_close,
             self.viewed.append,
             self._edit_internal,
-            self.edited_external.append,
+
             self._can_meld,
             self.melded.append,
         )
@@ -266,11 +266,10 @@ class ProjectSearchTest(unittest.TestCase):
         with patch.object(self.search, "_load_preview"):
             self.assertTrue(press(Gdk.KEY_v))
             self.assertTrue(press(Gdk.KEY_e))
-            self.assertTrue(press(Gdk.KEY_m))
+            self.assertFalse(press(Gdk.KEY_m))
             self.assertTrue(press(Gdk.KEY_d))
         self.assertEqual(self.viewed, ["src/app.py"])
         self.assertEqual(self.edited_internal, [("src/app.py", 4)])
-        self.assertEqual(self.edited_external, ["src/app.py"])
         self.assertEqual(self.melded, ["src/app.py"])
         self.assertEqual(self.close_count, 1)
 
@@ -290,11 +289,10 @@ class ProjectSearchTest(unittest.TestCase):
 
         self.assertTrue(press(Gdk.KEY_v))
         self.assertTrue(press(Gdk.KEY_e))
-        self.assertTrue(press(Gdk.KEY_m))
+        self.assertFalse(press(Gdk.KEY_m))
         self.assertTrue(press(Gdk.KEY_d))
         self.assertEqual(self.viewed, ["src/app.py"])
         self.assertEqual(self.edited_internal, [("src/app.py", 4)])
-        self.assertEqual(self.edited_external, ["src/app.py"])
         self.assertEqual(self.melded, ["src/app.py"])
 
     def test_ctrl_b_in_search_preview_resolves_symbol_in_rendered_file(self) -> None:
