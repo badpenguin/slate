@@ -58,7 +58,7 @@ class SettingsDialogTest(unittest.TestCase):
             self._record_change,
             self._record_close_to_tray_change,
             self._record_status_change,
-            self._record_external_editor_change,
+
             self._record_command_change,
         )
 
@@ -109,10 +109,7 @@ class SettingsDialogTest(unittest.TestCase):
         self.assertFalse(self.dialog.status_bar_switch.get_active())
         self.dialog.status_bar_switch.set_active(True)
         self.assertEqual(self.status_changes, [True])
-        self.assertEqual(self.dialog.external_editor_entry.get_text(), "gvim -f")
-        self.dialog.external_editor_entry.set_text("code --wait")
-        self.dialog.external_editor_entry.emit("activate")
-        self.assertEqual(self.external_editor_changes, [["code", "--wait"]])
+        self.assertFalse(hasattr(self.dialog, "external_editor_entry"))
 
     def test_command_validation_and_reordering_publish_snapshots(self) -> None:
         """Commands validate labels and publish their explicit list order."""
@@ -174,13 +171,6 @@ class SettingsDialogTest(unittest.TestCase):
             chooser.destroy()
             editor.destroy()
 
-    def test_invalid_external_editor_command_restores_previous_value(self) -> None:
-        """An incomplete quoted command never reaches persistent settings."""
-
-        self.dialog.external_editor_entry.set_text("editor '")
-        self.dialog.external_editor_entry.emit("activate")
-        self.assertEqual(self.dialog.external_editor_entry.get_text(), "gvim -f")
-        self.assertEqual(self.external_editor_changes, [])
 
     def test_fixed_browser_viewports_are_not_exposed_as_settings(self) -> None:
         """The settings sidebar omits the non-editable browser catalog."""
@@ -192,7 +182,7 @@ class SettingsDialogTest(unittest.TestCase):
             for child in content.get_children()
             if isinstance(child, Gtk.Stack)
         )
-        self.assertIsNotNone(stack.get_child_by_name("external-apps"))
+        self.assertIsNone(stack.get_child_by_name("external-apps"))
         self.assertIsNotNone(stack.get_child_by_name("commands"))
         self.assertIsNone(stack.get_child_by_name("browser"))
 
