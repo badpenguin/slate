@@ -85,7 +85,6 @@ class SCMPanel(Gtk.Box):
         on_view: Callable[[FileStatus], None],
         on_edit_internal: Callable[[FileStatus], None],
         on_edit_with_diff: Callable[[FileStatus], None],
-        on_edit_external: Callable[[FileStatus], None],
         on_delete: Callable[[FileStatus], None],
         on_delete_missing: Callable[[list[FileStatus]], None] | None = None,
     ) -> None:
@@ -108,7 +107,6 @@ class SCMPanel(Gtk.Box):
         self.on_view = on_view
         self.on_edit_internal = on_edit_internal
         self.on_edit_with_diff = on_edit_with_diff
-        self.on_edit_external = on_edit_external
         self.on_delete = on_delete
         self.on_delete_missing = on_delete_missing
         self.status_by_path: dict[str, FileStatus] = {}
@@ -1535,13 +1533,9 @@ class SCMPanel(Gtk.Box):
             diff_editor_item = self._menu_item(
                 "Edit with diff…", "text-x-patch", None
             )
-            external_item = self._menu_item(
-                "Edit in gVim", "gvim", Gdk.KEY_m
-            )
             view_item.connect("activate", self._on_context_view)
             internal_item.connect("activate", self._on_context_edit_internal)
             diff_editor_item.connect("activate", self._on_context_edit_with_diff)
-            external_item.connect("activate", self._on_context_edit_external)
             menu.append(view_item)
             menu.append(internal_item)
             if (
@@ -1550,7 +1544,6 @@ class SCMPanel(Gtk.Box):
                 not in {"untracked", "added", "missing", "removed"}
             ):
                 menu.append(diff_editor_item)
-            menu.append(external_item)
             # 2026-08-20: il menu del file espone lo stesso percorso Meld già
             # usato dal doppio clic, soltanto quando esiste una patch tracciata.
             if (
@@ -1759,11 +1752,6 @@ class SCMPanel(Gtk.Box):
             self._cancel_pending_preview()
             self.on_edit_internal(status)
             return True
-        if keyval == Gdk.KEY_m:
-            if multiple:
-                return True
-            self.on_edit_external(status)
-            return True
         if keyval == Gdk.KEY_d:
             if multiple:
                 return True
@@ -1853,11 +1841,6 @@ class SCMPanel(Gtk.Box):
         if self.context_status:
             self.on_edit_with_diff(self.context_status)
 
-    def _on_context_edit_external(self, _item: Gtk.MenuItem) -> None:
-        """Open the contextual file in a separate gVim window."""
-
-        if self.context_status:
-            self.on_edit_external(self.context_status)
 
     def _on_context_delete(self, _item: Gtk.MenuItem) -> None:
         """Request confirmed deletion of the contextual working-copy file."""
