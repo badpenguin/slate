@@ -15,7 +15,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk
 
 from slate.editor import EditorWorkspace
-from slate.editor_diff_model import project_diff, compact_rows
+from slate.editor_diff_model import project_diff
 from slate.experimental_editor import ExperimentalEditor
 from slate.scm.base import FileStatus, RepositoryRef
 from slate.processes import CommandResult
@@ -70,7 +70,7 @@ class UnifiedLifecycleTest(unittest.TestCase):
         owner = SimpleNamespace(scm_by_repository={("project", RepositoryRef(".", "hg")): scm})
         before = "a { width: 10px; }\n"
         with patch("slate.experimental_editor.run_async") as run:
-            SlateWindow._configure_experimental(owner, document, FileStatus("file.css", "modified"), preserve_mode=True)
+            SlateWindow._configure_experimental(owner, document, FileStatus("file.css", "modified"))
             view = document.experimental
             self.assertTrue(view.automatic)
             self.assertEqual(view.mode, "compact")
