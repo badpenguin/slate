@@ -1,6 +1,9 @@
 """Verify independent syntax styles in Unified and Side by side without GTK windows."""
 
 import tempfile
+import fnmatch
+import tomllib
+from pathlib import Path
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -159,6 +162,79 @@ class DiffSyntaxTest(unittest.TestCase):
         self.assertFalse(self.view.old_tag.get_property("foreground-set"))
         rgba = self.view.new_tag.get_property("background-rgba")
         self.assertLess(rgba.red, 0.3)
+
+    def test_user_colors_do_not_override_syntax_and_apply_to_all_diff_modes(self) -> None:
+        """Plain text uses the custom color while native/copied token colors retain their theme."""
+
+        buffer = self.editor.buffer
+        self.editor.set_appearance({"style_scheme": "oblivion", "text_color": "#aabbcc",
+                                    "diff_added_color": "#123456", "diff_removed_color": "#654321"})
+        self._flush_syntax()
+        visual = self.view.projection.get_text(
+            self.view.projection.get_start_iter(), self.view.projection.get_end_iter(), True)
+        self.assertIs(self.editor.buffer, buffer)
+        self.assertEqual(buffer.get_style_scheme().get_id(), "oblivion")
+        self.assertEqual(self._foreground_at(self.view.projection, visual.index("14")),
+                         self._foreground_at(buffer, self.current.index("14")))
+        self.assertFalse(self.view.tags["added"].get_property("foreground-set"))
+        for view in (self.editor.view, self.view.old_view, self.view.projection_view):
+            color = view.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+            self.assertAlmostEqual(color.red, 0xaa / 255, places=3)
+        for mode in ("compact", "side", "unified"):
+            self.view.set_mode(mode)
+            added = self.view.tags["added"].get_property("background-rgba")
+            removed = self.view.tags["removed"].get_property("background-rgba")
+            self.assertAlmostEqual(added.red, 0x12 / 255, places=3)
+            self.assertAlmostEqual(removed.red, 0x65 / 255, places=3)
+        self.editor.set_appearance({})
+        self.assertIsNone(self.editor.appearance["text_color"])
+        self.assertIs(self.editor.buffer, buffer)
+
+    def test_monospace_font_and_size_reach_every_code_view_without_affecting_syntax(self) -> None:
+        """All native and projected views share the selected fixed-width family and size provider."""
+
+        from slate.editor_appearance import editor_font_css, monospaced_font_families
+        chosen = monospaced_font_families()[0]
+        source = self.editor.buffer
+        self.editor.set_appearance({"font_family": chosen, "style_scheme": "oblivion"})
+        self.editor.set_font_size(17)
+        self._flush_syntax()
+        self.assertIs(self.editor.buffer, source)
+        for view in (self.editor.view, self.view.old_view, self.view.projection_view):
+            font = view.get_style_context().get_property("font", Gtk.StateFlags.NORMAL)
+            self.assertIn(chosen, font.get_family())
+        css = self.editor.font_provider.to_string()
+        self.assertIn(chosen, css)
+        self.assertIn("17pt", css)
+        self.assertIsNotNone(self._foreground_at(source, self.current.index("14")))
+        self.assertEqual(editor_font_css({"font_family": "missing-family-for-slate-test"}, 12),
+                         b"textview { font-family: monospace; font-size: 12pt; }")
+        proportional = next(family.get_name() for family in self.editor.view.get_pango_context().list_families()
+                            if not family.is_monospace())
+        self.assertEqual(editor_font_css({"font_family": proportional}, 12),
+                         b"textview { font-family: monospace; font-size: 12pt; }")
+
+    def test_bundled_intellij_theme_loads_without_the_personal_theme_directory(self) -> None:
+        """The shipped XML is discoverable on a clean installation and included in package data."""
+
+        from slate.editor_appearance import editor_scheme_manager
+        project = Path(__file__).resolve().parent.parent
+        bundled = project / "slate" / "styles"
+        classic = GtkSource.StyleSchemeManager.get_default().get_scheme("classic")
+        manager = GtkSource.StyleSchemeManager()
+        manager.set_search_path([str(bundled), str(Path(classic.get_filename()).parent)])
+        scheme = manager.get_scheme("intellij-light")
+        self.assertIsNotNone(scheme)
+        self.assertEqual(Path(scheme.get_filename()), bundled / "intellij-light.xml")
+        self.assertEqual(scheme.get_style("php:variable").get_property("foreground").lower(), "#660000")
+        self.assertEqual(scheme.get_style("def:string").get_property("foreground").lower(), "#067d17")
+        self.assertTrue(scheme.get_style("def:comment").get_property("italic"))
+        metadata = tomllib.loads((project / "pyproject.toml").read_text())
+        patterns = metadata["tool"]["setuptools"]["package-data"]["slate"]
+        self.assertTrue(any(fnmatch.fnmatch("styles/intellij-light.xml", pattern) for pattern in patterns))
+        shared = editor_scheme_manager()
+        editor_scheme_manager()
+        self.assertEqual(shared.get_search_path().count(str(bundled)), 1)
 
     def test_hidden_lexers_are_parsed_in_bounded_line_chunks(self) -> None:
         """Large versions yield between parser chunks instead of forcing the entire file at once."""
