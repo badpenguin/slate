@@ -739,7 +739,7 @@ class GitRepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestC
         self._complete(4, "feature\n")
         self.assertEqual(self.calls[5][0][:3], ["git", "status", "--porcelain=v2"])
 
-    def test_git_ref_change_only_invalidates_explicit_remote_status(self) -> None:
+    def test_git_ref_change_refreshes_local_base_without_remote_commands(self) -> None:
         """A moved Git ref never authorizes an automatic remote command."""
 
         self._finish_startup()
@@ -747,7 +747,11 @@ class GitRepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestC
         self.watcher._on_metadata_change(".git/refs/heads/main", 0)
         self._drain_main_context()
         self.watcher.on_history_change.assert_called_once_with()
-        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(self.calls[3][0][:3], ["git", "status", "--porcelain=v2"])
+        published = len(self.statuses)
+        self._complete(3)
+        self.assertEqual(len(self.statuses), published + 1)
 
 
 if __name__ == "__main__":
