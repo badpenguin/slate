@@ -13,6 +13,7 @@ from gi.repository import Gdk, GLib, GObject, Gtk, GtkSource
 from .browser import WebKit2
 from .editor_diff_model import DiffRow, compact_rows
 from .editor_render import DocumentRenderer
+from .editor_syntax import DiffSyntaxHighlighter
 from .processes import run_async
 from .text_search import TextSearchBar
 
@@ -154,12 +155,13 @@ class ExperimentalEditor(Gtk.Box):
         unified_box.pack_start(self.projection_search, False, False, 0)
         self.stack.add_named(unified_box, "unified")
         self.tags = {}
-        for name, color in (("added", "#d8f2d8"), ("removed", "#f8d7da")):
+        for name, color in (("added", "#a8eba8"), ("removed", "#f5a3ab")):
             self.tags[name] = self.projection.create_tag(name, background=color, foreground="#172017",
                                                         editable=name != "removed")
         self.tags["omitted"] = self.projection.create_tag("omitted", foreground="#777777", editable=False)
-        self.new_tag = editor.buffer.create_tag(None, background="#d8f2d8", foreground="#172017")
-        self.old_tag = self.old_buffer.create_tag(None, background="#f8d7da", foreground="#172017")
+        self.new_tag = editor.buffer.create_tag(None, background="#a8eba8")
+        self.old_tag = self.old_buffer.create_tag(None, background="#f5a3ab")
+        self.syntax = DiffSyntaxHighlighter(self)
         self.changed_id = editor.buffer.connect("changed", self._document_changed)
         self.loaded_id = editor.buffer.connect("modified-changed", self._document_ready)
         editor.view.connect("map", self._view_mapped)
@@ -378,6 +380,7 @@ class ExperimentalEditor(Gtk.Box):
         if not self.enabled:
             return
         self.notice.hide()
+        self.syntax.configure(self.mode)
         if (self.automatic and not self.initial_chosen) or (
                 self.mode in {"unified", "compact", "side"} and self.rows_serial < 0):
             self.stack.set_visible_child_name("loading")
@@ -653,6 +656,7 @@ class ExperimentalEditor(Gtk.Box):
             adjustment.set_value(scroll)
         finally:
             self.syncing = False
+        self.syntax.projection_changed()
 
     def _live_ranges(self, start: int, end: int):
         """Map visual intersections onto canonical offsets, excluding historical text."""
@@ -854,7 +858,7 @@ class ExperimentalEditor(Gtk.Box):
         """Decorate both versions without replacing the editable source contents."""
 
         self._clear_diff_tags()
-        self.old_buffer.remove_all_tags(self.old_buffer.get_start_iter(), self.old_buffer.get_end_iter())
+        self.old_buffer.remove_tag(self.old_tag, self.old_buffer.get_start_iter(), self.old_buffer.get_end_iter())
         for span in self.spans:
             if span.kind == "added" and span.start is not None:
                 self.editor.buffer.apply_tag(self.new_tag, self.editor.buffer.get_iter_at_mark(span.start),
@@ -1144,6 +1148,7 @@ class ExperimentalEditor(Gtk.Box):
         """Restart calculations when a previously hidden document is selected."""
 
         if self.enabled:
+            self.syntax.queue()
             # 2026-10-30: Gtk.Stack conserva già la vista; rimapparla non deve
             # ricostruire il diff pronto né mostrarne uno stato intermedio.
             self.schedule()
@@ -1151,6 +1156,7 @@ class ExperimentalEditor(Gtk.Box):
     def _unmapped(self, _editor) -> None:
         """Keep hidden documents free of recalculation timers and workers."""
 
+        self.syntax.pause()
         if self.first_scroll_id is not None:
             GLib.source_remove(self.first_scroll_id)
             self.first_scroll_id = None
@@ -1163,6 +1169,7 @@ class ExperimentalEditor(Gtk.Box):
         """Release derived resources without saving or closing the canonical document."""
 
         self.closed = True
+        self.syntax.close()
         self._unmapped(self.editor)
         self.base_serial += 1
         if self.base_command is not None:
