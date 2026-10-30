@@ -243,6 +243,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._open_terminal_in_project_directory,
             self._delete_project_file,
             self._save_file_manager_preferences,
+            on_file_change=self._editor_resource_changed,
         )
         settings = self.config.data["settings"]
         self._update_tray_icon(bool(settings["general"]["close_to_tray"]))
@@ -549,6 +550,24 @@ class SlateWindow(Gtk.ApplicationWindow):
         )
         dialog.show_all()
 
+
+    def _editor_resource_changed(self, project_name: str, relative_path: str) -> None:
+        """Invalidate used render resources from either SCM or supplemental file monitors."""
+
+        # 2026-10-30: conservare la cache HTML finché non cambia una sua
+        # dipendenza locale, usando il watcher già condiviso dal progetto.
+        documents = [entry.document for entry in self.editor_workspace.editors.values()]
+        if self.editor_workspace.preview_entry is not None:
+            documents.append(self.editor_workspace.preview_entry.document)
+        historical = getattr(self.editor_workspace, "historical_document", None)
+        if historical is not None:
+            documents.append(historical)
+        for document in documents:
+            if document is None or document.project_name != project_name:
+                continue
+            presentation = document.experimental
+            if presentation is not None and getattr(presentation, "renderer", None) is not None:
+                presentation.resource_changed(relative_path)
 
     def _configure_experimental(self, document: EditorDocument, status: FileStatus | None = None) -> None:
         """Attach one lazy presentation to the already registered physical document."""
@@ -1590,11 +1609,22 @@ class SlateWindow(Gtk.ApplicationWindow):
             entries = list(self.editor_workspace.editors.values())
             if self.editor_workspace.preview_entry is not None:
                 entries.append(self.editor_workspace.preview_entry)
-            for entry in entries:
-                document = entry.document
-                if document is not None and document.project_name == repo_key[0] and document.experimental is not None:
-                    document.experimental.base_identity = None
-                    self._configure_experimental(document)
+            documents = [entry.document for entry in entries]
+            historical = getattr(self.editor_workspace, "historical_document", None)
+            if historical is not None:
+                documents.append(historical)
+            for document in documents:
+                if (document is not None and document.project_name == repo_key[0]
+                        and document.experimental is not None
+                        and getattr(document.experimental, "repository_root", None) == scm.root
+                        and document.get_mapped()):
+                    # 2026-10-30: configure_base riusa la base già valida. I
+                    # documenti nascosti si riallineano alla prossima apertura.
+                    historical_status = getattr(document, "history_status", None)
+                    if historical_status is not None:
+                        self._configure_experimental(document, historical_status)
+                    else:
+                        self._configure_experimental(document)
             if repo_key[0] == self.active_project_name:
                 self.panel.update_status(qualified, branch, repo_key[1])
                 self._update_active_revision_count()
@@ -1617,6 +1647,7 @@ class SlateWindow(Gtk.ApplicationWindow):
 
             workspace_path = self._workspace_repository_path(repo_key[1].path, relative)
             self.file_manager.project_filesystem_changed(repo_key[0], workspace_path)
+            self._editor_resource_changed(repo_key[0], workspace_path)
 
         def ignored_changed(
             ignored: set[str], repo_key: tuple[str, RepositoryRef] = key
@@ -1639,6 +1670,21 @@ class SlateWindow(Gtk.ApplicationWindow):
             self.panel.set_project_remote_status(
                 repo_key[0], repo_key[1], RepositorySyncStatus()
             )
+            # 2026-10-30: invalidare solo il repository proprietario, senza
+            # avviare letture mentre la transazione SCM può essere ancora attiva.
+            entries = list(self.editor_workspace.editors.values())
+            if self.editor_workspace.preview_entry is not None:
+                entries.append(self.editor_workspace.preview_entry)
+            documents = [entry.document for entry in entries]
+            historical = getattr(self.editor_workspace, "historical_document", None)
+            if historical is not None:
+                documents.append(historical)
+            for document in documents:
+                presentation = document.experimental if document is not None else None
+                if (document is not None and document.project_name == repo_key[0]
+                        and presentation is not None
+                        and getattr(presentation, "repository_root", None) == scm.root):
+                    presentation.base_identity = None
 
         # 2026-08-26: ogni working copy mantiene un solo watcher, ma dopo
         # un'ora di inattività il progetto può ricrearlo riusando adapter e
@@ -4065,7 +4111,7 @@ class SlateWindow(Gtk.ApplicationWindow):
                 """Advance only after success and retain all unprocessed targets."""
 
                 if watcher is not None:
-                    watcher.request_full()
+                    watcher.request_full(refresh_base=True)
                 if not result.ok:
                     self.panel.set_commit_busy(False)
                     detail = result.stderr.strip() or "Commit failed."
@@ -4730,6 +4776,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         if new_relative is None or destination_path is None:
             return
+        if not self.editor_workspace.set_rename_pending(project_name, relative_path, True):
+            self._show_file_error("A save or rename is in progress for this path. Wait for it to finish and retry.")
+            return
         # 2026-08-16: il rename resta nella directory corrente, così la nuova
         # scorciatoia non diventa implicitamente anche un'operazione di spostamento.
         self.project_file_operations.rename_entry(
@@ -4752,6 +4801,9 @@ class SlateWindow(Gtk.ApplicationWindow):
     ) -> None:
         """Reconcile editors and filesystem views after an asynchronous rename."""
 
+        # 2026-10-30: il move è terminato; il main loop aggiorna l'identità
+        # subito dopo, prima che possano partire altri salvataggi da tastiera.
+        self.editor_workspace.set_rename_pending(project_name, old_relative, False)
         if error is not None:
             self._show_file_error(
                 f"Failed to rename {old_relative}: {error}"
