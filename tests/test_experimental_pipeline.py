@@ -14,6 +14,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gio, GLib
 
 from slate.editor_render import DocumentRenderer
+from slate.browser import WebKit2
 from slate.processes import run_async
 from slate.scm.base import FileStatus
 from slate.window import SlateWindow
@@ -65,6 +66,7 @@ class ExperimentalPipelineTest(unittest.TestCase):
             renderer = DocumentRenderer.__new__(DocumentRenderer)
             renderer.root = root
             renderer.closed = False
+            renderer.resource_paths = set()
             renderer.cancellable = Gio.Cancellable()
             with patch("slate.editor_render.Gio.File.new_for_path") as file_factory:
                 for path in ("../private.txt", "escape", "%2e%2e/private.txt"):
@@ -83,6 +85,7 @@ class ExperimentalPipelineTest(unittest.TestCase):
 
         renderer = DocumentRenderer.__new__(DocumentRenderer)
         renderer.relative_path = "docs/page.html"
+        renderer.resource_paths = set()
         renderer.view = MagicMock()
         renderer.render('<script>fetch("https://example.org")</script><img src="image.png">')
         document, base = renderer.view.load_html.call_args.args
@@ -90,6 +93,23 @@ class ExperimentalPipelineTest(unittest.TestCase):
         self.assertIn("script-src &#x27;none&#x27;", document)
         self.assertIn("default-src &#x27;none&#x27;", document)
         self.assertEqual(base, "slate-editor://preview/docs/page.html")
+
+    def test_renderer_allows_only_same_document_fragment_navigation(self) -> None:
+        """Internal anchors work without allowing local files, scripts or unrelated documents."""
+
+        renderer = DocumentRenderer.__new__(DocumentRenderer)
+        renderer.uri = "slate-editor://preview/docs/page.md"
+        for uri, allowed in ((renderer.uri, True), (renderer.uri + "#section", True),
+                             ("slate-editor://preview/docs/other.md#section", False),
+                             ("file:///etc/passwd", False), ("javascript:alert(1)", False)):
+            with self.subTest(uri=uri):
+                decision = MagicMock()
+                action = decision.get_navigation_action.return_value
+                action.is_user_gesture.return_value = True
+                action.get_request.return_value.get_uri.return_value = uri
+                handled = renderer._policy(None, decision, WebKit2.PolicyDecisionType.NAVIGATION_ACTION)
+                self.assertEqual(handled, not allowed)
+                self.assertEqual(decision.ignore.called, not allowed)
 
     def test_revision_and_files_selection_use_the_same_opening_route(self) -> None:
         """Experimental selection bypasses the classic preview in either sidebar."""
