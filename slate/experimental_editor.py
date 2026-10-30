@@ -64,11 +64,14 @@ class ExperimentalEditor(Gtk.Box):
         self.timeout = None
         self.base_timeout = None
         self.renderer = None
+        self.rendered_document = None
         self.render_search_box = None
         self.hunks = []
         self.rows_serial = -1
         self.rows_base_serial = -1
+        self.projection_errors = {}
         self.expanded_gaps = set()
+        self.expanded_gap_marks = []
         self.positioned_modes = set()
         self.first_scroll_id = None
         self.scroll_syncing = False
@@ -209,6 +212,7 @@ class ExperimentalEditor(Gtk.Box):
         if identity == self.base_identity:
             return
         self.base_identity = identity
+        self.repository_root = identity[0]
         self.base_serial += 1
         serial = self.base_serial
         if self.base_command is not None:
@@ -291,6 +295,14 @@ class ExperimentalEditor(Gtk.Box):
             self._choose_initial(self.base is not None and state != "untracked" and self.base != self.text())
         self.schedule()
 
+    def _projection_error(self, mode: str) -> str | None:
+        """Return a failed view's diagnostic only while both document versions still match."""
+
+        error = self.projection_errors.get(mode)
+        if error is not None and error[:2] == (self.serial, self.base_serial):
+            return error[2]
+        return None
+
     def _sync_mode_buttons(self) -> None:
         """Reflect the selected mode and disable unavailable views in place."""
 
@@ -299,7 +311,7 @@ class ExperimentalEditor(Gtk.Box):
             for identifier, button in self.mode_buttons.items():
                 available = identifier != "rendered" or Path(self.editor.relative_path).suffix.lower() in self.RENDERABLE
                 if identifier in {"unified", "side", "compact"}:
-                    available = available and self.base is not None
+                    available = available and self.base is not None and self._projection_error(identifier) is None
                 button.set_sensitive(available)
                 button.set_active(identifier == self.mode)
         finally:
@@ -316,6 +328,12 @@ class ExperimentalEditor(Gtk.Box):
 
         if identifier not in self.mode_buttons:
             raise ValueError("Unknown editor mode")
+        error = self._projection_error(identifier)
+        if error is not None:
+            self._sync_mode_buttons()
+            self._error(error)
+            return
+        previous_mode = self.mode
         self.automatic = False
         if identifier == self.mode and self.initial_chosen:
             self._sync_mode_buttons()
@@ -339,8 +357,16 @@ class ExperimentalEditor(Gtk.Box):
         if self.mode != "side":
             self.old_search.set_reveal_child(False)
         self.automatic = False
-        if self.mode in {"unified", "compact"} and self.rows_serial == self.serial:
-            self._replace_spans()
+        if (self.mode in {"unified", "compact"} and self.rows_serial == self.serial
+                and self.rows_base_serial == self.base_serial):
+            try:
+                self._replace_spans()
+            except ValueError as error:
+                self.projection_errors[identifier] = (self.serial, self.base_serial, str(error))
+                self.mode = previous_mode
+                self._sync_mode_buttons()
+                self._error(str(error))
+                return
         self._show_mode()
         self._position_first_change()
         self.schedule()
@@ -399,6 +425,7 @@ class ExperimentalEditor(Gtk.Box):
         """Update projections for external edits while preserving native source undo."""
 
         self.serial += 1
+        self._sync_mode_buttons()
         if self.enabled and self.mode in {"unified", "compact"} and not self.syncing and not self.composing:
             self._render_projection()
         self.schedule()
@@ -407,6 +434,8 @@ class ExperimentalEditor(Gtk.Box):
         """Debounce visible derived work and keep hidden editors idle."""
 
         if not self.enabled or self.closed or not self.editor.get_mapped() or self.editor.loading:
+            return
+        if self._projection_error(self.mode) is not None:
             return
         if self.rows_serial == self.serial and self.rows_base_serial == self.base_serial and self.mode != "rendered":
             return
@@ -456,11 +485,30 @@ class ExperimentalEditor(Gtk.Box):
                 rows = json.loads(result.stdout)
                 if len(rows) > 50000:
                     raise ValueError("Diff too large to display safely; use Code")
-                self.rows = [DiffRow(**row) for row in rows]
+                candidate_rows = [DiffRow(**row) for row in rows]
+                # 2026-10-30: i mark canonici seguono inserimenti e rimozioni;
+                # gli indici delle righe del vecchio diff non sono stabili.
+                candidate_gaps = set()
+                for gap in compact_rows(candidate_rows):
+                    if gap.kind != "omitted":
+                        continue
+                    start = self.editor.buffer.get_iter_at_line(candidate_rows[gap.gap_start].new_line).get_offset()
+                    last = candidate_rows[gap.gap_end - 1]
+                    end = self.editor.buffer.get_iter_at_line(last.new_line).get_offset() + len(last.text)
+                    for first_mark, last_mark in self.expanded_gap_marks:
+                        if (self.editor.buffer.get_iter_at_mark(first_mark).get_offset() <= start
+                                and self.editor.buffer.get_iter_at_mark(last_mark).get_offset() >= end):
+                            candidate_gaps.add((gap.gap_start, gap.gap_end))
+                            break
+                # 2026-10-30: pubblicare righe e seriali solo dopo che tutti
+                # i limiti della proiezione sono stati validati senza toccare
+                # i mark precedenti. Un errore lascia riutilizzabile la vista.
+                self._replace_spans(candidate_rows, candidate_gaps)
+                self.rows = candidate_rows
+                self.expanded_gaps = candidate_gaps
                 self.rows_serial = self.serial
                 self.rows_base_serial = self.base_serial
-                self.expanded_gaps.clear()
-                self._replace_spans()
+                self.projection_errors.pop(self.mode, None)
                 self.hunks = []
                 in_change = False
                 for index, row in enumerate(self.rows):
@@ -470,13 +518,20 @@ class ExperimentalEditor(Gtk.Box):
                     if not in_change:
                         target = row.new_line
                         if target is None:
-                            target = next((item.new_line for item in self.rows[index + 1:] if item.new_line is not None),
+                            # 2026-10-30: gli slice copiano la coda a ogni
+                            # hunk nel main loop. Cercare per indice visita solo
+                            # le righe rimosse prima della prossima riga corrente.
+                            target = next((self.rows[position].new_line
+                                           for position in range(index + 1, len(self.rows))
+                                           if self.rows[position].new_line is not None),
                                           max(0, self.editor.buffer.get_line_count() - 1))
                         self.hunks.append(target)
                     in_change = True
                 self._show_mode()
                 self._position_first_change()
             except (ValueError, TypeError, KeyError) as error:
+                self.projection_errors[self.mode] = (self.serial, self.base_serial, str(error))
+                self._sync_mode_buttons()
                 self._error(str(error))
 
         self.command = run_async([sys.executable, "-m", "slate.editor_diff_worker"], computed, cwd=str(Path(__file__).resolve().parent.parent), input_bytes=payload)
@@ -495,11 +550,11 @@ class ExperimentalEditor(Gtk.Box):
         self._error("Diff computation timed out; use Code.")
         return GLib.SOURCE_REMOVE
 
-    def _replace_spans(self) -> None:
-        """Bind derived live spans to canonical marks so typing needs no rediff."""
+    def _replace_spans(self, rows=None, expanded_gaps=None) -> None:
+        """Validate candidate rows before replacing canonical and visual projection marks."""
 
-        self.pending_selection = self._selection_offsets()
-        self._delete_marks()
+        rows = self.rows if rows is None else rows
+        expanded_gaps = self.expanded_gaps if expanded_gaps is None else expanded_gaps
         source = self.editor.buffer
         lines = self.text().splitlines(keepends=True)
         offsets = [0]
@@ -508,7 +563,7 @@ class ExperimentalEditor(Gtk.Box):
         # 2026-10-30: equal/added blocks need only one mark pair. Creating
         # marks for every line of a large unchanged file stalls the GTK loop.
         groups = []
-        display = compact_rows(self.rows, expanded=self.expanded_gaps) if self.mode == "compact" else self.rows
+        display = compact_rows(rows, expanded=expanded_gaps) if self.mode == "compact" else rows
         for row in display:
             if not groups or groups[-1][0].kind != row.kind:
                 groups.append([row])
@@ -520,6 +575,17 @@ class ExperimentalEditor(Gtk.Box):
         # Otherwise Ctrl+End would land in history with no way to append source.
         if not groups or groups[-1][0].new_line is None:
             groups.append([DiffRow("", "added", None, len(lines))])
+        # 2026-10-30: anche coordinate errate devono fallire prima di eliminare
+        # la vista valida; non lasciare mark parziali né una cache falsamente pronta.
+        for group in groups:
+            row = group[0]
+            if row.new_line is not None:
+                if not 0 <= row.new_line < len(offsets):
+                    raise ValueError("Invalid diff coordinates; use Code")
+                if offsets[row.new_line] + sum(len(item.text) for item in group) > source.get_char_count():
+                    raise ValueError("Invalid diff coordinates; use Code")
+        self.pending_selection = self._selection_offsets()
+        self._delete_marks()
         last_live = max((index for index, group in enumerate(groups) if group[0].new_line is not None), default=-1)
         for index, group in enumerate(groups):
             row = group[0]
@@ -745,6 +811,13 @@ class ExperimentalEditor(Gtk.Box):
                 source.delete(source.get_iter_at_offset(a), source.get_iter_at_offset(b))
                 self.projection.delete(self.projection.get_iter_at_offset(left), self.projection.get_iter_at_offset(right))
             source.place_cursor(source.get_iter_at_offset(ranges[0][2]))
+            # 2026-10-30: delete-range normalmente riconvalida gli iteratori
+            # del chiamante. Qui fermiamo il default GTK, quindi dobbiamo farlo
+            # noi prima che un incolla nativo riutilizzi la posizione d'inserimento.
+            insertion = self.projection.get_iter_at_offset(ranges[0][0])
+            start.assign(insertion)
+            end.assign(insertion)
+            self.projection.place_cursor(insertion)
         finally:
             source.end_user_action()
             self.syncing = False
@@ -810,6 +883,16 @@ class ExperimentalEditor(Gtk.Box):
             end = self.projection.get_iter_at_mark(span.visual_end).get_offset()
             if start <= offset < end:
                 self.expanded_gaps.add(span.gap)
+                # 2026-10-30: mantenere l'espansione sul testo sorgente, anche
+                # quando una modifica precedente sposta gli indici del diff.
+                first = self.rows[span.gap[0]]
+                last = self.rows[span.gap[1] - 1]
+                source = self.editor.buffer
+                start = source.get_iter_at_line(first.new_line)
+                end = source.get_iter_at_line(last.new_line)
+                end.forward_chars(len(last.text))
+                self.expanded_gap_marks.append((source.create_mark(None, start, True),
+                                                source.create_mark(None, end, False)))
                 self._replace_spans()
                 self._render_projection()
                 return True
@@ -855,7 +938,12 @@ class ExperimentalEditor(Gtk.Box):
 
         if not self.hunks:
             return
-        line = self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()).get_line()
+        # 2026-10-30: un click nella proiezione non sposta il cursore del
+        # buffer nascosto; partire sempre dalla posizione visibile all'utente.
+        cursor = (self.editor.buffer.get_iter_at_offset(self._canonical_cursor())
+                  if self.mode in {"unified", "compact"}
+                  else self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()))
+        line = cursor.get_line()
         candidates = [value for value in self.hunks if (value - line) * delta > 0]
         target = (min(candidates) if delta > 0 else max(candidates)) if candidates else (self.hunks[0] if delta > 0 else self.hunks[-1])
         self.editor.goto_line_number(target + 1, focus=self.mode not in {"unified", "compact"})
@@ -905,6 +993,17 @@ class ExperimentalEditor(Gtk.Box):
         finally:
             self.scroll_syncing = False
 
+    def resource_changed(self, relative_path: str) -> None:
+        """Invalidate rendered content when the shared watcher reports a used local asset."""
+
+        if self.renderer is None:
+            return
+        if any(path == relative_path or path.startswith(relative_path.rstrip("/") + "/")
+               for path in self.renderer.resource_paths):
+            self.rendered_document = None
+            if self.mode == "rendered":
+                self.schedule()
+
     def _render(self) -> None:
         """Render the canonical buffer lazily in an isolated local WebView."""
 
@@ -927,7 +1026,13 @@ class ExperimentalEditor(Gtk.Box):
                 self.stack.add_named(box, "rendered")
                 box.show_all()
             self.renderer.relative_path = self.editor.relative_path
-            self.renderer.render(self.base or "" if self.editor.historical else self.text())
+            text = (self.base or "") if self.editor.historical else self.text()
+            document = (self.editor.relative_path, text)
+            # 2026-10-30: rimappare o riselezionare una vista già pronta non
+            # deve richiamare load_html né perdere scroll e selezione WebKit.
+            if document != self.rendered_document:
+                self.renderer.render(text)
+                self.rendered_document = document
             self.stack.set_visible_child_name("rendered")
         except (RuntimeError, ValueError) as error:
             self._error(str(error))
@@ -1068,4 +1173,8 @@ class ExperimentalEditor(Gtk.Box):
             self.base_timeout = None
         if self.renderer is not None:
             self.renderer.shutdown()
+        for first_mark, last_mark in self.expanded_gap_marks:
+            self.editor.buffer.delete_mark(first_mark)
+            self.editor.buffer.delete_mark(last_mark)
+        self.expanded_gap_marks.clear()
         self._delete_marks()
