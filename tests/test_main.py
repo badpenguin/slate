@@ -102,6 +102,44 @@ class AgentDebugBootstrapTest(unittest.TestCase):
         self.assertEqual(result, 0)
         application.run.assert_called_once_with(["slate"])
 
+    def test_restart_releases_lock_before_replacing_process(self) -> None:
+        """The next interpreter starts only after GTK exits and the instance lock closes."""
+
+        events = []
+        lock = Mock()
+
+        def closed() -> None:
+            """Record that the old process has released its lock."""
+
+            events.append("unlock")
+
+        def replaced(argv, directory) -> None:
+            """Record replacement without executing another interpreter in the test."""
+
+            events.append("exec")
+            self.assertEqual(argv, ["slate"])
+            self.assertIsNone(directory)
+
+        lock.close.side_effect = closed
+        with patch.object(slate_main, "validate_dependencies", return_value=True), patch.object(
+                slate_main.InstanceLock, "acquire", return_value=lock), patch.object(
+                slate_main, "_run_application", return_value=slate_main._RESTART_EXIT_CODE), patch.object(
+                slate_main, "_restart_application", side_effect=replaced):
+            slate_main.main(["slate"])
+        self.assertEqual(events, ["unlock", "exec"])
+
+    def test_restart_exec_keeps_interpreter_namespace_and_debug_output(self) -> None:
+        """Replacement preserves the interpreter, source package and isolated runtime root."""
+
+        with patch.object(slate_main.os, "execv") as execute, patch.dict(os.environ, {"SLATE_DEBUG": "1"}):
+            slate_main._restart_application(["slate"], "/tmp/slate-agent-debug-test")
+        interpreter, argv = execute.call_args.args
+        self.assertEqual(interpreter, slate_main.sys.executable)
+        self.assertEqual(argv[:4], [interpreter, "-X", "faulthandler", "-c"])
+        self.assertIn(str(Path(slate_main.__file__).resolve().parent.parent), argv[-1])
+        self.assertIn("restart_debug_directory='/tmp/slate-agent-debug-test'", argv[-1])
+        compile(argv[-1], "<restart>", "exec")
+
     def test_activation_builds_and_presents_the_application_window(self) -> None:
         """Normal and diagnostic activation always present their window."""
 
