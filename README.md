@@ -309,6 +309,14 @@ The icon-and-text buttons appear in this order:
 | **Editor**         | Current source with syntax highlighting and line numbers.            |
 | **Renderer**       | Rendered Markdown or HTML; available only for those file types.      |
 
+Syntax highlighting is available in **Unified** and both **Side by side**
+columns. Each version is parsed separately so removed comments or strings do
+not affect the current code. **Compact** keeps its plain diff colors.
+
+Syntax updates run incrementally and pause while the document is hidden. All
+three diff views use vivid red and green change backgrounds; Unified and Side
+by side adapt them to the light or dark theme without overriding syntax colors.
+
 **Compact** is the default for changed files. Files without changes open in
 Renderer for Markdown/HTML, or Editor otherwise. Untracked files open in Editor.
 Mode choices belong to the open document and are not saved between restarts.
