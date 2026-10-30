@@ -65,7 +65,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "revisions": {"font_size": 10},
         "files": {"font_size": 10},
         "editor": {"font_size": 10},
-        "external_apps": {"editor_command": ["gvim", "-f"]},
         "terminal": {"status_bar": False},
         "commands": {"items": []},
     },
@@ -111,25 +110,6 @@ def _normalize_font_size(value: Any, fallback: int) -> int:
     """Accept only practical integer point sizes from hand-edited config."""
 
     return value if isinstance(value, int) and not isinstance(value, bool) and 8 <= value <= 32 else fallback
-
-
-def _normalize_external_command(value: Any, fallback: list[str]) -> list[str]:
-    """Accept a bounded external-editor argument vector without shell syntax."""
-
-    if (
-        not isinstance(value, list)
-        or not value
-        or len(value) > 32
-        or any(
-            not isinstance(argument, str)
-            or not argument
-            or len(argument) > 4096
-            or "\0" in argument
-            for argument in value
-        )
-    ):
-        return list(fallback)
-    return list(value)
 
 
 def _normalize_extra_commands(value: Any) -> list[dict[str, str]]:
@@ -284,19 +264,9 @@ class ConfigStore:
                     data["settings"][section]["font_size"] = _normalize_font_size(
                         raw_section.get("font_size"), fallback
                     )
-            raw_external_apps = raw_settings.get("external_apps", {})
-            if isinstance(raw_external_apps, dict):
-                # 2026-08-20: le applicazioni esterne sono preferenze globali
-                # autonome e restano vettori argv per non invocare una shell.
-                command_fallback = data["settings"]["external_apps"][
-                    "editor_command"
-                ]
-                data["settings"]["external_apps"]["editor_command"] = (
-                    _normalize_external_command(
-                        raw_external_apps.get("editor_command"),
-                        command_fallback,
-                    )
-                )
+            # 2026-10-30: la vecchia sezione external_apps non viene più
+            # importata: gVim è stato rimosso e il prossimo salvataggio ne elimina
+            # le preferenze obsolete senza modificare le impostazioni in uso.
             raw_terminal = raw_settings.get("terminal", {})
             # 2026-08-17: tmux status visibility is the sole terminal display
             # preference and remains global because the server owns one bar.
