@@ -59,7 +59,6 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.previewed: str | None = None
         self.viewed: str | None = None
         self.edited_internal: str | None = None
-        self.edited_external: str | None = None
         self.new_file_parent: str | None = None
         self.new_directory_parent: str | None = None
         self.renamed: str | None = None
@@ -115,10 +114,6 @@ class ProjectFileManagerTest(unittest.TestCase):
 
         self.edited_internal = relative
 
-    def _record_edit_external(self, relative: str) -> None:
-        """Record gVim editor actions."""
-
-        self.edited_external = relative
 
     def _record_new_file(self, parent: str) -> None:
         """Record the parent requested by a new-file action."""
@@ -303,7 +298,7 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.assertEqual(broken_icon.get_names()[0], "dialog-error")
 
     def test_shortcuts_dispatch_file_actions_and_directory_mutations(self) -> None:
-        """V/E/M stay file-only while R/T/Delete target their valid entries."""
+        """V/E stay file-only while R/T/Delete target their valid entries."""
 
         file_iter = next(
             tree_iter
@@ -315,7 +310,6 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.assertTrue(self._press(Gdk.KEY_v))
         self.assertTrue(self._press(Gdk.KEY_e))
         self.assertEqual(self.edited_internal, "normal.txt")
-        self.assertIsNone(self.edited_external)
         self.assertFalse(self._press(Gdk.KEY_m))
         self.assertTrue(self._press(Gdk.KEY_r))
         self.assertFalse(self._press(Gdk.KEY_t))
@@ -570,7 +564,7 @@ class ProjectFileManagerTest(unittest.TestCase):
         )
 
     def test_file_click_focuses_tree_for_all_single_key_actions(self) -> None:
-        """A file preview cannot steal V/E/M/R/Delete from the file tree."""
+        """A file preview cannot steal V/E/R/Delete from the file tree."""
 
         window = Gtk.Window()
         window.add(self.manager)
