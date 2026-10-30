@@ -316,6 +316,16 @@ I pulsanti con icona e testo compaiono in questo ordine:
 | **Editor**         | Sorgente corrente con evidenziazione sintattica e numeri di riga.     |
 | **Renderer**       | Rendering Markdown o HTML; disponibile soltanto per questi formati.   |
 
+L'evidenziazione sintattica è disponibile in **Unified** e in entrambe le
+colonne di **Side by side**. Le due versioni vengono analizzate separatamente,
+così commenti o stringhe rimosse non influenzano il codice corrente. **Compact**
+mantiene soltanto i colori del diff.
+
+La sintassi viene aggiornata in modo incrementale e gli aggiornamenti si fermano
+quando il documento è nascosto. Le tre viste diff usano sfondi rosso e verde più
+vivaci; Unified e Side by side li adattano al tema chiaro o scuro senza coprire
+i colori della sintassi.
+
 **Compact** è il default per i file modificati. Quelli senza modifiche si aprono
 in Renderer per Markdown/HTML, altrimenti in Editor. I file non tracciati si
 aprono in Editor. La modalità scelta appartiene al documento aperto e non viene
