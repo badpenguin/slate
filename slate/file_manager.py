@@ -1310,7 +1310,6 @@ class ProjectFileManager(Gtk.Box):
                     Gdk.KEY_e,
                     self._on_context_edit_internal,
                 ),
-
             ):
                 item = self._menu_item(label, icon, keyval)
                 item.connect("activate", callback)
