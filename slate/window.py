@@ -2778,11 +2778,13 @@ class SlateWindow(Gtk.ApplicationWindow):
                 return True
             selection = tree.get_selection()
             editor_click = event.button == 1 and kind == "editor"
-            editor_already_selected = editor_click and selection.path_is_selected(path)
+            already_selected = event.button == 1 and selection.path_is_selected(path)
             selection.select_path(path)
             # 2026-10-15: la riga già selezionata non emette changed; il clic
             # deve comunque riattivare l'editor e restituirgli la tastiera.
-            if editor_already_selected:
+            # 2026-10-30: anche terminali, browser e progetti già evidenziati
+            # devono tornare visibili dopo l'apertura di un file nella workspace.
+            if already_selected:
                 self._on_tree_selection(selection)
             if event.button == 1 and kind in {"terminal", "editor", "browser"}:
                 self._clear_manual_attention(
