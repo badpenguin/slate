@@ -157,6 +157,23 @@ Il progetto attivo conserva separatamente terminali, file aperti e pagine Web.
 Le dimensioni del testo di Revisions, Files ed Editor sono regolabili da
 **Settings**. Le impostazioni Terminal controllano la barra di stato tmux.
 
+**Settings → Editor** permette di scegliere un font monospaziato installato
+e la sua dimensione, oltre al tema sintattico, al colore del testo normale e
+agli sfondi delle righe aggiunte e rimosse. Il selettore esclude i font
+proporzionali; se il font scelto non è disponibile, viene usato il monospace
+di sistema. Font e dimensione valgono per tutte le viste del codice e la preview.
+
+L'anteprima contiene 15 righe di codice evidenziato, con righe aggiunte e rimosse,
+e si aggiorna con le scelte. Il colore del testo normale non modifica quelli
+della sintassi, che seguono il tema selezionato. **Reset colors and theme**
+ripristina colori e tema automatici, conservando font e dimensione. Le preferenze
+sono globali e vengono ricordate per i documenti esistenti e futuri.
+
+**IntelliJ Light (PhpStorm)** è incluso in SLATE e non richiede installazione
+separata. Altri temi XML compatibili con GtkSourceView 4 possono essere copiati
+in `~/.local/share/gtksourceview-4/styles/`; riavviare SLATE per trovarli nel
+selettore dei temi.
+
 Il menu **More actions** include **Restart** subito prima di **Quit**. Restart
 salva lo stato della finestra e riavvia soltanto la GUI, mantenendo tutte le
 sessioni tmux, comprese le shell inattive. Per i file non salvati viene ancora
@@ -297,6 +314,10 @@ directory collegate tramite symlink fuori dal progetto e mostrarne i file in
 anteprima di sola lettura. Su quei rami esterni sono bloccati modifica, terminali,
 azioni contestuali e operazioni mutanti. Alias interni dello stesso file fisico
 riutilizzano lo stesso documento editor.
+
+I file di testo UTF-8 sono modificabili indipendentemente dall'estensione,
+compresi `.hgignore`, `.gitignore`, `.env` e file senza estensione. Il loader
+asincrono rifiuta file binari e file oltre i 5 MiB.
 
 ### Un editor, cinque viste
 
