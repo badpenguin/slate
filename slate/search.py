@@ -988,7 +988,6 @@ class ProjectSearch(Gtk.Box):
                 Gdk.KEY_e,
                 self._on_context_edit_internal,
             ),
-
             ("Open in Meld", "document-open", Gdk.KEY_d, self._on_context_meld),
         ):
             item = self._menu_item(label, icon, keyval)
