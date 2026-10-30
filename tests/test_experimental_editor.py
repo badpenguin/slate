@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 import tempfile
+import time
+from dataclasses import asdict
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -10,12 +12,16 @@ from unittest.mock import MagicMock, patch
 import gi
 
 gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 gi.require_version("GtkSource", "4")
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk
 
 from slate.editor import EditorDocument
 from slate.editor_diff_model import project_diff
 from slate.experimental_editor import ExperimentalEditor
+from slate.processes import CommandResult
+from slate.file_manager import ProjectFileManager
+from slate.window import SlateWindow
 
 
 class ExperimentalEditorTest(unittest.TestCase):
@@ -85,6 +91,92 @@ class ExperimentalEditorTest(unittest.TestCase):
             delayed.assert_not_called()
         self.assertEqual(self.presentation.stack.get_visible_child_name(), "unified")
 
+    def test_renderer_reuses_unchanged_content_but_reloads_text_and_path_changes(self) -> None:
+        """Mode switches and refreshes preserve WebKit state until the document actually changes."""
+
+        self.editor.relative_path = "document.md"
+        renderer = MagicMock()
+        renderer.view = Gtk.Box()
+        renderer.resource_paths = {"styles/page.css"}
+        with patch("slate.experimental_editor.DocumentRenderer", return_value=renderer), patch.object(
+                self.editor, "get_mapped", return_value=True):
+            self.presentation.set_mode("rendered")
+            self.presentation._render()
+            self.presentation._refresh()
+            self.presentation.set_mode("code")
+            self.presentation.set_mode("rendered")
+            renderer.render.assert_called_once_with("font-size: 12px;\n")
+            self.presentation.resource_changed("unrelated.txt")
+            self.presentation._render()
+            self.assertEqual(renderer.render.call_count, 1)
+            self.presentation.resource_changed("styles/page.css")
+            self.presentation._render()
+            self.assertEqual(renderer.render.call_count, 2)
+            renderer.render.reset_mock()
+            self.editor.buffer.insert(self.editor.buffer.get_end_iter(), "changed\n")
+            self.presentation._render()
+            self.assertEqual(renderer.render.call_count, 1)
+            self.editor.relative_path = "moved/document.md"
+            self.presentation._render()
+            self.assertEqual(renderer.render.call_count, 2)
+            self.editor.historical = True
+            self.presentation.base = "historical content\n"
+            self.presentation._render()
+            self.presentation._render()
+            self.assertEqual(renderer.render.call_count, 3)
+            renderer.render.assert_called_with("historical content\n")
+
+    def test_supplemental_file_events_invalidate_renderer_without_an_scm_watcher(self) -> None:
+        """Files monitors forward changed and renamed assets even while their panel is inactive."""
+
+        self.editor.relative_path = "page.html"
+        renderer = MagicMock()
+        renderer.view = Gtk.Box()
+        renderer.resource_paths = {"page.css"}
+        owner = SimpleNamespace(editor_workspace=SimpleNamespace(
+            editors={"page": SimpleNamespace(document=self.editor)}, preview_entry=None, historical_document=None))
+        owner._editor_resource_changed = SlateWindow._editor_resource_changed.__get__(owner)
+        files = ProjectFileManager(*[MagicMock() for index in range(9)], on_file_change=owner._editor_resource_changed)
+        files.root = self.temporary.name
+        files.project_name = "project"
+        files.active = False
+        self.addCleanup(files.destroy)
+        css = Path(self.temporary.name) / "page.css"
+        css.write_text("body{color:red}")
+        with patch("slate.experimental_editor.DocumentRenderer", return_value=renderer), patch.object(
+                self.editor, "get_mapped", return_value=True):
+            self.presentation.set_mode("rendered")
+            renderer.render.assert_called_once()
+            css.write_text("body{color:blue}")
+            files._on_supplemental_change(None, Gio.File.new_for_path(str(css)), None, Gio.FileMonitorEvent.CHANGED)
+            self.assertTrue(files.dirty)
+            self.assertIsNone(self.presentation.rendered_document)
+            self.presentation._render()
+            self.assertEqual(renderer.render.call_count, 2)
+            files._on_supplemental_change(None, Gio.File.new_for_path(str(css.parent / "temporary.css")),
+                                         Gio.File.new_for_path(str(css)), Gio.FileMonitorEvent.RENAMED)
+            self.assertIsNone(self.presentation.rendered_document)
+            self.presentation._render()
+            self.assertEqual(renderer.render.call_count, 3)
+
+    def test_hunk_positions_handle_multiple_removed_lines_and_deletions_at_eof(self) -> None:
+        """Index-based hunk lookup keeps replacement and deletion targets identical."""
+
+        for before, current, expected in (
+                ("same\nold-a\nold-b\ntail\n", "same\nnew\ntail\n", [1]),
+                ("same\nold-a\nold-b\ntail\n", "same\ntail\n", [1]),
+                ("same\nold-a\nold-b\n", "same", [0])):
+            with self.subTest(current=current):
+                self.editor.buffer.set_text(current)
+                self.presentation.base = before
+                with patch.object(self.editor, "get_mapped", return_value=True), patch(
+                        "slate.experimental_editor.run_async") as run:
+                    self.presentation._refresh()
+                    run.call_args.args[1](CommandResult((), 0, json.dumps([
+                        asdict(row) for row in project_diff(before, current)]), ""))
+                self.assertEqual(self.presentation.hunks, expected)
+                self.assertEqual(self.presentation.text(), current)
+
     def test_css_replacement_saves_only_current_text_and_undo_is_shared(self) -> None:
         """Editing 12px to 14px changes the canonical source without saving old lines."""
 
@@ -142,6 +234,106 @@ class ExperimentalEditorTest(unittest.TestCase):
         self.assertEqual(self.presentation.text(), "font-size: 12px;\n")
         self.assertFalse(self.editor.buffer.can_undo())
 
+
+    def test_native_clipboard_replaces_mixed_history_and_current_selection_with_one_undo(self) -> None:
+        """Real GTK paste replaces only selected current text, preserving history and source undo."""
+
+        for mode in ("unified", "compact"):
+            with self.subTest(mode=mode):
+                self.editor.buffer.begin_not_undoable_action()
+                self.editor.buffer.set_text("keep\nnew\nend\n")
+                self.editor.buffer.end_not_undoable_action()
+                self.editor.buffer.set_modified(False)
+                self.presentation.base = "keep\nold\nend\n"
+                self.presentation.rows = project_diff(self.presentation.base, self.presentation.text())
+                self.presentation.rows_serial = self.presentation.serial
+                self.presentation.rows_base_serial = self.presentation.base_serial
+                self.presentation.set_mode(mode)
+                self.presentation._replace_spans()
+                self.presentation._render_projection()
+                buffer = self.presentation.projection
+                buffer.select_range(buffer.get_start_iter(), buffer.get_end_iter())
+                clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                clipboard.set_text("replacement\n", -1)
+                completed = []
+
+                def pasted(_buffer, _clipboard) -> None:
+                    """Record completion of GTK's actual asynchronous clipboard transfer."""
+
+                    completed.append(True)
+
+                signal = buffer.connect("paste-done", pasted)
+                try:
+                    buffer.paste_clipboard(clipboard, None, True)
+                    deadline = time.monotonic() + 3
+                    context = GLib.MainContext.default()
+                    while not completed and time.monotonic() < deadline:
+                        while context.pending():
+                            context.iteration(False)
+                        time.sleep(0.002)
+                    self.assertTrue(completed)
+                    self.assertEqual(self.presentation.text(), "replacement\n")
+                    visual = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+                    self.assertIn("old\n", visual)
+                    self.editor.undo()
+                    self.assertEqual(self.presentation.text(), "keep\nnew\nend\n")
+                    self.assertFalse(self.editor.buffer.can_undo())
+                finally:
+                    buffer.disconnect(signal)
+                    clipboard.clear()
+
+    def test_fragmented_worker_result_preserves_previous_projection_and_recovers_after_edit(self) -> None:
+        """A rejected projection never publishes valid serials or destroys the old marks and text."""
+
+        before = "".join(f"line {index}\n" for index in range(1800))
+        current = "".join(f"changed {index}\n" if index % 2 else f"line {index}\n" for index in range(1800))
+        self.editor.buffer.set_text(current)
+        self.presentation.base = before
+        old_rows = self.presentation.rows
+        old_serial = self.presentation.rows_serial
+        old_spans = list(self.presentation.spans)
+        buffer = self.presentation.projection
+        previous_visual = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        rows = project_diff(before, current)
+        with patch.object(self.editor, "get_mapped", return_value=True), patch.object(
+                self.presentation, "schedule"), patch("slate.experimental_editor.run_async") as run:
+            self.presentation._refresh()
+            run.call_args.args[1](CommandResult((), 0, json.dumps([asdict(row) for row in rows]), ""))
+            self.assertIs(self.presentation.rows, old_rows)
+            self.assertEqual(self.presentation.rows_serial, old_serial)
+            self.assertNotEqual(self.presentation.rows_serial, self.presentation.serial)
+            self.assertEqual(self.presentation.spans, old_spans)
+            self.assertTrue(all(not span.start.get_deleted() for span in old_spans if span.start is not None))
+            self.assertEqual(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True), previous_visual)
+            self.assertFalse(self.presentation.mode_buttons["unified"].get_sensitive())
+            self.assertIn("fragmented", self.presentation.notice.get_text())
+            self.presentation.set_mode("code")
+            self.presentation.set_mode("unified")
+            self.assertEqual(self.presentation.mode, "code")
+            self.assertEqual(self.presentation.text(), current)
+            self.editor.buffer.set_text("new\n")
+            self.presentation.base = "old\n"
+            self.presentation.base_serial += 1
+            self.presentation.set_mode("unified")
+            self.presentation._refresh()
+            run.call_args.args[1](CommandResult((), 0, json.dumps([
+                asdict(row) for row in project_diff("old\n", "new\n")]), ""))
+            self.assertEqual(self.presentation.rows_serial, self.presentation.serial)
+            self.assertTrue(self.presentation.mode_buttons["unified"].get_sensitive())
+            self.assertEqual(self.presentation.text(), "new\n")
+
+    def test_cached_projection_error_during_mode_switch_is_handled_without_losing_marks(self) -> None:
+        """A cached full diff may fail compact validation without breaking the working full view."""
+
+        previous_spans = list(self.presentation.spans)
+        with patch.object(self.presentation, "_replace_spans", side_effect=ValueError("Diff too fragmented")):
+            self.presentation.set_mode("compact")
+        self.assertEqual(self.presentation.mode, "unified")
+        self.assertEqual(self.presentation.spans, previous_spans)
+        self.assertFalse(self.presentation.mode_buttons["compact"].get_sensitive())
+        self.assertTrue(self.presentation.mode_buttons["unified"].get_sensitive())
+        self.presentation.set_mode("code")
+        self.assertEqual(self.presentation.mode, "code")
 
     def test_large_equal_block_uses_a_constant_number_of_marks(self) -> None:
         """An unchanged large file is represented by one span rather than a mark per line."""
