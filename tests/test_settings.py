@@ -34,6 +34,7 @@ class SettingsDialogTest(unittest.TestCase):
         self.close_to_tray_changes: list[bool] = []
         self.status_changes: list[bool] = []
         self.command_changes: list[list[dict[str, str]]] = []
+        self.editor_appearance_changes = []
         self.parent = Gtk.Window()
         self.dialog = SettingsDialog(
             self.parent,
@@ -58,6 +59,7 @@ class SettingsDialogTest(unittest.TestCase):
             self._record_status_change,
 
             self._record_command_change,
+            on_editor_appearance_change=self._record_editor_appearance_change,
         )
 
     def tearDown(self) -> None:
@@ -65,6 +67,86 @@ class SettingsDialogTest(unittest.TestCase):
 
         self.dialog.destroy()
         self.parent.destroy()
+
+    def _record_editor_appearance_change(self, values: dict) -> None:
+        """Record appearance changes emitted by the actual native settings controls."""
+
+        self.editor_appearance_changes.append(values)
+
+    def test_editor_colors_and_theme_update_the_small_preview_and_reset_to_defaults(self) -> None:
+        """Changing a color updates the preview and callback without repainting syntax tokens."""
+
+        from gi.repository import Gdk
+        self.assertEqual(set(self.dialog.editor_color_buttons), {
+            "text_color", "diff_added_color", "diff_removed_color"})
+        self.assertTrue(self.dialog.editor_theme.set_active_id("oblivion"))
+        self.assertEqual(self.dialog.editor_preview_buffer.get_style_scheme().get_id(), "oblivion")
+        rgba = Gdk.RGBA()
+        rgba.parse("#aabbcc")
+        self.dialog.editor_color_buttons["text_color"].set_rgba(rgba)
+        self.dialog.editor_color_buttons["text_color"].emit("color-set")
+        self.assertEqual(self.editor_appearance_changes[-1]["text_color"], "#aabbcc")
+        self.assertEqual(self.editor_appearance_changes[-1]["style_scheme"], "oblivion")
+        foreground = self.dialog.editor_preview.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        self.assertAlmostEqual(foreground.red, rgba.red, places=3)
+        self.assertAlmostEqual(foreground.green, rgba.green, places=3)
+        rgba.parse("#334455")
+        self.dialog.editor_color_buttons["diff_added_color"].set_rgba(rgba)
+        self.dialog.editor_color_buttons["diff_added_color"].emit("color-set")
+        background = self.dialog.editor_preview_added.get_property("background-rgba")
+        self.assertAlmostEqual(background.red, rgba.red, places=3)
+        self.assertFalse(self.dialog.editor_preview_added.get_property("foreground-set"))
+        self.assertEqual(self.dialog.editor_preview_buffer.get_language().get_id(), "python")
+        calls = len(self.editor_appearance_changes)
+        self.dialog._on_editor_colors_reset(None)
+        self.assertEqual(len(self.editor_appearance_changes), calls + 1)
+        self.assertEqual(self.editor_appearance_changes[-1], {
+            "font_family": "monospace", "style_scheme": "", "text_color": None,
+            "diff_added_color": None, "diff_removed_color": None})
+        self.assertEqual(self.dialog.font_spins["editor"].get_value_as_int(), 15)
+        self.assertTrue(self.dialog.editor_preview_buffer.get_highlight_syntax())
+
+    def test_editor_font_selector_lists_only_monospace_and_previews_font_and_size(self) -> None:
+        """Only installed fixed-width families can be chosen, and size changes retain that family."""
+
+        from slate.editor_appearance import monospaced_font_families
+        families = {family.get_name() for family in self.dialog.editor_preview.get_pango_context().list_families()
+                    if family.is_monospace()}
+        combo = self.dialog.editor_font
+        identifiers = {row[combo.get_id_column()] for row in combo.get_model()}
+        self.assertEqual(identifiers - {"monospace"}, set(monospaced_font_families()))
+        self.assertTrue((identifiers - {"monospace"}).issubset(families))
+        chosen = monospaced_font_families()[0]
+        self.assertTrue(combo.set_active_id(chosen))
+        self.assertEqual(self.editor_appearance_changes[-1]["font_family"], chosen)
+        self.assertIn(chosen, self.dialog.editor_preview_font.to_string())
+        self.dialog.font_spins["editor"].set_value(18)
+        self.assertEqual(self.changes[-1], ("editor", 18))
+        css = self.dialog.editor_preview_font.to_string()
+        self.assertIn(chosen, css)
+        self.assertIn("18pt", css)
+        self.dialog._on_editor_colors_reset(None)
+        self.assertEqual(self.editor_appearance_changes[-1]["font_family"], chosen)
+        self.assertEqual(self.dialog.font_spins["editor"].get_value_as_int(), 18)
+
+    def test_editor_preview_has_real_code_syntax_and_separate_changed_line_backgrounds(self) -> None:
+        """The larger sample exposes keywords, literals, comments and both diff backgrounds together."""
+
+        buffer = self.dialog.editor_preview_buffer
+        text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        self.assertGreaterEqual(len(text.splitlines()), 10)
+        self.assertTrue(buffer.get_highlight_syntax())
+        for token in ("def", "0.10", "# Removed line", '"""Return'):
+            tags = buffer.get_iter_at_offset(text.index(token)).get_tags()
+            self.assertTrue(any(tag.get_property("foreground-set") for tag in tags), token)
+        self.assertIn(self.dialog.editor_preview_removed,
+                      buffer.get_iter_at_offset(text.index("old_discount")).get_tags())
+        self.assertIn(self.dialog.editor_preview_added,
+                      buffer.get_iter_at_offset(text.index("discount = 0.15")).get_tags())
+        self.assertNotIn(self.dialog.editor_preview_added,
+                         buffer.get_iter_at_offset(text.index("amount =")).get_tags())
+        self.assertFalse(self.dialog.editor_preview_added.get_property("foreground-set"))
+        self.assertFalse(self.dialog.editor_preview_removed.get_property("foreground-set"))
 
     def _record_change(self, section: str, font_size: int) -> None:
         """Record immediate settings callbacks from spin controls."""
