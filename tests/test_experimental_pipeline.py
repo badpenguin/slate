@@ -11,10 +11,10 @@ from unittest.mock import MagicMock, patch
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gio, GLib, Gtk
+from gi.repository import Gio, GLib
 
 from slate.editor_render import DocumentRenderer
-from slate.processes import run_async, CommandResult
+from slate.processes import run_async
 from slate.scm.base import FileStatus
 from slate.window import SlateWindow
 
@@ -95,9 +95,9 @@ class ExperimentalPipelineTest(unittest.TestCase):
         """Experimental selection bypasses the classic preview in either sidebar."""
 
         status = FileStatus("style.css", "modified")
-        owner = SimpleNamespace(experimental_mode=True,
-                                _workspace_repository_path=MagicMock(return_value="style.css"),
-                                _open_experimental_file=MagicMock(return_value=object()))
+        owner = SimpleNamespace(
+            _workspace_repository_path=MagicMock(return_value="style.css"),
+            _open_experimental_file=MagicMock(return_value=object()))
         SlateWindow._preview_file(owner, status)
         owner._open_experimental_file.assert_called_once_with("style.css", status)
         owner._open_experimental_file.reset_mock()
@@ -109,14 +109,9 @@ class ExperimentalPipelineTest(unittest.TestCase):
     def test_removed_files_are_routed_to_readonly_history(self) -> None:
         """A missing source file must never be created merely by selecting its diff."""
 
-        owner = SimpleNamespace(experimental_mode=True,
-                                _workspace_repository_path=MagicMock(return_value="gone.css"),
-                                _open_experimental_history=MagicMock())
+        owner = SimpleNamespace(
+            _workspace_repository_path=MagicMock(return_value="gone.css"),
+            _open_experimental_history=MagicMock())
         status = FileStatus("gone.css", "removed")
         SlateWindow._preview_file(owner, status)
         owner._open_experimental_history.assert_called_once_with(status)
-
-
-class ExperimentalHeaderTest(unittest.TestCase):
-    """Inspect header controls without constructing a top-level application window."""
-
