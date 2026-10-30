@@ -33,7 +33,6 @@ class SettingsDialogTest(unittest.TestCase):
         self.changes: list[tuple[str, int]] = []
         self.close_to_tray_changes: list[bool] = []
         self.status_changes: list[bool] = []
-        self.external_editor_changes: list[list[str]] = []
         self.command_changes: list[list[dict[str, str]]] = []
         self.parent = Gtk.Window()
         self.dialog = SettingsDialog(
@@ -43,7 +42,6 @@ class SettingsDialogTest(unittest.TestCase):
                 "revisions": {"font_size": 11},
                 "files": {"font_size": 13},
                 "editor": {"font_size": 15},
-                "external_apps": {"editor_command": ["gvim", "-f"]},
                 "terminal": {"status_bar": False},
                 "commands": {
                     "items": [
@@ -83,10 +81,6 @@ class SettingsDialogTest(unittest.TestCase):
 
         self.close_to_tray_changes.append(enabled)
 
-    def _record_external_editor_change(self, command: list[str]) -> None:
-        """Record validated external-editor command changes."""
-
-        self.external_editor_changes.append(command)
 
     def _record_command_change(self, commands: list[dict[str, str]]) -> None:
         """Record ordered extra-command settings snapshots."""
