@@ -179,6 +179,7 @@ class ExperimentalEditor(Gtk.Box):
         view.set_show_line_numbers(True)
         view.set_wrap_mode(Gtk.WrapMode.NONE)
         view.get_style_context().add_provider(self.editor.font_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        view.get_style_context().add_provider(self.editor.appearance_provider, Gtk.STYLE_PROVIDER_PRIORITY_USER)
         scroller = Gtk.ScrolledWindow()
         scroller.add(view)
         return view, scroller
