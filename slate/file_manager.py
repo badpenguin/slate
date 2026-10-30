@@ -79,6 +79,8 @@ class ProjectFileManager(Gtk.Box):
         on_open_terminal: Callable[[str], None],
         on_delete: Callable[[str], None],
         on_preferences: Callable[[dict[str, object]], None],
+        *,
+        on_file_change: Callable[[str, str], None] | None = None,
     ) -> None:
         """Build the toolbar, lazy tree and action dispatchers."""
 
@@ -93,6 +95,7 @@ class ProjectFileManager(Gtk.Box):
         self.on_open_terminal = on_open_terminal
         self.on_delete = on_delete
         self.on_preferences = on_preferences
+        self.on_file_change = on_file_change
         self.project_name: str | None = None
         self.root: str | None = None
         self.repo_watched = False
@@ -1505,9 +1508,20 @@ class ProjectFileManager(Gtk.Box):
     ) -> None:
         """Forward supplemental directory events through the common debounce."""
 
-        path = file.get_path()
-        if path and self.root:
-            self.filesystem_changed(os.path.relpath(path, self.root).replace(os.sep, "/"))
+        if self.root is None:
+            return
+        # 2026-10-30: i rami ignorati e i progetti senza SCM usano questi
+        # monitor. Propagare anche la destinazione dei move alla cache Renderer,
+        # senza introdurre altri watcher né dipendere dalla visibilità di Files.
+        paths = set()
+        for changed in (file, _other):
+            path = changed.get_path() if changed is not None else None
+            if path:
+                paths.add(os.path.relpath(path, self.root).replace(os.sep, "/"))
+        for relative in paths:
+            self.filesystem_changed(relative)
+            if self.on_file_change is not None and self.project_name is not None:
+                self.on_file_change(self.project_name, relative)
 
     def _remove_monitors_below(self, relative: str) -> None:
         """Cancel supplemental monitors owned by one collapsed subtree."""
