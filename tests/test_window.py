@@ -1896,7 +1896,6 @@ class WindowActionTest(unittest.TestCase):
                     "revisions": {"font_size": 10},
                     "files": {"font_size": 10},
                     "editor": {"font_size": 10},
-                    "external_apps": {"editor_command": ["gvim", "-f"]},
                     "terminal": {"status_bar": False},
                 }
             },
