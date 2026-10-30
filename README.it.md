@@ -20,7 +20,9 @@ directory di lavoro.
 - avvio rapido di Codex o di qualsiasi comando shell;
 - stato e operazioni essenziali per repository Git e Mercurial;
 - esplorazione dei file con anteprima e azioni contestuali;
-- editor GtkSourceView integrato;
+- editor GtkSourceView unico con diff modificabili compatti, unificati e
+  affiancati, più rendering Markdown e HTML;
+- riavvio della GUI senza interrompere le sessioni tmux;
 - browser WebKitGTK con modalità normale, incognito e anteprima responsive;
 - caricamento su richiesta: all'avvio non vengono aperti terminali, editor o
   pagine Web finché non vengono selezionati.
@@ -45,7 +47,7 @@ successivo, installare i componenti indispensabili con:
 ```console
 sudo apt update
 sudo apt install git gir1.2-gtk-3.0 gir1.2-gtksource-4 \
-    gir1.2-vte-2.91 gir1.2-webkit2-4.1 python3 python3-gi tmux
+    gir1.2-vte-2.91 gir1.2-webkit2-4.1 python3 python3-cmarkgfm python3-gi tmux
 ```
 
 #### Fedora
@@ -73,31 +75,30 @@ Questi strumenti abilitano funzionalità aggiuntive ma non sono necessari per
 avviare SLATE. Su Debian, Ubuntu e Linux Mint, installarli con:
 
 ```console
-sudo apt install meld mercurial ripgrep tortoisehg vim-gtk3 xdg-utils
+sudo apt install meld mercurial ripgrep tortoisehg xdg-utils
 ```
 
 Su Fedora, installarli con:
 
 ```console
-sudo dnf install meld mercurial ripgrep tortoisehg vim-X11 xdg-utils
+sudo dnf install meld mercurial ripgrep tortoisehg xdg-utils
 ```
 
 Su Arch Linux, installare quelli disponibili nei repository ufficiali con:
 
 ```console
-sudo pacman -S --needed gvim meld mercurial ripgrep xdg-utils
+sudo pacman -S --needed meld mercurial ripgrep xdg-utils
 ```
 
 TortoiseHg è disponibile separatamente nell'Arch User Repository (AUR).
 
-| Strumento   | Funzionalità                                      |
-|-------------|---------------------------------------------------|
-| Meld        | Confronti grafici                                 |
-| Mercurial   | Repository Mercurial                              |
-| TortoiseHg  | Interfaccia TortoiseHg per repository Mercurial   |
-| gVim        | Modifica esterna con gVim                         |
-| ripgrep     | Ricerca nel contenuto dei file                    |
-| `xdg-open`  | Apertura con l'applicazione desktop predefinita   |
+| Strumento     | Funzionalità                                        |
+| ------------- | --------------------------------------------------- |
+| Meld          | Confronti grafici                                   |
+| Mercurial     | Repository Mercurial                                |
+| TortoiseHg    | Interfaccia TortoiseHg per repository Mercurial     |
+| ripgrep       | Ricerca nel contenuto dei file                      |
+| `xdg-open`    | Apertura con l'applicazione desktop predefinita     |
 
 Il pulsante **Codex** richiede la
 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), già installata e
@@ -153,8 +154,14 @@ New Project | New Terminal | Execute ▾ | Codex | Open URL | Incognito
 ```
 
 Il progetto attivo conserva separatamente terminali, file aperti e pagine Web.
-Le dimensioni del testo di terminale, Revisioni, File ed Editor sono regolabili
-da **Settings**.
+Le dimensioni del testo di Revisions, Files ed Editor sono regolabili da
+**Settings**. Le impostazioni Terminal controllano la barra di stato tmux.
+
+Il menu **More actions** include **Restart** subito prima di **Quit**. Restart
+salva lo stato della finestra e riavvia soltanto la GUI, mantenendo tutte le
+sessioni tmux, comprese le shell inattive. Per i file non salvati viene ancora
+chiesto se salvarli o scartarli; annullando, SLATE resta aperto. Restart non
+chiede se mantenere tmux in esecuzione.
 
 ## Terminali
 
@@ -177,16 +184,22 @@ ancora attiva, si limita a riagganciarla; se non esiste più, la ricrea alla
 prima selezione. Eseguendo `exit`, il terminale concluso viene rimosso
 dall'elenco.
 
-Un terminale può essere rinominato con **Rename** o `F2`.
+Le shell semplici hanno una history separata per ciascun terminale e progetto,
+salvata fuori dalla directory di lavoro. La sua identità resta invariata quando
+il terminale viene rinominato. Codex e i comandi personalizzati usano invece le
+impostazioni di history già previste dalla loro shell.
+
+Un terminale può essere rinominato con **Rename** o `F2`. Quando nel terminale
+è attivo Codex, SLATE invia anche `/rename NOME` per rinominare la conversazione.
 
 ### Scorciatoie
 
-| Azione                 | Scorciatoie                          |
-|------------------------|--------------------------------------|
-| Copia                  | `Ctrl+Shift+C` oppure `Ctrl+Insert`  |
-| Incolla                | `Ctrl+Shift+V` oppure `Shift+Insert` |
-| Interrompi il processo | `Ctrl+C`                             |
-| Rinomina il terminale  | `F2`                                 |
+| Azione                   | Scorciatoie                            |
+| ------------------------ | -------------------------------------- |
+| Copia                    | `Ctrl+Shift+C` oppure `Ctrl+Insert`    |
+| Incolla                  | `Ctrl+Shift+V` oppure `Shift+Insert`   |
+| Interrompi il processo   | `Ctrl+C`                               |
+| Rinomina il terminale    | `F2`                                   |
 
 `Ctrl+C` senza Shift raggiunge sempre il processo nel terminale.
 
@@ -196,9 +209,18 @@ La scheda **Revisions** rileva i repository Git e Mercurial presenti nella
 directory del progetto e nelle sue sottodirectory. Lo stato viene aggiornato
 automaticamente quando cambiano file o metadati del repository.
 
-Selezionando un file modificato viene mostrata un'anteprima del diff. I file
-nuovi mostrano il contenuto corrente; quelli rimossi mostrano la versione base;
-gli spostamenti riconosciuti appaiono come `origine → destinazione`.
+Selezionando un file testuale modificato si apre il nuovo editor in modalità
+**Compact**, inizialmente in sola lettura. Lo stesso comportamento vale in
+**Files**. Le immagini supportate mantengono la propria anteprima, adattata allo
+spazio disponibile. I file nuovi mostrano il contenuto corrente; quelli rimossi
+mostrano lo storico immutabile del repository; gli spostamenti riconosciuti
+appaiono come `origine → destinazione`.
+
+Gli aggiornamenti automatici dello stato hanno un limite di 1.000 voci per
+progetto. Al raggiungimento del limite il pannello Revisions di quel progetto
+viene bloccato con un messaggio diagnostico. Risolvere manualmente il numero
+eccessivo di file, per esempio ignorando quelli generati, poi usare **Scan**
+per riprovare. I messaggi diagnostici dello scan sono selezionabili e copiabili.
 
 ### Commit e ripristino
 
@@ -248,14 +270,13 @@ Git worktree e submodule con `.git` in forma di file non sono supportati.
 
 ### Azioni rapide sui file
 
-| Azione                                      | Scorciatoia |
-|---------------------------------------------|-------------|
-| Visualizza con l'applicazione predefinita   | `V`         |
-| Modifica nell'editor interno                | `E`         |
-| Modifica con gVim                           | `M`         |
-| Aggiungi un file nuovo                      | `A`         |
-| Elimina con conferma                        | `Delete`    |
-| Uniforma le checkbox dei file evidenziati   | `Space`     |
+| Azione                                        | Scorciatoia   |
+| --------------------------------------------- | ------------- |
+| Visualizza con l'applicazione predefinita     | `V`           |
+| Modifica nell'editor interno                  | `E`           |
+| Aggiungi un file nuovo                        | `A`           |
+| Elimina con conferma                          | `Delete`      |
+| Uniforma le checkbox dei file evidenziati     | `Space`       |
 
 ## File ed editor
 
@@ -268,16 +289,52 @@ su richiesta e mantengono espansione e posizione passando fra progetti.
 - **Hidden** mostra i file nascosti;
 - **Excluded** mostra i file ignorati dal repository;
 - **Expand** apre ricorsivamente l'albero, fermandosi sulle directory escluse
-  più pesanti.
+  più pesanti;
+- l'icona di refresh o `F5` aggiorna manualmente l'albero dei file.
 
-I metadati `.git`, `.hg` e `.svn` non vengono mai mostrati. Link simbolici e
-percorsi che escono dalla directory del progetto non possono essere usati per
-leggere, modificare o eliminare file esterni.
+I metadati `.git`, `.hg` e `.svn` non vengono mai mostrati. Files può esplorare
+directory collegate tramite symlink fuori dal progetto e mostrarne i file in
+anteprima di sola lettura. Su quei rami esterni sono bloccati modifica, terminali,
+azioni contestuali e operazioni mutanti. Alias interni dello stesso file fisico
+riutilizzano lo stesso documento editor.
 
-**Edit in SLATE** apre il file nella colonna centrale con evidenziazione
-sintattica, numeri di riga, ricerca, annullamento/ripristino e salvataggio
-atomico. Se il file cambia anche sul disco, SLATE chiede quale versione
-mantenere invece di sovrascriverla automaticamente.
+### Un editor, cinque viste
+
+Selezionare un file testuale in Files o Revisions mostra un documento temporaneo
+in sola lettura nell'area di lavoro. La sola selezione non aggiunge una scheda
+editor in **Projects**. Usare **Edit**, **Edit in SLATE** o `E` per abilitare la
+modifica e mantenere il documento nei Projects. Tutte le viste condividono lo
+stesso contenuto sorgente, la cronologia undo e il salvataggio.
+
+I pulsanti con icona e testo compaiono in questo ordine:
+
+| Vista              | Contenuto                                                             |
+| ------------------ | --------------------------------------------------------------------- |
+| **Compact**        | Diff unificato modificabile con tre righe di contesto per modifica.   |
+| **Unified**        | Diff modificabile con l'intero file e le righe rimosse.               |
+| **Side by side**   | Versione repository a sinistra, file corrente modificabile a destra.  |
+| **Editor**         | Sorgente corrente con evidenziazione sintattica e numeri di riga.     |
+| **Renderer**       | Rendering Markdown o HTML; disponibile soltanto per questi formati.   |
+
+**Compact** è il default per i file modificati. Quelli senza modifiche si aprono
+in Renderer per Markdown/HTML, altrimenti in Editor. I file non tracciati si
+aprono in Editor. La modalità scelta appartiene al documento aperto e non viene
+salvata tra riavvii. Passare a una modalità diff posiziona la vista sulla prima
+differenza; gli aggiornamenti ordinari conservano la navigazione. I pulsanti
+modifica precedente/successiva permettono di spostarsi fra i blocchi modificati.
+
+Il doppio clic su un blocco omesso in Compact espande le righe invariate. Le
+righe correnti sono modificabili direttamente in ogni modalità diff; le righe
+rimosse e lo storico del repository restano in sola lettura. Il salvataggio
+scrive soltanto il sorgente corrente, comprese le righe invariate nascoste da
+Compact. Il rendering usa un contesto per documenti locali separato, con script
+e risorse remote bloccati.
+
+L'editor offre ricerca, annullamento/ripristino e salvataggio atomico. Se il file
+cambia anche sul disco, SLATE chiede quale versione mantenere invece di
+sovrascriverla automaticamente. Dopo il salvataggio di un file PHP, un controllo
+asincrono `php -l` segnala gli errori di sintassi con un dialogo di errore;
+il file rimane salvato.
 
 L'editor supporta file testuali UTF-8 e non conserva bozze dei contenuti non
 salvati.
@@ -291,10 +348,10 @@ escluse e limite testuale di 5 MiB.
 
 La lista mostra a sinistra il testo corrispondente e a destra il percorso con
 numero di riga; spostando la selezione, l'anteprima read-only centra la riga nel relativo contesto. Sono
-mostrati al massimo 100 risultati. Dal menu contestuale o con `V`, `E`, `M` e
-`D` è possibile rispettivamente aprire il file, modificarlo nell'editor interno
-di SLATE, modificarlo con l'editor esterno configurato o visualizzarne la patch
-disponibile in Meld. `Esc` chiude la ricerca.
+mostrati al massimo 100 risultati. Dal menu contestuale o con `V`, `E` e `D`
+è possibile rispettivamente aprire il file con l'applicazione desktop,
+modificarlo in SLATE o visualizzarne la patch disponibile in Meld. `Esc` chiude
+la ricerca.
 
 Se `rg` non è installato, SLATE continua ad avviarsi normalmente e disabilita
 soltanto questa funzione.
@@ -312,14 +369,14 @@ Il menu **Responsive** centra la pagina dentro dimensioni predefinite e la
 riduce quando non entra nello spazio disponibile. Non emula touch, DPR o
 user-agent. `F12` o `Ctrl+Shift+I` aprono gli strumenti di sviluppo WebKit.
 
-| Azione                         | Scorciatoia                 |
-|--------------------------------|-----------------------------|
-| Attiva la barra URL            | `Ctrl+L`                    |
-| Indietro/Avanti                | `Alt+←` / `Alt+→`           |
-| Ricarica                       | `Ctrl+R` oppure `F5`        |
-| Interrompi                     | `Esc`                       |
-| Chiudi la pagina               | `Ctrl+W`                    |
-| Apri gli strumenti di sviluppo | `F12` oppure `Ctrl+Shift+I` |
+| Azione                           | Scorciatoia                   |
+| -------------------------------- | ----------------------------- |
+| Attiva la barra URL              | `Ctrl+L`                      |
+| Indietro/Avanti                  | `Alt+←` / `Alt+→`             |
+| Ricarica                         | `Ctrl+R` oppure `F5`          |
+| Interrompi                       | `Esc`                         |
+| Chiudi la pagina                 | `Ctrl+W`                      |
+| Apri gli strumenti di sviluppo   | `F12` oppure `Ctrl+Shift+I`   |
 
 ## Dati e sessioni tmux
 
