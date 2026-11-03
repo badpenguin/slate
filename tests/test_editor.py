@@ -428,6 +428,52 @@ class EditorTest(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o751)
         editor.close()
 
+    def test_unchanged_external_read_restores_save_after_concurrent_edit(self) -> None:
+        """Typing during an unchanged disk check leaves Save enabled and state published."""
+
+        editor = self._document()
+        editor._begin_load("external")
+        editor.buffer.insert(editor.buffer.get_end_iter(), "local edit")
+        self.assertFalse(editor.save_button.get_sensitive())
+        self._wait_until(lambda: not editor.loading)
+        self.assertTrue(editor.dirty)
+        self.assertTrue(editor.save_button.get_sensitive())
+        self.assertEqual(self.states[-1], (True, False))
+        self.assertFalse(editor.external_conflict)
+        editor.close()
+
+    def test_dirty_external_check_uses_metadata_even_if_disk_file_is_oversized(self) -> None:
+        """A large external replacement preserves local text and the explicit conflict choice."""
+
+        editor = self._document()
+        editor.buffer.set_text("local version")
+        self.path.write_bytes(b"x" * (editor.MAX_TEXT_BYTES + 1))
+        with patch("gi.repository.Gio.File.load_contents_async") as load:
+            editor._handle_external_change()
+            self._wait_until(lambda: not editor.loading)
+            load.assert_not_called()
+        self.assertTrue(editor.external_conflict)
+        self.assertTrue(editor.view.get_editable())
+        self.assertTrue(editor.save_button.get_sensitive())
+        self.assertEqual(editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True),
+                         "local version")
+        editor.close()
+
+    def test_snapshot_dirty_comparison_is_cached_until_text_changes(self) -> None:
+        """Repeated dirty queries reuse their result, but edits invalidate the cache."""
+
+        editor = self._document()
+        editor.saved_snapshot = "saved version"
+        with patch.object(editor.buffer, "get_text", wraps=editor.buffer.get_text) as read:
+            self.assertTrue(editor.dirty)
+            self.assertTrue(editor.dirty)
+            self.assertEqual(read.call_count, 1)
+        editor.buffer.set_text("saved version")
+        self.assertFalse(editor.dirty)
+        editor.saved_snapshot = "different saved version"
+        self.assertTrue(editor.dirty)
+        editor.close()
+
     def test_external_clean_reload_is_silent(self) -> None:
         """An external write silently reloads a buffer without local edits."""
 
@@ -470,6 +516,7 @@ class EditorTest(unittest.TestCase):
         self.path.unlink()
 
         editor._handle_external_change()
+        self._wait_until(lambda: not editor.loading)
 
         self.assertEqual(self.removed, [])
         self.assertTrue(editor.external_conflict)
@@ -586,6 +633,7 @@ class EditorTest(unittest.TestCase):
         editor.buffer.set_text("# Locale\n")
         self.path.write_text("# Esterno\n", encoding="utf-8")
         editor._handle_external_change()
+        self._wait_until(lambda: not editor.loading)
         self.assertTrue(editor.external_conflict)
         self.assertTrue(editor.attention)
         editor._on_info_response(editor.info_bar, editor.RESPONSE_MINE)
