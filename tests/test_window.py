@@ -1421,10 +1421,12 @@ class WindowActionTest(unittest.TestCase):
             status_changed = watchers.call_args.args[2]
             history_changed = watchers.call_args.args[6]
         original = [document.experimental.base_identity for document in documents]
+        owner.panel.clear_error.reset_mock()
         status_changed([FileStatus("file", "modified")], "main")
         self.assertEqual(owner._configure_experimental.call_args_list, [
             call(documents[0]), call(historical, historical.history_status)])
         self.assertEqual([document.experimental.base_identity for document in documents], original)
+        owner.panel.clear_error.assert_not_called()
         owner._configure_experimental.reset_mock()
         history_changed()
         owner._configure_experimental.assert_not_called()
@@ -1436,6 +1438,30 @@ class WindowActionTest(unittest.TestCase):
         status_changed([FileStatus("file", "modified")], "main")
         self.assertEqual(owner._configure_experimental.call_args_list, [
             call(documents[0]), call(historical, historical.history_status)])
+
+    def test_repository_errors_preserve_other_scopes_and_projects(self) -> None:
+        """Repository recovery clears the panel only when all active-project reads recovered."""
+
+        first = SimpleNamespace(read_errors={"ignored": "ignore failure"})
+        second = SimpleNamespace(read_errors={"branch": "branch failure"})
+        other = SimpleNamespace(read_errors={"status": "other project failure"})
+        owner = SimpleNamespace(panel=MagicMock(), watchers={
+            ("repo", RepositoryRef(".", "hg")): first,
+            ("repo", RepositoryRef("nested", "git")): second,
+            ("other", RepositoryRef(".", "git")): other,
+        })
+        SlateWindow._refresh_repository_errors(owner, "repo")
+        message = owner.panel.show_error.call_args.args[0]
+        self.assertIn("ignore failure", message)
+        self.assertIn("branch failure", message)
+        self.assertNotIn("other project failure", message)
+        first.read_errors.clear()
+        SlateWindow._refresh_repository_errors(owner, "repo")
+        self.assertIn("branch failure", owner.panel.show_error.call_args.args[0])
+        owner.panel.clear_error.assert_not_called()
+        second.read_errors.clear()
+        SlateWindow._refresh_repository_errors(owner, "repo")
+        owner.panel.clear_error.assert_called_once_with()
 
     def test_rename_does_not_start_while_an_affected_editor_is_saving(self) -> None:
         """The UI gate rejects a rename before launching any filesystem mutation."""
