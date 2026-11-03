@@ -411,6 +411,50 @@ class ExperimentalEditorTest(unittest.TestCase):
             new_callback(CommandResult((), 0, "current baseline", ""))
             self.assertEqual(self.presentation.base, "current baseline")
 
+    def test_failed_repository_read_can_be_retried_on_reopen(self) -> None:
+        """A failed or timed-out read never caches an unavailable baseline."""
+
+        scm = SimpleNamespace(root=self.temporary.name, kind="hg", environment={})
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout), patch("slate.experimental_editor.run_async") as run:
+                self.presentation.base_identity = None
+                self.presentation.configure_base(scm, "style.css", "modified")
+                callback = run.call_args.args[1]
+                if timeout:
+                    GLib.source_remove(self.presentation.base_timeout)
+                    self.presentation._base_timed_out()
+                else:
+                    callback(CommandResult((), 1, "", "temporary error"))
+                self.presentation.configure_base(scm, "style.css", "modified")
+                self.assertEqual(run.call_count, 2)
+                if timeout:
+                    callback(CommandResult((), 0, "stale", ""))
+                    self.assertIsNone(self.presentation.base)
+                run.call_args.args[1](CommandResult((), 0, "recovered", ""))
+                self.assertEqual(self.presentation.base, "recovered")
+
+    def test_diff_timeout_blocks_identical_work_until_either_version_changes(self) -> None:
+        """Remapping a timed-out diff does not restart its worker for unchanged texts."""
+
+        self.presentation.command = MagicMock()
+        command = self.presentation.command
+        self.presentation._diff_timed_out()
+        command.cancel.assert_called_once_with()
+        for mode in ("compact", "unified", "side"):
+            self.assertIsNotNone(self.presentation._projection_error(mode))
+            self.assertFalse(self.presentation.mode_buttons[mode].get_sensitive())
+        with patch.object(self.editor, "get_mapped", return_value=True), patch(
+                "slate.experimental_editor.GLib.timeout_add") as timer, patch(
+                "slate.experimental_editor.GLib.idle_add") as idle:
+            self.presentation.schedule()
+            timer.assert_not_called()
+            idle.assert_not_called()
+        self.presentation.serial += 1
+        self.assertIsNone(self.presentation._projection_error("unified"))
+        self.presentation.serial -= 1
+        self.presentation.base_serial += 1
+        self.assertIsNone(self.presentation._projection_error("unified"))
+
     def test_historical_document_cannot_be_saved_or_recreated(self) -> None:
         """Viewing a deleted file never creates a replacement on disk."""
 
