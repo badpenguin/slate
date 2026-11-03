@@ -253,6 +253,9 @@ class ExperimentalEditor(Gtk.Box):
                 self._choose_initial(self.base != self.text())
                 self.schedule()
             else:
+                # 2026-11-03: un errore transitorio non è una base valida;
+                # una successiva apertura deve poter ripetere la lettura.
+                self.base_identity = None
                 self._choose_initial(False)
                 self._error("Repository version unavailable; Code remains available.")
 
@@ -264,6 +267,7 @@ class ExperimentalEditor(Gtk.Box):
 
         self.base_timeout = None
         self.base_serial += 1
+        self.base_identity = None
         if self.base_command is not None:
             self.base_command.cancel()
             self.base_command = None
@@ -547,11 +551,17 @@ class ExperimentalEditor(Gtk.Box):
 
         self.timeout = None
         self.job_serial += 1
+        # 2026-11-03: le tre viste condividono lo stesso calcolo; rimappare
+        # il documento non deve ripetere un timeout sugli stessi due testi.
+        message = "Diff computation timed out; use Code."
+        for mode in ("compact", "unified", "side"):
+            self.projection_errors[mode] = (self.serial, self.base_serial, message)
+        self._sync_mode_buttons()
         if self.command is not None:
             command = self.command
             self.command = None
             command.cancel()
-        self._error("Diff computation timed out; use Code.")
+        self._error(message)
         return GLib.SOURCE_REMOVE
 
     def _replace_spans(self, rows=None, expanded_gaps=None) -> None:
