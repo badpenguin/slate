@@ -1645,7 +1645,6 @@ class SlateWindow(Gtk.ApplicationWindow):
             if repo_key[0] == self.active_project_name:
                 self.panel.update_status(qualified, branch, repo_key[1])
                 self._update_active_revision_count()
-                self.panel.clear_error()
                 self._refresh_visible_preview(qualified, repo_key[1])
 
         def watcher_error(
@@ -1653,9 +1652,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         ) -> None:
             """Show errors only for repositories in the visible project."""
 
-            self.project_limit.fail_scan(repo_key[0])
+            if message:
+                self.project_limit.fail_scan(repo_key[0])
             if repo_key[0] == self.active_project_name:
-                self.panel.show_error(f"{repo_key[1]}: {message}")
+                SlateWindow._refresh_repository_errors(
+                    self, repo_key[0], f"{repo_key[1]}: {message}" if message else ""
+                )
 
         def file_changed(
             relative: str, repo_key: tuple[str, RepositoryRef] = key
@@ -1721,6 +1723,24 @@ class SlateWindow(Gtk.ApplicationWindow):
             watcher.suspend_for_limit()
         self._update_repository_boundaries(project_name)
         watcher.set_active(project_name == self.active_project_name)
+
+    def _refresh_repository_errors(self, project_name: str, fallback: str = "") -> None:
+        """Display unresolved read errors across all repositories of the active project."""
+
+        # 2026-11-03: ogni lettura rimuove soltanto il proprio errore;
+        # la ripresa di un repository e il cambio scheda non nascondono gli altri.
+        errors = [
+            f"{repository}: {detail}"
+            for (name, repository), watcher in self.watchers.items()
+            if name == project_name
+            for detail in watcher.read_errors.values()
+        ]
+        if errors:
+            self.panel.show_error("\n".join(errors))
+        elif fallback:
+            self.panel.show_error(fallback)
+        else:
+            self.panel.clear_error()
 
     def _block_project_revisions(self, project_name: str) -> None:
         """Suspend all SCM observers for an overloaded project, including inactive ones."""
@@ -2682,7 +2702,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.panel.set_repositories(
             repositories, project["name"] in self.discovery_by_project
         )
-        self.panel.clear_error()
+        SlateWindow._refresh_repository_errors(self, project["name"])
         for repository in repositories:
             cached = self.snapshots.get((project["name"], repository))
             if cached:
