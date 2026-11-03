@@ -86,6 +86,7 @@ class EditorDocument(Gtk.Box):
         self.save_cancellable: Gio.Cancellable | None = None
         self.save_callbacks: list[Callable[[bool], None]] = []
         self.saved_snapshot: str | None = None
+        self.dirty_cache = None
         self.lint_command: AsyncCommand | None = None
         self.lint_serial = 0
         self.lint_dialog: Gtk.MessageDialog | None = None
@@ -120,8 +121,11 @@ class EditorDocument(Gtk.Box):
         # 2026-10-30: dopo una scrittura concorrente il save-point nativo
         # può indicare una versione precedente a quella realmente sul disco.
         if self.saved_snapshot is not None:
+            if self.dirty_cache is not None and self.dirty_cache[0] is self.saved_snapshot:
+                return self.dirty_cache[1]
             text = self.buffer.get_text(self.buffer.get_start_iter(), self.buffer.get_end_iter(), True)
-            return text != self.saved_snapshot
+            self.dirty_cache = (self.saved_snapshot, text != self.saved_snapshot)
+            return self.dirty_cache[1]
         return self.buffer.get_modified()
 
     def _safe_path(self) -> str | None:
@@ -236,6 +240,9 @@ class EditorDocument(Gtk.Box):
         """Create the editable GtkSource buffer and its scrolling view."""
 
         self.buffer = GtkSource.Buffer()
+        # 2026-11-03: il confronto con lo snapshot salvato si ripete soltanto
+        # dopo modifiche al testo, non per ogni lettura dello stato della UI.
+        self.buffer.connect("changed", self._invalidate_dirty_cache)
         self.buffer.set_highlight_syntax(True)
         self.buffer.set_max_undo_levels(500)
         self.buffer.connect("modified-changed", self._on_modified_changed)
@@ -356,7 +363,7 @@ class EditorDocument(Gtk.Box):
         # 2026-10-30: rifiutare i file già troppo grandi prima di leggerli
         # interamente; mantenere anche il controllo finale contro crescite tardive.
         self.file.query_info_async(
-            "standard::size", Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT,
+            "standard::size,etag::value", Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT,
             self.load_cancellable, self._on_load_info, (reason, self.load_cancellable),
         )
 
@@ -372,6 +379,18 @@ class EditorDocument(Gtk.Box):
             self.load_cancellable = None
             self._load_failed(reason, error)
             return
+        if reason == "external" and self.dirty:
+            # 2026-11-03: con modifiche locali bastano i metadati: non leggere
+            # interamente il file né disabilitare il buffer se è diventato enorme.
+            self.load_cancellable = None
+            etag = info.get_attribute_string("etag::value")
+            if self.etag is not None and etag == self.etag:
+                self.loading = False
+                self._ensure_monitor()
+                self._on_modified_changed(self.buffer)
+            else:
+                self._finish_external_conflict()
+            return
         if info.get_size() > self.MAX_TEXT_BYTES:
             self.load_cancellable = None
             self._reject_loaded_file(reason, "File over 5 MiB: internal editing is unavailable.")
@@ -382,6 +401,7 @@ class EditorDocument(Gtk.Box):
         """Report a failed metadata or content read using the same conflict rules."""
 
         self.loading = False
+        self._on_modified_changed(self.buffer)
         if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
             return
         if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND):
@@ -421,20 +441,13 @@ class EditorDocument(Gtk.Box):
             # azzeri inutilmente cronologia, selezione e scroll del buffer.
             self.loading = False
             self._ensure_monitor()
+            self._on_modified_changed(self.buffer)
             return
         if reason == "external" and self.dirty:
             # 2026-08-23: l'utente può iniziare a digitare mentre la lettura
             # asincrona è attiva; il contenuto locale deve allora diventare un
             # conflitto esplicito, mai essere sostituito dal callback tardivo.
-            self.loading = False
-            self.external_conflict = True
-            self.deleted_conflict = False
-            self.attention = True
-            self._show_conflict(
-                "The file changed on disk while it contains local changes.",
-                (("Use version on disk", self.RESPONSE_DISK), ("Keep my version", self.RESPONSE_MINE)),
-            )
-            self.on_state(self)
+            self._finish_external_conflict()
             return
         data = bytes(contents)
         if len(data) > self.MAX_TEXT_BYTES:
@@ -490,6 +503,19 @@ class EditorDocument(Gtk.Box):
             line = self.pending_line
             self.pending_line = None
             self.goto_line_number(line, focus=False)
+
+    def _finish_external_conflict(self) -> None:
+        """Finish an external check while preserving local edits for an explicit choice."""
+
+        self.loading = False
+        self.external_conflict = True
+        self.deleted_conflict = False
+        self.attention = True
+        self._show_conflict(
+            "The file changed on disk while it contains local changes.",
+            (("Use version on disk", self.RESPONSE_DISK), ("Keep my version", self.RESPONSE_MINE)),
+        )
+        self._on_modified_changed(self.buffer)
 
     def _reject_loaded_file(self, reason: str, message: str) -> None:
         """Remove an unsupported new tab or retain an existing editor with notice."""
@@ -631,22 +657,9 @@ class EditorDocument(Gtk.Box):
                 delay, self._handle_external_change
             )
             return GLib.SOURCE_REMOVE
-        exists = bool(self.path and Path(self.path).exists())
-        if not exists:
-            self._show_deleted_conflict()
-            return GLib.SOURCE_REMOVE
-        if self.dirty:
-            self._ensure_monitor()
-            self.external_conflict = True
-            self.deleted_conflict = False
-            self.attention = True
-            self._show_conflict(
-                "The file changed on disk while it contains local changes.",
-                (("Use version on disk", self.RESPONSE_DISK), ("Keep my version", self.RESPONSE_MINE)),
-            )
-            self.on_state(self)
-        else:
-            self._begin_load("external")
+        # 2026-11-03: la lettura Gio gestisce anche NOT_FOUND e i conflitti;
+        # evitare exists() sincrono e distinguere eventi senza cambio di etag.
+        self._begin_load("external")
         return GLib.SOURCE_REMOVE
 
     def _show_deleted_conflict(self) -> None:
@@ -1139,6 +1152,13 @@ class EditorDocument(Gtk.Box):
         )
         if not self.loading:
             self.on_state(self)
+
+    def _invalidate_dirty_cache(self, _buffer: GtkSource.Buffer) -> None:
+        """Invalidate the saved-snapshot comparison whenever buffer text changes."""
+
+        self.dirty_cache = None
+        if self.saved_snapshot is not None:
+            self._on_modified_changed(_buffer)
 
     def _on_history_restored(self, buffer: GtkSource.Buffer) -> None:
         """Reconcile undo and redo with the snapshot actually written during a concurrent save."""
