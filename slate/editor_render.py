@@ -1,11 +1,13 @@
 """Isolated local-document rendering for the experimental editor."""
 
 import html
+from functools import partial
 from pathlib import Path
 from urllib.parse import quote, unquote, urldefrag, urlsplit
 
 from gi.repository import Gio, GLib
 
+from .resource_path import ResourcePath
 from .browser import WebKit2
 from .preview import github_flavored_markdown_to_html
 
@@ -65,14 +67,18 @@ class DocumentRenderer:
             # 2026-10-30: il watcher di progetto invalida il rendering solo
             # per risorse effettivamente richieste, senza monitor aggiuntivi.
             self.resource_paths.add(relative)
-            target = (self.root / relative).resolve(strict=True)
-            target.relative_to(self.root)
-            self.resource_paths.add(target.relative_to(self.root).as_posix())
-            if not target.is_file():
-                raise ValueError("Resource is not a file")
         except (ValueError, OSError, RuntimeError):
             request.finish(Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(b"")), 0, "text/plain")
             return
+        ResourcePath(self.root, relative, self.cancellable, partial(self._resource_ready, request))
+
+    def _resource_ready(self, request, target) -> None:
+        """Open a validated local resource after asynchronous path inspection."""
+
+        if self.closed or target is None:
+            request.finish(Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(b"")), 0, "text/plain")
+            return
+        self.resource_paths.add(target.relative_to(self.root).as_posix())
         content_type, _uncertain = Gio.content_type_guess(str(target), None)
         mime = Gio.content_type_get_mime_type(content_type) or "application/octet-stream"
 
