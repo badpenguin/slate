@@ -84,6 +84,26 @@ class DiffSyntaxTest(unittest.TestCase):
                 foreground = tag.get_property("foreground-rgba").to_string()
         return foreground
 
+    def test_unstyled_rows_yield_before_scanning_the_whole_projection(self) -> None:
+        """Plain text still respects the copier iteration and time budgets."""
+
+        syntax = self.view.syntax
+        syntax.pause()
+        self.editor.buffer.set_text("".join(f"plain {index}\nextra {index}\n" for index in range(400)))
+        self.view.base = "".join(f"plain {index}\n" for index in range(400))
+        self.view.old_buffer.set_text(self.view.base)
+        self.editor.buffer.set_language(None)
+        self.view.old_buffer.set_language(None)
+        self.view.rows = project_diff(self.view.base, self.view.text())
+        self.view._replace_spans()
+        self.view._render_projection()
+        syntax.pause()
+        syntax.mode = "unified"
+        with patch("slate.editor_syntax.GLib.get_monotonic_time", return_value=0):
+            self.assertTrue(syntax._apply())
+        self.assertIsNotNone(syntax.runs)
+        self._flush_syntax()
+
     def test_unified_uses_independent_lexers_for_removed_and_current_text(self) -> None:
         """An unfinished removed string cannot color current identifiers, numbers or comments."""
 
