@@ -301,6 +301,47 @@ class _RepoWatcherSchedulingFixture:
         argv, callback = self.calls[index]
         callback(CommandResult(tuple(argv), 0, stdout, ""))
 
+    def test_ignore_change_refreshes_rules_and_complete_status(self) -> None:
+        """Ignore edits reclassify all cached paths rather than only the rule file."""
+
+        self._complete(0)
+        self._complete(1, "main")
+        self._complete(2, "[]" if self.watcher.scm.kind == "hg" else "")
+        self.watcher._statuses = {"new.txt": FileStatus("new.txt", "untracked")}
+        self.watcher._publish_status()
+        rule = ".gitignore" if self.watcher.scm.kind == "git" else ".hgignore"
+        self.watcher._on_change(None, Gio.File.new_for_path(str(self.root / rule)), None,
+                                Gio.FileMonitorEvent.CHANGES_DONE_HINT)
+        self._drain_main_context()
+        self.assertEqual(self.calls[3][0], self.watcher.scm.ignored_argv(()))
+        self._complete(3)
+        self.assertEqual(self.calls[4][0], self.watcher.scm.status_argv(()))
+        self._complete(4, "[]" if self.watcher.scm.kind == "hg" else "")
+        self.assertEqual(self.statuses[-1][0], [])
+
+    def test_read_errors_recover_independently_even_with_unchanged_status(self) -> None:
+        """Status success preserves ignore/branch errors; each recovery clears only its scope."""
+
+        self._complete(0)
+        self._complete(1, "main")
+        self._complete(2, "[]" if self.watcher.scm.kind == "hg" else "")
+        self.watcher.on_error = MagicMock()
+        failed = CommandResult((), 1, "", "temporary failure")
+        self.watcher._on_ignored(failed)
+        self.watcher._on_branch(failed)
+        output = "[]" if self.watcher.scm.kind == "hg" else ""
+        published = len(self.statuses)
+        self.watcher._on_status((), CommandResult((), 0, output, ""))
+        self.assertEqual(set(self.watcher.read_errors), {"ignored", "branch"})
+        self.watcher._on_ignored(CommandResult((), 0, "", ""))
+        self.assertEqual(set(self.watcher.read_errors), {"branch"})
+        self.assertIn("branch", self.watcher.on_error.call_args.args[0])
+        self.watcher._on_branch(CommandResult((), 0, "main", ""))
+        self.assertEqual(self.watcher.read_errors, {})
+        self.watcher.on_error.assert_called_with("")
+        self.assertEqual(len(self.statuses), published)
+
+
 
 class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase):
     """Verify that automatic Mercurial reads are coalesced and sequential."""
@@ -663,6 +704,23 @@ class GitRepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestC
         self._complete(0)
         self._complete(1, "main\n")
         self._complete(2)
+
+    def test_nested_ignore_and_ignore_rename_queue_full_refresh(self) -> None:
+        """Nested rules and atomic replacements invalidate rules and complete Git status."""
+
+        self._finish_startup()
+        for source, destination in (("src/.gitignore", None), ("src/temp", "src/.gitignore"),
+                                    ("src/.gitignore", "src/old-ignore")):
+            with self.subTest(source=source, destination=destination), patch.object(
+                    self.watcher, "request_full") as full:
+                self.watcher._on_change(
+                    None, Gio.File.new_for_path(str(self.root / source)),
+                    Gio.File.new_for_path(str(self.root / destination)) if destination else None,
+                    Gio.FileMonitorEvent.RENAMED if destination else Gio.FileMonitorEvent.CHANGES_DONE_HINT)
+                full.assert_called_once_with(refresh_ignored=True)
+        with patch.object(self.watcher, "request_full") as full:
+            self.watcher._on_git_metadata_change(".git/info/exclude", Gio.FileMonitorEvent.CHANGED)
+            full.assert_called_once_with(refresh_ignored=True)
 
     def test_git_startup_is_strictly_sequential(self) -> None:
         """Git never starts branch or status alongside its ignore query."""
