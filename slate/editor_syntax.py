@@ -161,7 +161,8 @@ class DiffSyntaxHighlighter:
         try:
             for _index in range(300):
                 source_tag, left, right = next(self.runs)
-                self._copy_style(source_tag, left, right)
+                if source_tag is not None:
+                    self._copy_style(source_tag, left, right)
                 if GLib.get_monotonic_time() >= deadline:
                     return GLib.SOURCE_CONTINUE
         except StopIteration:
@@ -181,6 +182,9 @@ class DiffSyntaxHighlighter:
         """Yield independent source styles mapped through the latest canonical and visual marks."""
 
         for span in self.presentation.spans:
+            # 2026-11-03: anche righe senza stili e span omessi consumano
+            # tempo; restituire un checkpoint rende effettivo il budget idle.
+            yield None, 0, 0
             if span.visual_start is None or span.visual_start.get_deleted():
                 continue
             if span.start is not None:
@@ -209,6 +213,7 @@ class DiffSyntaxHighlighter:
                 for source_tag in start.get_tags():
                     yield source_tag, left, right
                 start = following
+                yield None, 0, 0
 
     def _copy_style(self, source_tag, left: int, right: int) -> None:
         """Copy only explicit syntax foreground and font properties, preserving diff semantics."""
