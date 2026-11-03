@@ -65,6 +65,7 @@ class RepoWatcher:
         self.scm = scm
         self.on_status = on_status
         self.on_error = on_error or self._ignore_error
+        self.read_errors: dict[str, str] = {}
         self.on_file_change = on_file_change or self._ignore_file_change
         self.on_ignored = on_ignored or self._ignore_ignored
         self.on_history_change = on_history_change or self._ignore_history_change
@@ -344,12 +345,13 @@ class RepoWatcher:
         if result.ok:
             try:
                 self.ignored = self.scm.parse_ignored(result.stdout)
+                self._set_read_error("ignored", None)
             except (ValueError, TypeError) as error:
-                self.on_error(
+                self._set_read_error("ignored",
                     f"Invalid {self.scm.display_name} ignored files: {error}"
                 )
         else:
-            self.on_error(self._describe_error("Reading ignored files", result))
+            self._set_read_error("ignored", self._describe_error("Reading ignored files", result))
         # 2026-08-16: il file manager riusa la stessa classificazione del
         # watcher, evitando un secondo comando VCS e filtri divergenti.
         self.on_ignored(set(self.ignored))
@@ -373,9 +375,10 @@ class RepoWatcher:
 
         if result.ok:
             self._branch = result.stdout.strip()
+            self._set_read_error("branch", None)
             self._mount_git_branch_monitor()
         else:
-            self.on_error(
+            self._set_read_error("branch",
                 self._describe_error(
                     f"Reading {self.scm.display_name} branch", result
                 )
@@ -385,7 +388,7 @@ class RepoWatcher:
         """Merge a full or path-limited SCM result into the stable snapshot."""
 
         if not result.ok:
-            self.on_error(
+            self._set_read_error("status",
                 self._describe_error(
                     f"Updating {self.scm.display_name}", result
                 )
@@ -429,7 +432,7 @@ class RepoWatcher:
                         break
             except (ValueError, TypeError) as error:
                 self.processing = False
-                self.on_error(f"Invalid {self.scm.display_name} status: {error}")
+                self._set_read_error("status", f"Invalid {self.scm.display_name} status: {error}")
                 if not paths and not self._initial_full_complete:
                     self._complete_initial_full_status()
                 if self.paused:
@@ -441,6 +444,7 @@ class RepoWatcher:
                 self.parse_idle_id = GLib.idle_add(consume)
                 return GLib.SOURCE_REMOVE
             self.processing = False
+            self._set_read_error("status", None)
             self._apply_status(paths, list(incoming.values()), overflow)
             if self.paused:
                 self._schedule_pause_ready()
@@ -928,8 +932,15 @@ class RepoWatcher:
             ).replace(os.sep, "/")
             if not self._is_nested_repository_path(other_relative):
                 paths.append(other_relative)
-        if relative in {".hgignore", ".gitignore"}:
-            self._pending_ignored = True
+        # 2026-11-03: ignore rules reclassify paths beyond the changed file,
+        # including nested Git rules and renames into or away from an ignore file.
+        if any(
+            (self.scm.kind == "hg" and item == ".hgignore")
+            or (self.scm.kind == "git" and Path(item).name == ".gitignore")
+            for item in paths
+        ):
+            self.request_full(refresh_ignored=True)
+            return
         self.request_paths(paths)
 
     def _is_relevant_metadata_path(self, relative: str) -> bool:
@@ -1027,8 +1038,20 @@ class RepoWatcher:
             self.request_full()
             return
         if relative == ".git/info/exclude":
-            self._pending_ignored = True
-            self._schedule_pending()
+            self.request_full(refresh_ignored=True)
+
+    def _set_read_error(self, scope: str, message: str | None) -> None:
+        """Keep independent read errors until their own operation succeeds."""
+
+        # 2026-11-03: a successful status cannot certify that branch/ignore
+        # reads recovered. Notify recovery even when the file snapshot is equal.
+        previous = dict(self.read_errors)
+        if message is None:
+            self.read_errors.pop(scope, None)
+        else:
+            self.read_errors[scope] = message
+        if message is not None or previous != self.read_errors:
+            self.on_error("\n".join(self.read_errors.values()))
 
     @staticmethod
     def _describe_error(context: str, result: CommandResult) -> str:
