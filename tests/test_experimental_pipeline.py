@@ -63,22 +63,38 @@ class ExperimentalPipelineTest(unittest.TestCase):
             (root / "style.css").write_text("body{}")
             (Path(directory) / "private.txt").write_text("private")
             (root / "escape").symlink_to(Path(directory) / "private.txt")
+            (root / "internal").symlink_to("style.css")
+            (root / "loop").symlink_to("loop")
             renderer = DocumentRenderer.__new__(DocumentRenderer)
             renderer.root = root
             renderer.closed = False
             renderer.resource_paths = set()
             renderer.cancellable = Gio.Cancellable()
-            with patch("slate.editor_render.Gio.File.new_for_path") as file_factory:
-                for path in ("../private.txt", "escape", "%2e%2e/private.txt"):
-                    request = MagicMock()
-                    request.get_uri.return_value = "slate-editor://preview/" + path
-                    renderer._resource(request)
-                    request.finish.assert_called_once()
-                file_factory.assert_not_called()
+            for path in ("../private.txt", "escape", "%2e%2e/private.txt", "loop", "missing", "internal", "style.css"):
                 request = MagicMock()
-                request.get_uri.return_value = "slate-editor://preview/style.css"
-                renderer._resource(request)
-                file_factory.assert_called_once_with(str(root / "style.css"))
+                request.get_uri.return_value = "slate-editor://preview/" + path
+                loop = GLib.MainLoop()
+
+                def finished(*args):
+                    """End the isolated resource request after async validation and open."""
+
+                    loop.quit()
+
+                request.finish.side_effect = finished
+                timeout = GLib.timeout_add(2000, loop.quit)
+                try:
+                    renderer._resource(request)
+                    if not request.finish.called:
+                        loop.run()
+                    request.finish.assert_called_once()
+                    if path in {"style.css", "internal"}:
+                        stream = request.finish.call_args.args[0]
+                        self.assertEqual(stream.read_bytes(32, None).get_data(), b"body{}")
+                        stream.close(None)
+                    else:
+                        self.assertEqual(request.finish.call_args.args[1], 0)
+                finally:
+                    GLib.source_remove(timeout)
 
     def test_rendered_document_has_strict_csp_and_relative_asset_base(self) -> None:
         """An HTML buffer cannot opt into scripts, remote resources or arbitrary files."""
