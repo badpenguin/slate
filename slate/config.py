@@ -171,8 +171,13 @@ def _normalize_browser_url(value: Any) -> str | None:
         return None
     if url == "about:blank":
         return url
-    parsed = urlsplit(url)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return None
+    except ValueError:
+        # 2026-11-04: scartare solo l'URL malformato; una scheda con IPv6
+        # incompleto non deve invalidare il caricamento di tutti i progetti.
         return None
     return url
 
@@ -211,6 +216,8 @@ class ConfigStore:
 
         if not isinstance(raw, dict):
             raise TypeError("the JSON root must be an object")
+        # 2026-11-04: i riferimenti sono path Linux; conservare i backslash
+        # letterali evita di ripristinare schede o directory su file diversi.
         data = copy.deepcopy(DEFAULT_CONFIG)
         projects = raw.get("projects", [])
         if not isinstance(projects, list):
@@ -297,7 +304,7 @@ class ConfigStore:
                     if not isinstance(item, dict):
                         continue
                     project_name = str(item.get("project", ""))
-                    raw_path = str(item.get("path", "")).replace("\\", "/")
+                    raw_path = str(item.get("path", ""))
                     path = raw_path.strip("/")
                     key = (project_name, path)
                     if (
@@ -313,7 +320,7 @@ class ConfigStore:
             data["editor"]["tabs"] = tabs
             active = raw_editor.get("active_tab")
             if isinstance(active, dict):
-                raw_active_path = str(active.get("path", "")).replace("\\", "/")
+                raw_active_path = str(active.get("path", ""))
                 active_key = (
                     str(active.get("project", "")),
                     raw_active_path.strip("/"),
@@ -426,7 +433,7 @@ class ConfigStore:
                 if not isinstance(item, dict):
                     continue
                 kind = str(item.get("kind", ""))
-                raw_value = str(item.get("value", "")).replace("\\", "/")
+                raw_value = str(item.get("value", ""))
                 value = raw_value.strip("/")
                 reference = (kind, value)
                 valid_terminal = kind == "terminal" and value in terminal_names
@@ -462,7 +469,7 @@ class ConfigStore:
             # 2026-08-16: conserviamo soltanto path relativi canonici; valori
             # assoluti o con traversal non devono uscire dal progetto gestito.
             for item in raw_expanded:
-                raw_value = str(item).replace("\\", "/")
+                raw_value = str(item)
                 parts = raw_value.split("/")
                 if raw_value.startswith("/") or ".." in parts:
                     continue
@@ -532,7 +539,9 @@ class ConfigStore:
     def _normalize_repository_path(value: Any) -> str | None:
         """Accept only canonical project-relative repository identifiers."""
 
-        raw_value = str(value).replace("\\", "/")
+        # 2026-11-04: anche i nomi dei repository mantengono i backslash
+        # letterali, coerentemente con gli altri riferimenti del filesystem.
+        raw_value = str(value)
         if raw_value == ".":
             return "."
         path = raw_value.strip("/")
