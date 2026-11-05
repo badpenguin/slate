@@ -28,6 +28,22 @@ from slate.search import (
 class SearchCommandTest(unittest.TestCase):
     """Verify ripgrep arguments, JSON parsing and global result bounds."""
 
+    def test_selected_php_and_css_symbols_match_the_cursor_token(self) -> None:
+        """Selecting PHP sigils or CSS prefixes preserves the definition-search identity."""
+
+        buffer = Gtk.TextBuffer()
+        for text, expected in (("$config", "config"), ("--theme-color", "theme-color"), ("deploy", "deploy")):
+            with self.subTest(text=text):
+                buffer.set_text(text)
+                buffer.select_range(buffer.get_start_iter(), buffer.get_end_iter())
+                self.assertEqual(source_symbol_at_cursor(buffer), expected)
+                buffer.place_cursor(buffer.get_iter_at_offset(3))
+                self.assertEqual(source_symbol_at_cursor(buffer), expected)
+        for text in ("$", "$config + other", "--"):
+            buffer.set_text(text)
+            buffer.select_range(buffer.get_start_iter(), buffer.get_end_iter())
+            self.assertIsNone(source_symbol_at_cursor(buffer))
+
     def test_argv_uses_literal_smart_case_and_explicit_exclusions(self) -> None:
         """The query remains one argv value and ignored heavy trees stay excluded."""
 
@@ -76,6 +92,50 @@ class SearchCommandTest(unittest.TestCase):
             result,
             SearchResult("src/example.py", 7, "città utile", ((5, 10),)),
         )
+
+    def test_dense_line_has_bounded_spans_with_correct_unicode_offsets(self) -> None:
+        """Thousands of Unicode matches retain a bounded number of exact source coordinates."""
+
+        text = "éneedle " * 10000
+        byte_width = len("éneedle ".encode("utf-8"))
+        record = {"type": "match", "data": {
+            "path": {"text": "dense.txt"}, "lines": {"text": text}, "line_number": 1,
+            "submatches": [{"start": index * byte_width + 2, "end": index * byte_width + 8}
+                           for index in range(10000)],
+        }}
+        result = SearchCommand._parse_match(json.dumps(record))
+        self.assertEqual(len(result.spans), SearchCommand.MATCH_SPAN_LIMIT)
+        self.assertLessEqual(len(result.text), 502)
+        self.assertFalse(result.complete_line)
+        for index, (left, right) in enumerate(result.spans):
+            self.assertEqual((left, right), (index * 8 + 1, index * 8 + 7))
+            self.assertEqual(text[left:right], "needle")
+
+    def test_unicode_conversion_handles_overlapping_and_unordered_spans(self) -> None:
+        """Incremental decoding preserves source offsets independently of span ordering."""
+
+        record = {"type": "match", "data": {
+            "path": {"text": "text.txt"}, "lines": {"text": "éabcé\n"}, "line_number": 1,
+            "submatches": [{"start": 3, "end": 7}, {"start": 0, "end": 4}, {"start": 2, "end": 5}],
+        }}
+        result = SearchCommand._parse_match(json.dumps(record))
+        self.assertEqual(result.spans, ((2, 5), (0, 3), (1, 4)))
+
+    def test_search_preserves_literal_backslashes_in_linux_filenames(self) -> None:
+        """A match for a backslash filename cannot resolve to a different nested file."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            (root / "a\\b.txt").write_text("literal match")
+            (root / "a").mkdir()
+            (root / "a" / "b.txt").write_text("different file")
+            record = {"type": "match", "data": {
+                "path": {"text": "./a\\b.txt"}, "lines": {"text": "literal match"}, "line_number": 1,
+                "submatches": [{"start": 0, "end": 7}],
+            }}
+            result = SearchCommand._parse_match(json.dumps(record))
+            self.assertEqual(result.path, "a\\b.txt")
+            self.assertEqual((root / result.path).read_text(), "literal match")
 
     def test_json_match_rejects_traversal(self) -> None:
         """A tool result can never introduce a path outside the project."""
@@ -271,6 +331,77 @@ class ProjectSearchTest(unittest.TestCase):
         self.assertEqual(self.edited_internal, [("src/app.py", 4)])
         self.assertEqual(self.melded, ["src/app.py"])
         self.assertEqual(self.close_count, 1)
+
+    def test_result_replaced_with_circular_symlink_reports_preview_error(self) -> None:
+        """A filesystem change after searching cannot raise from the selection callback."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "found.txt"
+            path.write_text("needle")
+            result = SearchResult("found.txt", 1, "needle", ((0, 6),))
+            path.unlink()
+            path.symlink_to("found.txt")
+            self.search.root = directory
+            with patch.object(self.search, "_set_preview_message") as message, patch(
+                    "slate.search.BoundedFileRead") as read:
+                self.search._load_preview(result)
+                message.assert_called_once()
+                read.assert_not_called()
+
+    def test_stale_bounded_preview_cannot_replace_new_selection(self) -> None:
+        """A late read or error leaves the newer preview and cancellation token untouched."""
+
+        old = SearchResult("old.txt", 1, "old", ())
+        current = SearchResult("new.txt", 1, "new", ())
+        self.search.request_serial = 20
+        self.search.preview_result = current
+        token = object()
+        self.search.preview_cancellable = token
+        with patch.object(self.search, "_render_preview") as render, patch.object(
+                self.search, "_set_preview_text") as message:
+            self.search._on_preview_loaded((19, old), b"stale", None)
+            self.search._on_preview_loaded((19, old), None, ValueError("stale error"))
+            render.assert_not_called()
+            message.assert_not_called()
+        self.assertIs(self.search.preview_cancellable, token)
+        self.search.preview_cancellable = None
+
+    def test_cleared_query_disables_previous_preview_shortcuts(self) -> None:
+        """An empty search preview cannot open the previous result with E, V or D."""
+
+        self.search.root = "/tmp/project"
+        self.search.preview_result = SearchResult(
+            "src/app.py", 7, "example", ((0, 3),)
+        )
+        self.search.preview_buffer.set_text("example")
+        self.search._on_query_changed(self.search.entry)
+
+        self.assertIsNone(self.search.preview_result)
+        self.assertEqual(len(self.search.store), 0)
+        self.assertEqual(self.search.preview_buffer.get_char_count(), 0)
+        for keyval in (Gdk.KEY_e, Gdk.KEY_v, Gdk.KEY_d):
+            event = SimpleNamespace(keyval=keyval, state=Gdk.ModifierType(0))
+            self.assertFalse(
+                self.search._on_preview_key_press(self.search.preview_view, event)
+            )
+        self.assertEqual(self.edited_internal, [])
+        self.assertEqual(self.viewed, [])
+        self.assertEqual(self.melded, [])
+        self.assertEqual(self.close_count, 0)
+
+    def test_deselected_preview_ignores_pending_read(self) -> None:
+        """A read finishing after deselection cannot restore the cleared preview."""
+
+        result = SearchResult("src/app.py", 7, "example", ((0, 3),))
+        self.search.preview_result = result
+        request = (self.search.request_serial, result)
+        self.search._on_selection_changed(self.search.tree.get_selection())
+
+        with patch.object(self.search, "_render_preview") as render:
+            self.search._on_preview_loaded(request, b"example", None)
+        render.assert_not_called()
+        self.assertIsNone(self.search.preview_result)
+        self.assertEqual(self.search.preview_buffer.get_char_count(), 0)
 
     def test_preview_shortcuts_target_the_rendered_search_result(self) -> None:
         """Preview focus dispatches V, E, M and D without consulting tree focus."""
