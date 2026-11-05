@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import gi
 
@@ -140,7 +140,7 @@ class ProjectFileManagerTest(unittest.TestCase):
 
         self.terminal_directory = relative
 
-    def _record_preferences(self, preferences: dict[str, object]) -> None:
+    def _record_preferences(self, project_name: str, preferences: dict[str, object]) -> None:
         """Retain persisted per-project browser preferences."""
 
         self.preferences.append(preferences)
@@ -363,6 +363,31 @@ class ProjectFileManagerTest(unittest.TestCase):
         )
         self.assertEqual(self.manager.pending_cursor_path, "source")
 
+    def test_old_menu_actions_are_invalidated_when_project_changes(self) -> None:
+        """Neither destructive nor creation actions from A's menu can operate on B."""
+
+        callbacks = ["on_view", "on_edit_internal", "on_delete", "on_rename", "on_open_terminal",
+                     "on_new_file", "on_new_directory"]
+        for name in callbacks:
+            setattr(self.manager, name, MagicMock())
+        self.manager.context_relative = "src"
+        self.manager.context_directory = True
+        self.manager.context_blocked = False
+        menu = MagicMock()
+        with patch("slate.file_manager.Gtk.Menu", return_value=menu):
+            self.manager._show_entry_menu(None)
+        items = [call.args[0] for call in menu.append.call_args_list]
+        self.manager.set_active(False)
+        with tempfile.TemporaryDirectory(dir="/tmp") as other:
+            self.manager.set_project("other", other, {}, set(), True)
+            for item in items:
+                item.activate()
+        menu.popdown.assert_called_once_with()
+        menu.destroy.assert_called_once_with()
+        for name in callbacks:
+            getattr(self.manager, name).assert_not_called()
+        self.assertIsNone(self.manager.context_relative)
+
     def test_switching_projects_reuses_the_completed_tree_model(self) -> None:
         """A previously opened repository returns without clearing its loaded rows."""
 
@@ -390,6 +415,58 @@ class ProjectFileManagerTest(unittest.TestCase):
         self.assertEqual(self._root_names(), first_names)
         self.manager.set_active(True)
         self.assertIs(self.manager.store, first_store)
+        self.assertFalse(self.manager.cancellable.is_cancelled())
+        self.manager._load_directory("src")
+        self._wait_for_path("src")
+        source = self.manager.dir_iters["src"]
+        child = self.manager.store.iter_children(source)
+        self.assertEqual(self.manager.store.get_value(child, self.manager.COL_NAME), "app.py")
+
+    def test_switching_active_cached_projects_allows_new_directory_reads(self) -> None:
+        """A clean cached model remains lazy but gets a fresh token on active project switches."""
+
+        first_store = self.manager.store
+        with tempfile.TemporaryDirectory(dir="/tmp") as other_directory:
+            preferences = {"show_hidden": False, "show_excluded": False, "expanded_paths": []}
+            self.manager.set_project("other", other_directory, preferences, set(), True)
+            self._wait_for_path("")
+            old_token = self.manager.cancellable
+            with patch.object(self.manager, "_load_directory", wraps=self.manager._load_directory) as load:
+                self.manager.set_project("project", str(self.root), preferences, {"ignored.txt"}, True)
+                self.assertIs(self.manager.store, first_store)
+                self.assertTrue(old_token.is_cancelled())
+                self.assertFalse(self.manager.cancellable.is_cancelled())
+                load.assert_not_called()
+                self.manager._load_directory("src")
+                self._wait_for_path("src")
+                load.assert_called_once_with("src")
+
+    def test_expand_all_stops_at_cross_link_cycles(self) -> None:
+        """Cross links preserve their first valid expansion but cannot revisit a branch ancestor."""
+
+        (self.root / "A").mkdir()
+        (self.root / "B").mkdir()
+        (self.root / "A" / "to-B").symlink_to("../B", target_is_directory=True)
+        (self.root / "B" / "to-A").symlink_to("../A", target_is_directory=True)
+        self.manager.refresh()
+        deadline = time.monotonic() + 2
+        context = GLib.MainContext.default()
+        while self.manager.loading_paths and time.monotonic() < deadline:
+            context.iteration(False)
+        self.assertFalse(self.manager.loading_paths)
+        self.manager._on_expand_all_clicked(None)
+        deadline = time.monotonic() + 2
+        while not self.manager.expand_all_complete and time.monotonic() < deadline:
+            context.iteration(False)
+        self.assertTrue(self.manager.expand_all_complete)
+        for first, repeated in (("A/to-B", "A/to-B/to-A"), ("B/to-A", "B/to-A/to-B")):
+            self.assertIn(first, self.manager.loaded_paths)
+            row = self.manager._tree_iter_for_path(repeated)
+            self.assertIsNotNone(row)
+            self.assertFalse(self.manager.store.get_value(row, self.manager.COL_DIRECTORY))
+            self.assertTrue(self.manager.store.get_value(row, self.manager.COL_BLOCKED))
+            self.assertNotIn(repeated, self.manager.loaded_paths)
+        self.assertFalse(any(path.count("/") > 2 for path in self.manager.loaded_paths))
 
     def test_nested_only_watcher_change_reloads_workspace_symlinks(self) -> None:
         """Losing root watcher coverage invalidates cache and reveals a new link."""
@@ -662,11 +739,40 @@ class ProjectFileManagerTest(unittest.TestCase):
             tree_iter = self.manager.store.iter_next(tree_iter)
         return rows
 
+    def test_interrupted_expand_all_persists_partial_state_once(self) -> None:
+        """Leaving Files flushes the partially expanded tree without per-directory writes."""
+
+        self.preferences.clear()
+        with patch.object(self.manager, "_load_directory"):
+            self.manager._on_expand_all_clicked(None)
+        self.assertTrue(self.manager.expand_all_requested)
+        self.assertTrue(self.manager.expanded_paths)
+        self.assertEqual(self.preferences, [])
+        partial = sorted(self.manager.expanded_paths)
+        self.manager.set_active(False)
+        self.assertEqual(len(self.preferences), 1)
+        self.assertEqual(self.preferences[0]["expanded_paths"], partial)
+        self.assertFalse(self.manager.expand_all_requested)
+        self.assertFalse(self.manager.expansion_preferences_pending)
+
+    def test_project_switch_flushes_expansion_with_its_original_identity(self) -> None:
+        """A partial batch is saved for the old project before the new model is attached."""
+
+        with patch.object(self.manager, "_load_directory"):
+            self.manager._on_expand_all_clicked(None)
+        partial = sorted(self.manager.expanded_paths)
+        with tempfile.TemporaryDirectory(dir="/tmp") as other, patch.object(self.manager, "on_preferences") as save:
+            self.manager.set_project("other", other, {}, set(), True)
+            save.assert_called_once_with("project", {
+                "show_hidden": False, "show_excluded": False, "expanded_paths": partial})
+        self.assertFalse(self.manager.expand_all_requested)
+
     def test_expand_all_stops_at_excluded_roots(self) -> None:
         """Global expansion recursively loads source dirs but skips dependency trees."""
 
         self.manager.excluded_check.set_active(True)
         self._wait_for_path("")
+        self.preferences.clear()
         self.manager._on_expand_all_clicked(self.manager.expand_button)
         self._wait_for_path("src")
         deadline = time.monotonic() + 2
@@ -674,6 +780,7 @@ class ProjectFileManagerTest(unittest.TestCase):
         while not self.manager.expand_all_complete and time.monotonic() < deadline:
             context.iteration(True)
         self.assertTrue(self.manager.expand_all_complete)
+        self.assertEqual(len(self.preferences), 1)
         self.assertNotIn("node_modules", self.manager.loaded_paths)
         node_iter = next(
             tree_iter
