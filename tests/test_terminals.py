@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
-from gi.repository import Gdk, Vte
+from gi.repository import Gdk, Gtk, Vte
 
 from slate.processes import CommandResult
 from slate.terminals import (
@@ -344,6 +344,10 @@ class TerminalHelpersTest(unittest.TestCase):
             request_activity_refresh=MagicMock(),
             on_error=MagicMock(),
         )
+        owner.terminals = {"repo/codex-1": terminal}
+        owner.closing_keys = set()
+        owner.shutting_down = False
+        owner._key_for_terminal = TerminalManager._key_for_terminal.__get__(owner)
         TerminalManager._on_spawned(
             owner,
             terminal,
@@ -376,6 +380,7 @@ class TerminalHelpersTest(unittest.TestCase):
         )
         result = CommandResult(("tmux", "has-session"), 0, "", "")
 
+        owner._key_for_terminal = TerminalManager._key_for_terminal.__get__(owner)
         TerminalManager._on_session_checked(
             owner,
             result,
@@ -417,6 +422,7 @@ class TerminalHelpersTest(unittest.TestCase):
             ("tmux", "has-session"), 1, "", "can't find session: repo--codex-1"
         )
 
+        owner._key_for_terminal = TerminalManager._key_for_terminal.__get__(owner)
         TerminalManager._on_session_checked(
             owner,
             result,
@@ -551,14 +557,102 @@ class TerminalHelpersTest(unittest.TestCase):
         owner = SimpleNamespace(
             terminals={"repo/main": terminal},
             stack=MagicMock(),
+            shutting_down=False,
             on_attention=MagicMock(),
         )
         with patch("slate.terminals.GLib.idle_add") as idle_add:
             self.assertTrue(TerminalManager.show(owner, "repo", "main"))
         owner.stack.set_visible_child_name.assert_called_once_with("repo/main")
         owner.on_attention.assert_called_once_with(terminal, False)
-        idle_add.assert_called_once_with(terminal.grab_focus)
+        idle_add.assert_called_once()
         terminal.grab_focus.assert_not_called()
+        owner.stack.get_visible_child.return_value = terminal
+        terminal.get_mapped.return_value = True
+        terminal.is_sensitive.return_value = True
+        self.assertFalse(idle_add.call_args.args[0]())
+        terminal.grab_focus.assert_called_once_with()
+
+    def test_deferred_focus_expires_after_content_or_terminal_changes(self) -> None:
+        """A queued terminal focus never overrides an editor, preview, replacement or shutdown."""
+
+        for change in ("hidden", "insensitive", "different-child", "replacement", "shutdown", "new-focus"):
+            with self.subTest(change=change):
+                terminal = MagicMock()
+                window = MagicMock(spec=Gtk.Window)
+                previous = MagicMock()
+                window.get_focus.return_value = previous
+                terminal.get_toplevel.return_value = window
+                terminal.get_mapped.return_value = True
+                terminal.is_sensitive.return_value = True
+                owner = SimpleNamespace(terminals={"repo/main": terminal},
+                                        stack=MagicMock(), on_attention=MagicMock(), shutting_down=False)
+                owner.stack.get_visible_child.return_value = terminal
+                with patch("slate.terminals.GLib.idle_add") as idle:
+                    TerminalManager.show(owner, "repo", "main")
+                if change == "hidden":
+                    terminal.get_mapped.return_value = False
+                elif change == "insensitive":
+                    terminal.is_sensitive.return_value = False
+                elif change == "different-child":
+                    owner.stack.get_visible_child.return_value = MagicMock()
+                elif change == "replacement":
+                    owner.terminals["repo/main"] = MagicMock()
+                elif change == "shutdown":
+                    owner.shutting_down = True
+                else:
+                    window.get_focus.return_value = MagicMock(spec=Gtk.Entry)
+                self.assertFalse(idle.call_args.args[0]())
+                terminal.grab_focus.assert_not_called()
+
+    def test_stale_spawn_and_session_check_preserve_replacement_state(self) -> None:
+        """Callbacks for a removed widget cannot consume a replacement's launcher or token."""
+
+        old, replacement = MagicMock(), MagicMock()
+        token, check = object(), object()
+        owner = SimpleNamespace(
+            terminals={"repo/main": replacement}, shutting_down=False, closing_keys=set(),
+            spawn_cancellables={"repo/main": token}, session_checks={"repo/main": check},
+            initial_commands={"repo/main": "replacement launcher"},
+            _configure_server=MagicMock(), _spawn_terminal=MagicMock(),
+            _feed_initial_command=MagicMock(), on_error=MagicMock(),
+        )
+        owner._key_for_terminal = TerminalManager._key_for_terminal.__get__(owner)
+        TerminalManager._on_spawned(owner, old, 123, None, ("repo/main", "repo", "/tmp/repo", "main"))
+        TerminalManager._on_session_checked(owner, CommandResult((), 0, "", ""), old,
+                                           "repo/main", "repo", "/tmp/repo", "main", "/tmp/repo", "old launcher")
+        self.assertIs(owner.spawn_cancellables["repo/main"], token)
+        self.assertIs(owner.session_checks["repo/main"], check)
+        self.assertEqual(owner.initial_commands["repo/main"], "replacement launcher")
+        owner._configure_server.assert_not_called()
+        owner._spawn_terminal.assert_not_called()
+        owner._feed_initial_command.assert_not_called()
+        owner.on_error.assert_not_called()
+
+    def test_spawn_completion_follows_pending_terminal_rename(self) -> None:
+        """Renaming a starting terminal moves pending state and preserves its launcher."""
+
+        terminal, token, check = MagicMock(), object(), object()
+        owner = SimpleNamespace(
+            terminals={"repo/main": terminal}, sessions={"repo/main": "repo--main"},
+            initial_commands={"repo/main": "codex resume"},
+            spawn_cancellables={"repo/main": token}, session_checks={"repo/main": check},
+            shutting_down=False, closing_keys=set(), tmux=("tmux", "-L", "isolated-test"),
+            stack=MagicMock(), _set_metadata=MagicMock(), request_activity_refresh=MagicMock(),
+            _configure_server=MagicMock(), _feed_initial_command=MagicMock(), on_error=MagicMock(),
+            _server_absent=TerminalManager._server_absent,
+        )
+        owner._key_for_terminal = TerminalManager._key_for_terminal.__get__(owner)
+        callback = MagicMock()
+        with patch("slate.terminals.run_async") as run:
+            TerminalManager.rename(owner, "repo", "main", "renamed", callback)
+            run.call_args.args[1](CommandResult((), 0, "", ""))
+        self.assertIs(owner.spawn_cancellables["repo/renamed"], token)
+        self.assertIs(owner.session_checks["repo/renamed"], check)
+        TerminalManager._on_spawned(owner, terminal, 123, None, ("repo/main", "repo", "/tmp/repo", "main"))
+        owner._feed_initial_command.assert_called_once_with(terminal, "codex resume")
+        owner._set_metadata.assert_called_with("repo--renamed", "repo", "/tmp/repo", "renamed", "Codex")
+        self.assertNotIn("repo/renamed", owner.spawn_cancellables)
+        self.assertNotIn("repo/renamed", owner.initial_commands)
 
     def test_activity_events_share_one_hundred_millisecond_debounce(self) -> None:
         """Repeated foreground events reset one lightweight trailing timer."""
