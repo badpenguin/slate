@@ -61,6 +61,26 @@ class UnifiedLifecycleTest(unittest.TestCase):
             time.sleep(0.002)
         self.assertIsNotNone(document.etag)
 
+    def test_circular_preview_alias_cannot_block_opening_other_files(self) -> None:
+        """A preview alias becoming circular does not prevent another preview or editor."""
+
+        for pinned in (False, True):
+            with self.subTest(pinned=pinned):
+                alias = self.root / "alias.css"
+                alias.symlink_to("file.css")
+                document = self.workspace.open_preview("project", str(self.root), "alias.css")
+                self._loaded(document)
+                alias.unlink()
+                alias.symlink_to("alias.css")
+                if pinned:
+                    opened = self.workspace.open_file("project", str(self.root), "file.css", focus=False)
+                else:
+                    opened = self.workspace.open_preview("project", str(self.root), "file.css")
+                self._loaded(opened)
+                self.assertEqual(opened.relative_path, "file.css")
+                self.assertIs(self.workspace.get_visible_child(), opened)
+                alias.unlink()
+
     def test_restored_document_never_exposes_code_before_compact_diff(self) -> None:
         """A restored tab stays in loading until its complete compact projection is ready."""
 
@@ -249,6 +269,80 @@ class UnifiedLifecycleTest(unittest.TestCase):
         self.assertEqual((self.root / "moved/renamed.css").read_text(), "original\nedited\n")
         self.assertFalse((self.root / "folder/file.css").exists())
 
+    def test_rename_is_rejected_when_missing_destination_has_a_dirty_editor(self) -> None:
+        """A missing destination on disk cannot hide an existing unsaved target buffer."""
+
+        destination = self.root / "target.css"
+        destination.write_text("target")
+        source = self.workspace.open_file("project", str(self.root), "file.css", focus=False)
+        self._loaded(source)
+        target = self.workspace.open_file("project", str(self.root), "target.css", focus=False)
+        self._loaded(target)
+        target.buffer.set_text("unsaved target")
+        destination.unlink()
+        self.assertFalse(self.workspace.can_relocate_path("project", "file.css", "target.css"))
+        owner = SimpleNamespace(
+            active_project_name="project", editor_workspace=self.workspace, project_file_operations=MagicMock(),
+            _project_file_path=MagicMock(side_effect=[str(self.root / "file.css"), str(destination)]),
+            _show_file_error=MagicMock(), _on_project_entry_renamed=MagicMock())
+        with patch("slate.window.Gtk.Dialog") as dialog, patch("slate.window.Gtk.Entry") as entry, patch(
+                "slate.window.Gtk.Label"):
+            dialog.return_value.run.return_value = Gtk.ResponseType.OK
+            entry.return_value.get_text.return_value = "target.css"
+            SlateWindow._rename_project_file(owner, "file.css")
+        owner.project_file_operations.rename_entry.assert_not_called()
+        owner._show_file_error.assert_called_once()
+        self.assertIs(self.workspace.editors[("project", "file.css")].document, source)
+        self.assertIs(self.workspace.editors[("project", "target.css")].document, target)
+        self.assertTrue(target.dirty)
+
+    def test_late_rename_collision_keeps_both_buffers_registered(self) -> None:
+        """A destination tab opened during an asynchronous move cannot replace either document."""
+
+        source = self.workspace.open_file("project", str(self.root), "file.css", focus=False)
+        self._loaded(source)
+        source.buffer.set_text("unsaved source")
+        self.assertTrue(self.workspace.can_relocate_path("project", "file.css", "target.css"))
+        self.assertTrue(self.workspace.set_rename_pending("project", "file.css", True))
+        destination = self.root / "target.css"
+        destination.write_text("target")
+        target = self.workspace.open_file("project", str(self.root), "target.css", focus=False)
+        self._loaded(target)
+        target.buffer.set_text("unsaved target")
+        destination.unlink()
+        (self.root / "file.css").rename(destination)
+        project = {"item_order": [{"kind": "editor", "value": "file.css"},
+                                   {"kind": "editor", "value": "target.css"}]}
+        owner = SimpleNamespace(
+            editor_workspace=self.workspace, config=SimpleNamespace(find_project=MagicMock(return_value=project),
+                                                                    save=MagicMock()),
+            file_manager=MagicMock(project_name="other"), _close_project_path_preview=MagicMock(),
+            _queue_project_status_paths=MagicMock(), _show_file_error=MagicMock())
+        SlateWindow._on_project_entry_renamed(owner, "project", "file.css", "target.css", None)
+        self.assertIs(self.workspace.editors[("project", "file.css")].document, source)
+        self.assertIs(self.workspace.editors[("project", "target.css")].document, target)
+        self.assertTrue(source.dirty)
+        self.assertTrue(target.dirty)
+        self.assertEqual(source.relative_path, "file.css")
+        owner._show_file_error.assert_called_once()
+        self.assertIn("All buffers were kept", owner._show_file_error.call_args.args[0])
+        owner.config.save.assert_not_called()
+
+    def test_destination_collision_includes_directory_aliases(self) -> None:
+        """A target referenced through an internal directory alias still prevents a rename collision."""
+
+        (self.root / "source").mkdir()
+        (self.root / "destination").mkdir()
+        (self.root / "destination" / "file.css").write_text("target")
+        (self.root / "alias").symlink_to("destination", target_is_directory=True)
+        document = self.workspace.open_file("project", str(self.root), "alias/file.css", focus=False)
+        self._loaded(document)
+        document.buffer.set_text("unsaved alias target")
+        (self.root / "destination" / "file.css").unlink()
+        (self.root / "destination").rmdir()
+        self.assertFalse(self.workspace.can_relocate_path("project", "source", "destination"))
+        self.assertIs(self.workspace.editors[("project", "alias/file.css")].document, document)
+
     def test_directory_rename_lock_prevents_saves_and_covers_newly_opened_documents(self) -> None:
         """Saves cannot recreate old paths while an asynchronous parent rename is active."""
 
@@ -272,7 +366,7 @@ class UnifiedLifecycleTest(unittest.TestCase):
         self.assertEqual((folder / "second.css").read_text(), "second\n")
         owner = SimpleNamespace(
             editor_workspace=self.workspace, config=SimpleNamespace(find_project=MagicMock(return_value=None)),
-            _close_preview=MagicMock(), file_manager=MagicMock(),
+            _close_preview=MagicMock(), _close_project_path_preview=MagicMock(), file_manager=MagicMock(),
             _queue_project_status_paths=MagicMock(), _show_file_error=MagicMock(),
         )
         moved = []
