@@ -88,12 +88,17 @@ def normalize_browser_uri(value: str) -> str | None:
     if candidate == "about:blank":
         return candidate
     if "://" in candidate:
-        parsed = urlsplit(candidate)
-        return (
-            candidate
-            if parsed.scheme.lower() in {"http", "https"} and parsed.hostname
-            else None
-        )
+        try:
+            parsed = urlsplit(candidate)
+            return (
+                candidate
+                if parsed.scheme.lower() in {"http", "https"} and parsed.hostname
+                else None
+            )
+        except ValueError:
+            # 2026-11-04: un IPv6 incompleto o un host non valido è un
+            # errore di input, non un'eccezione da propagare al callback GTK.
+            return None
     authority = candidate.split("/", 1)[0]
     if not authority.startswith("[") and ":" in authority:
         _host_part, port = authority.rsplit(":", 1)
@@ -115,7 +120,11 @@ def normalize_browser_uri(value: str) -> str | None:
         local = address.is_private or address.is_loopback or address.is_link_local
     except ValueError:
         pass
-    return f"{'http' if local else 'https'}://{candidate}"
+    uri = f"{'http' if local else 'https'}://{candidate}"
+    try:
+        return uri if urlsplit(uri).hostname else None
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -234,6 +243,7 @@ class BrowserPage(Gtk.Box):
         self.site_data_cancellable: Gio.Cancellable | None = None
         self.site_data_types: object | None = None
         self.site_data_host: str | None = None
+        self.site_data_uri: str | None = None
         self._syncing_reload_on_bell = False
         self.responsive_viewport: tuple[int, int] | None = None
         self.responsive_layout: tuple[int, int, int, int, float] | None = None
@@ -632,7 +642,8 @@ class BrowserPage(Gtk.Box):
     def _on_clear_site_data_activate(self, _item: Gtk.MenuItem) -> None:
         """Confirm deletion of the current host's WebKit data except cookies."""
 
-        parsed = urlsplit(self.uri)
+        requested_uri = self.uri
+        parsed = urlsplit(requested_uri)
         hostname = (parsed.hostname or "").casefold().rstrip(".")
         if parsed.scheme not in {"http", "https"} or not hostname:
             return
@@ -666,6 +677,7 @@ class BrowserPage(Gtk.Box):
             & ~WebKit2.WebsiteDataTypes.COOKIES
         )
         self.site_data_host = hostname
+        self.site_data_uri = requested_uri
         self.site_data_cancellable = Gio.Cancellable()
         self._update_development_actions()
         data_manager = self.web_view.get_website_data_manager()
@@ -729,6 +741,8 @@ class BrowserPage(Gtk.Box):
     def _finish_site_data_clear(self, error: str | None) -> None:
         """Restore the clear action and either report failure or hard-reload."""
 
+        requested_uri = self.site_data_uri
+        self.site_data_uri = None
         self.site_data_cancellable = None
         self.site_data_types = None
         self.site_data_host = None
@@ -738,7 +752,10 @@ class BrowserPage(Gtk.Box):
         if error is not None:
             self.on_error(error)
             return
-        self.reload_bypass_cache()
+        # 2026-11-04: la pulizia resta riferita al sito confermato; una
+        # navigazione successiva non autorizza il reload della nuova pagina.
+        if self.uri == requested_uri:
+            self.reload_bypass_cache()
 
     def _on_inspector_toggled(self, button: Gtk.ToggleButton) -> None:
         """Open or close developer tools to match the toolbar toggle state."""
@@ -878,8 +895,11 @@ class BrowserPage(Gtk.Box):
         requested = entry.get_text().strip()
         uri = normalize_browser_uri(requested)
         if uri is None:
-            scheme = urlsplit(requested).scheme.lower()
-            if scheme and scheme not in _BLOCKED_SCHEMES:
+            try:
+                scheme = urlsplit(requested).scheme.lower()
+            except ValueError:
+                scheme = ""
+            if scheme and scheme not in _BLOCKED_SCHEMES | {"http", "https"}:
                 self._open_external_uri(requested)
                 return
             _report_blocked_navigation(requested, scheme, "address bar")
