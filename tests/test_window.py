@@ -14,6 +14,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gtk
 
+from slate.project_files import DirectoryInspection
 from slate.project_limit import ProjectStatusLimit
 from slate.processes import CommandResult
 from slate.preview import FilePreview
@@ -1463,6 +1464,58 @@ class WindowActionTest(unittest.TestCase):
         SlateWindow._refresh_repository_errors(owner, "repo")
         owner.panel.clear_error.assert_called_once_with()
 
+    def test_rejected_rename_can_be_cancelled_or_restored_to_original_name(self) -> None:
+        """A rejected destination cannot survive Cancel, window closure or the original name."""
+
+        for response in (Gtk.ResponseType.CANCEL, Gtk.ResponseType.DELETE_EVENT, Gtk.ResponseType.OK):
+            with self.subTest(response=response), tempfile.TemporaryDirectory(dir="/tmp") as root:
+                source = Path(root) / "old.txt"
+                destination = Path(root) / "existing.txt"
+                source.write_text("original")
+                destination.write_text("existing")
+                owner = SimpleNamespace(
+                    active_project_name="project",
+                    _project_file_path=MagicMock(side_effect=[str(source), str(destination)]),
+                    editor_workspace=MagicMock(), project_file_operations=MagicMock(),
+                    _show_file_error=MagicMock(), _on_project_entry_renamed=MagicMock(),
+                )
+                with patch("slate.window.Gtk.Dialog") as dialog, patch("slate.window.Gtk.Entry") as entry, patch(
+                        "slate.window.Gtk.Label"):
+                    dialog.return_value.run.side_effect = (Gtk.ResponseType.OK, response)
+                    entry.return_value.get_text.side_effect = ("existing.txt", "old.txt")
+                    SlateWindow._rename_project_file(owner, "old.txt")
+                    dialog.return_value.destroy.assert_called_once_with()
+                owner.project_file_operations.rename_entry.assert_not_called()
+                owner.editor_workspace.can_relocate_path.assert_not_called()
+                owner.editor_workspace.set_rename_pending.assert_not_called()
+                self.assertEqual(source.read_text(), "original")
+                self.assertEqual(destination.read_text(), "existing")
+
+    def test_rejected_rename_accepts_a_corrected_destination(self) -> None:
+        """Retrying after a collision renames only to the newly accepted destination."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            source = Path(root) / "old.txt"
+            existing = Path(root) / "existing.txt"
+            destination = Path(root) / "new.txt"
+            source.write_text("original")
+            existing.write_text("existing")
+            owner = SimpleNamespace(
+                active_project_name="project",
+                _project_file_path=MagicMock(side_effect=[str(source), str(existing), str(destination)]),
+                editor_workspace=MagicMock(), project_file_operations=MagicMock(),
+                _show_file_error=MagicMock(), _on_project_entry_renamed=MagicMock(),
+            )
+            with patch("slate.window.Gtk.Dialog") as dialog, patch("slate.window.Gtk.Entry") as entry, patch(
+                    "slate.window.Gtk.Label"):
+                dialog.return_value.run.side_effect = (Gtk.ResponseType.OK, Gtk.ResponseType.OK)
+                entry.return_value.get_text.side_effect = ("existing.txt", "new.txt")
+                SlateWindow._rename_project_file(owner, "old.txt")
+            owner.project_file_operations.rename_entry.assert_called_once()
+            self.assertEqual(owner.project_file_operations.rename_entry.call_args.args[:2],
+                             (str(source), str(destination)))
+            owner.editor_workspace.set_rename_pending.assert_called_once_with("project", "old.txt", True)
+
     def test_rename_does_not_start_while_an_affected_editor_is_saving(self) -> None:
         """The UI gate rejects a rename before launching any filesystem mutation."""
 
@@ -2369,6 +2422,134 @@ class WindowActionTest(unittest.TestCase):
                 str(root / "link.txt"),
             )
 
+    def test_scm_mutation_sequence_keeps_original_targets_after_project_switch(self) -> None:
+        """A pending sequence never resolves its next adapter from the new active project."""
+
+        repositories = (RepositoryRef(".", "hg"), RepositoryRef("nested", "git"))
+        adapters = [SimpleNamespace(root=f"/tmp/A/{repository.path}", environment={})
+                    for repository in repositories]
+        watchers = [MagicMock(), MagicMock()]
+        owner = SimpleNamespace(
+            active_project_name="A", project_limit=None, panel=MagicMock(),
+            _repository_scm=MagicMock(side_effect=adapters),
+            _repository_watcher=MagicMock(side_effect=watchers),
+            _close_preview=MagicMock(), watchers={},
+            _close_project_path_preview=MagicMock(),
+            _workspace_repository_path=SlateWindow._workspace_repository_path,
+        )
+        operations = [(repository, ["scm", "operation"], ["file"]) for repository in repositories]
+        with patch("slate.window.run_async") as run:
+            SlateWindow._run_scm_mutations(owner, operations, "test", full_refresh=True)
+            self.assertEqual(owner._repository_scm.call_count, 2)
+            self.assertEqual(run.call_count, 1)
+            first = run.call_args.args[1]
+            owner.active_project_name = "B"
+            first(CommandResult((), 0, "", ""))
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args.kwargs["cwd"], "/tmp/A/nested")
+            run.call_args.args[1](CommandResult((), 0, "", ""))
+        for watcher in watchers:
+            watcher.request_full.assert_called_once_with()
+        owner.panel.clear_error.assert_not_called()
+        self.assertEqual(owner._repository_scm.call_count, 2)
+
+    def test_scm_mutation_does_not_close_an_unrelated_preview(self) -> None:
+        """A delayed Revision removal cannot hide another file selected in the same project."""
+
+        owner = SimpleNamespace(
+            active_project_name="A", project_limit=None, preview_status=None,
+            preview=SimpleNamespace(current_path="other.png"), _close_preview=MagicMock(),
+            _workspace_repository_path=SlateWindow._workspace_repository_path,
+            _repository_scm=MagicMock(return_value=SimpleNamespace(root="/tmp/A", environment={})),
+            _repository_watcher=MagicMock(return_value=None), panel=MagicMock(),
+        )
+        owner._close_project_path_preview = SlateWindow._close_project_path_preview.__get__(owner)
+        with patch("slate.window.run_async"):
+            SlateWindow._run_scm_mutations(
+                owner, [(RepositoryRef(".", "git"), ["git", "operation"], ["deleted.txt"])], "test")
+        owner._close_preview.assert_not_called()
+
+    def test_file_preferences_flush_updates_the_originating_project(self) -> None:
+        """A delayed expansion flush cannot write A's expanded paths into active project B."""
+
+        first, second = {"name": "A"}, {"name": "B"}
+        projects = {"A": first, "B": second}
+        owner = SimpleNamespace(active_project_name="B", config=SimpleNamespace(
+            find_project=projects.get, save=MagicMock()))
+        preferences = {"expanded_paths": ["src"]}
+        SlateWindow._save_file_manager_preferences(owner, "A", preferences)
+        self.assertEqual(first["file_manager"], preferences)
+        self.assertNotIn("file_manager", second)
+        owner.config.save.assert_called_once_with()
+
+    def test_file_creation_completion_refreshes_only_the_originating_project(self) -> None:
+        """Finishing a creation in A while viewing B refreshes only A's SCM state."""
+
+        owner = SimpleNamespace(active_project_name="B", file_manager=MagicMock(project_name="B"),
+                                _queue_project_status_paths=MagicMock(), _show_file_error=MagicMock())
+        owner._refresh_project_file_views = SlateWindow._refresh_project_file_views.__get__(owner)
+        SlateWindow._on_project_entry_created(owner, "A", "new.txt", None)
+        owner.file_manager.refresh.assert_not_called()
+        owner._queue_project_status_paths.assert_called_once_with("A", ("new.txt",))
+
+    def test_deletion_and_rename_completion_preserve_another_projects_preview(self) -> None:
+        """Completed Files mutations in A neither refresh nor hide B's current preview."""
+
+        owner = SimpleNamespace(
+            active_project_name="B", preview_status=None,
+            preview=SimpleNamespace(current_path="image.png"), _close_preview=MagicMock(),
+            file_manager=MagicMock(project_name="B"), editor_workspace=MagicMock(),
+            config=SimpleNamespace(find_project=MagicMock(return_value=None)),
+            _queue_project_status_paths=MagicMock(), _show_file_error=MagicMock(),
+        )
+        owner._refresh_project_file_views = SlateWindow._refresh_project_file_views.__get__(owner)
+        owner._close_project_path_preview = SlateWindow._close_project_path_preview.__get__(owner)
+        SlateWindow._on_project_entry_deleted(owner, "A", "image.png", None)
+        SlateWindow._on_project_entry_renamed(owner, "A", "image.png", "renamed.png", None)
+        owner._close_preview.assert_not_called()
+        owner.file_manager.refresh.assert_not_called()
+        owner.editor_workspace.relocate_path.assert_called_once_with("A", "image.png", "renamed.png")
+        self.assertEqual(owner._queue_project_status_paths.call_args_list, [
+            call("A", ("image.png",)), call("A", ("image.png", "renamed.png"))])
+
+    def test_revision_deletion_records_removal_in_originating_project(self) -> None:
+        """The SCM phase after asynchronous disk deletion retains A even while B is active."""
+
+        repository = RepositoryRef(".", "hg")
+        original = SimpleNamespace(record_removal_argv=MagicMock(return_value=["hg", "remove", "--after", "file"]))
+        other = SimpleNamespace(record_removal_argv=MagicMock())
+        owner = SimpleNamespace(active_project_name="B", panel=MagicMock(),
+                                scm_by_repository={("A", repository): original, ("B", repository): other},
+                                _refresh_project_file_views=MagicMock(), _close_project_path_preview=MagicMock(),
+                                _run_scm_mutations=MagicMock())
+        SlateWindow._on_status_entry_deleted(owner, "A", FileStatus("file", "modified"), "file", None)
+        original.record_removal_argv.assert_called_once_with(["file"])
+        other.record_removal_argv.assert_not_called()
+        self.assertEqual(owner._run_scm_mutations.call_args.kwargs, {"project_name": "A"})
+        owner._refresh_project_file_views.assert_called_once_with("A", ("file",))
+
+    def test_directory_inspection_cannot_prompt_after_switching_project(self) -> None:
+        """A late inspection cannot authorize deletion under another project's visible context."""
+
+        owner = SimpleNamespace(active_project_name="B", _confirm_scm_paths=MagicMock(),
+                                project_file_operations=MagicMock(), _show_file_error=MagicMock())
+        SlateWindow._on_project_directory_inspected(owner, "A", "folder", "/tmp/A/folder",
+                                                    DirectoryInspection((), False), None)
+        owner._confirm_scm_paths.assert_not_called()
+        owner.project_file_operations.delete_flat_directory.assert_not_called()
+
+    def test_completed_mutation_preserves_unrelated_preview(self) -> None:
+        """Only previews of the affected path within the originating project are closed."""
+
+        owner = SimpleNamespace(active_project_name="B", preview_status=None,
+                                preview=SimpleNamespace(current_path="folder/image.png"),
+                                _close_preview=MagicMock())
+        SlateWindow._close_project_path_preview(owner, "A", "folder")
+        SlateWindow._close_project_path_preview(owner, "B", "unrelated")
+        owner._close_preview.assert_not_called()
+        SlateWindow._close_project_path_preview(owner, "B", "folder")
+        owner._close_preview.assert_called_once_with()
+
     def test_revision_delete_records_tracked_removal_after_filesystem_success(self) -> None:
         """A tracked file deleted by Revision is immediately recorded in its SCM."""
 
@@ -2398,6 +2579,10 @@ class WindowActionTest(unittest.TestCase):
             owner._on_status_entry_deleted = (
                 SlateWindow._on_status_entry_deleted.__get__(owner)
             )
+            owner.scm_by_repository = {("project", RepositoryRef(".", "hg")): scm}
+            owner.file_manager.project_name = "project"
+            owner._refresh_project_file_views = SlateWindow._refresh_project_file_views.__get__(owner)
+            owner._close_project_path_preview = MagicMock()
             status = FileStatus("tracked.py", "modified")
             SlateWindow._delete_status(owner, status)
             callback = owner.project_file_operations.delete_entry.call_args.args[1]
@@ -2412,6 +2597,7 @@ class WindowActionTest(unittest.TestCase):
                     )
                 ],
                 "Record removal",
+                project_name="project",
             )
             owner.file_manager.refresh.assert_called_once_with()
 
@@ -2439,6 +2625,9 @@ class WindowActionTest(unittest.TestCase):
         owner._on_status_entry_deleted = (
             SlateWindow._on_status_entry_deleted.__get__(owner)
         )
+        owner.scm_by_repository = {("project", RepositoryRef(".", "hg")): scm}
+        owner._refresh_project_file_views = MagicMock()
+        owner._close_project_path_preview = MagicMock()
         SlateWindow._delete_status(
             owner, FileStatus("missing.py", "removed")
         )
@@ -2578,7 +2767,7 @@ class WindowActionTest(unittest.TestCase):
             [
                 (
                     RepositoryRef(".", "git"),
-                    ["git", "rm", "--cached", "-f", "--", "added.py"],
+                    ["git", "rm", "--cached", "-f", "--", ":(top,literal)added.py"],
                     ["added.py"],
                 )
             ],
@@ -2719,6 +2908,49 @@ class WindowActionTest(unittest.TestCase):
 
         self.assertEqual(project["terminal_icons"], {"logs-1": "text-x-script"})
 
+    def test_terminal_rename_completion_preserves_newer_project_or_view_selection(self) -> None:
+        """Renaming A keeps B or an editor visible, while an unchanged terminal selection follows its new name."""
+
+        for view in ("other-project", "other-terminal", "editor", "unchanged"):
+            with self.subTest(view=view):
+                project = {"name": "A", "terminals": ["main", "logs"], "last_terminal": "main"}
+                page = object()
+                workspace = SimpleNamespace(terminal_page=page, get_visible_child=MagicMock(return_value=page))
+                owner = SimpleNamespace(
+                    active_project_name="A", editor_workspace=workspace,
+                    _selected_terminal=MagicMock(return_value=(project, "main")),
+                    _validate_terminal_name=MagicMock(return_value=None), _show_error=MagicMock(),
+                    terminals=MagicMock(), config=SimpleNamespace(data={"active_terminal": "A/main"}, save=MagicMock()),
+                    _populate_projects=MagicMock(), _select_tree_row=MagicMock(),
+                    preview=MagicMock(), project_search=MagicMock())
+                owner.preview.get_visible.return_value = False
+                owner.project_search.get_visible.return_value = False
+                with patch("slate.window.Gtk.Dialog") as dialog, patch("slate.window.Gtk.Entry") as entry:
+                    dialog.return_value.run.return_value = Gtk.ResponseType.OK
+                    entry.return_value.get_text.return_value = "renamed"
+                    SlateWindow._prompt_terminal_rename(owner, send_codex_rename=True)
+                callback = owner.terminals.rename.call_args.args[3]
+                if view == "other-project":
+                    owner.active_project_name = "B"
+                    owner.config.data["active_terminal"] = "B/main"
+                    owner._selected_terminal.return_value = ({"name": "B"}, "main")
+                elif view == "other-terminal":
+                    owner.config.data["active_terminal"] = "A/logs"
+                    owner._selected_terminal.return_value = (project, "logs")
+                elif view == "editor":
+                    owner._selected_terminal.return_value = None
+                    workspace.get_visible_child.return_value = object()
+                callback(True)
+                self.assertEqual(project["terminals"], ["renamed", "logs"])
+                self.assertEqual(project["last_terminal"], "renamed")
+                expected = "B/main" if view == "other-project" else "A/logs" if view == "other-terminal" else "A/renamed"
+                self.assertEqual(owner.config.data["active_terminal"], expected)
+                if view == "unchanged":
+                    owner._select_tree_row.assert_called_once_with("A", "renamed")
+                else:
+                    owner._select_tree_row.assert_not_called()
+                owner.terminals.request_codex_rename.assert_called_once_with("A", "renamed")
+
     def test_terminal_rename_transfers_persisted_icon(self) -> None:
         """Renaming a session preserves the icon attached to its old identity."""
 
@@ -2737,6 +2969,7 @@ class WindowActionTest(unittest.TestCase):
         entry.get_text.return_value = "system-logs"
         terminals = MagicMock()
         owner = SimpleNamespace(
+            active_project_name="repo",
             _selected_terminal=MagicMock(return_value=(project, "logs-1")),
             _validate_terminal_name=MagicMock(return_value=None),
             _show_error=MagicMock(),
@@ -2778,6 +3011,7 @@ class WindowActionTest(unittest.TestCase):
         entry.get_text.return_value = "work"
         terminals = MagicMock()
         owner = SimpleNamespace(
+            active_project_name="repo",
             _selected_terminal=MagicMock(return_value=(project, "main")),
             _validate_terminal_name=MagicMock(return_value=None),
             _show_error=MagicMock(),
@@ -3303,7 +3537,13 @@ class WindowActionTest(unittest.TestCase):
             config=config,
             _populate_projects=MagicMock(),
             _select_tree_row=MagicMock(),
+            project_tree=MagicMock(), COL_PROJECT=2, COL_ITEM=3, COL_KIND=1,
+            editor_workspace=MagicMock(), preview=MagicMock(), project_search=MagicMock(),
         )
+        owner.project_tree.get_selection.return_value.get_selected.return_value = (None, None)
+        owner.editor_workspace.get_visible_child.return_value = owner.editor_workspace.terminal_page
+        owner.preview.get_visible.return_value = False
+        owner.project_search.get_visible.return_value = False
         SlateWindow._remove_terminal_configuration(owner, project, "main")
         self.assertEqual(project["terminals"], ["test"])
         self.assertEqual(project["terminal_commands"], {})
@@ -3312,6 +3552,83 @@ class WindowActionTest(unittest.TestCase):
         self.assertEqual(config.data["active_terminal"], "repo/test")
         config.save.assert_called_once_with()
         owner._select_tree_row.assert_called_once_with("repo", "test")
+
+    def test_terminal_exit_preserves_selected_surface_without_activation(self) -> None:
+        """Background exits preserve editor, browser and preview selections without routing keys away."""
+
+        for kind in ("editor", "browser", "terminal"):
+            for exiting_active in (False, True):
+                with self.subTest(kind=kind, exiting_active=exiting_active):
+                    project = {"name": "repo", "terminals": ["main", "worker"], "last_terminal": "main"}
+                    model = MagicMock()
+                    model.get_value.side_effect = ("repo", "selected", kind)
+                    owner = SimpleNamespace(
+                        config=SimpleNamespace(data={"active_terminal": "repo/main"}, save=MagicMock()),
+                        project_tree=MagicMock(), COL_PROJECT=2, COL_ITEM=3, COL_KIND=1,
+                        editor_workspace=MagicMock(), preview=MagicMock(), project_search=MagicMock(),
+                        _populate_projects=MagicMock(), restoring_tree=False,
+                    )
+                    owner.project_tree.get_selection.return_value.get_selected.return_value = (model, object())
+                    owner.editor_workspace.get_visible_child.return_value = (
+                        owner.editor_workspace.terminal_page if kind == "terminal" else object()
+                    )
+                    owner.preview.get_visible.return_value = kind == "terminal"
+                    owner.project_search.get_visible.return_value = False
+                    restored = []
+
+                    def selected(*identity):
+                        """Record whether restoring selection suppresses activation signals."""
+
+                        restored.append((identity, owner.restoring_tree))
+
+                    owner._select_tree_row = selected
+                    SlateWindow._remove_terminal_configuration(owner, project, "main" if exiting_active else "worker")
+                    self.assertEqual(restored, [(("repo", "selected", kind), True)])
+                    self.assertFalse(owner.restoring_tree)
+                    self.assertEqual(owner.config.data["active_terminal"], "repo/worker" if exiting_active else "repo/main")
+
+    def test_terminal_rename_is_single_flight_and_releases_guard_on_failure(self) -> None:
+        """Repeated F2 cannot enqueue a rename for the old name while tmux is busy."""
+
+        project = {"name": "repo", "terminals": ["main"], "last_terminal": "main"}
+        owner = SimpleNamespace(
+            _selected_terminal=MagicMock(return_value=(project, "main")),
+            _validate_terminal_name=MagicMock(return_value=None), _show_error=MagicMock(),
+            terminals=MagicMock(), config=SimpleNamespace(data={"active_terminal": "repo/main"}, save=MagicMock()),
+            active_project_name="repo", editor_workspace=MagicMock(), preview=MagicMock(), project_search=MagicMock(),
+            _populate_projects=MagicMock(), _select_tree_row=MagicMock(),
+        )
+        with patch("slate.window.Gtk.Dialog") as dialog, patch("slate.window.Gtk.Entry") as entry:
+            dialog.return_value.run.return_value = Gtk.ResponseType.OK
+            entry.return_value.get_text.return_value = "renamed"
+            SlateWindow._prompt_terminal_rename(owner)
+            SlateWindow._prompt_terminal_rename(owner)
+            self.assertEqual(dialog.call_count, 1)
+            owner.terminals.rename.assert_called_once()
+            owner.terminals.rename.call_args.args[3](False)
+            self.assertEqual(owner.pending_terminal_renames, set())
+            SlateWindow._prompt_terminal_rename(owner)
+            self.assertEqual(owner.terminals.rename.call_count, 2)
+            owner.terminals.rename.call_args.args[3](True)
+        self.assertEqual(project["terminals"], ["renamed"])
+        self.assertEqual(owner.pending_terminal_renames, set())
+
+    def test_terminal_rename_completion_ignores_removed_terminal(self) -> None:
+        """Removing the terminal during rename cannot raise or resurrect its configuration."""
+
+        project = {"name": "repo", "terminals": ["main"]}
+        owner = SimpleNamespace(_selected_terminal=MagicMock(return_value=(project, "main")),
+                                _validate_terminal_name=MagicMock(return_value=None), terminals=MagicMock(),
+                                _show_error=MagicMock(), config=MagicMock())
+        with patch("slate.window.Gtk.Dialog") as dialog, patch("slate.window.Gtk.Entry") as entry:
+            dialog.return_value.run.return_value = Gtk.ResponseType.OK
+            entry.return_value.get_text.return_value = "renamed"
+            SlateWindow._prompt_terminal_rename(owner)
+        project["terminals"].clear()
+        owner.terminals.rename.call_args.args[3](True)
+        self.assertEqual(project["terminals"], [])
+        owner.config.save.assert_not_called()
+        self.assertEqual(owner.pending_terminal_renames, set())
 
     def test_project_without_live_sessions_gets_plain_removal_confirmation(self) -> None:
         """Absent tmux sessions never expose meaningless leave-or-kill choices."""
