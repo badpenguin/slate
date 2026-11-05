@@ -6,6 +6,7 @@ from functools import partial
 import html
 from pathlib import Path
 import re
+import stat
 from typing import Callable
 from urllib.parse import unquote, urlsplit
 
@@ -213,6 +214,15 @@ class FilePreview(Gtk.Box):
         if status.state != "removed" and self._is_image_path(status.path):
             self._load_working_file(root, status.path, request_serial)
             return
+        # 2026-11-04: anche il fallback legacy evita i diff .min.; mostrare
+        # solo il file corrente, senza leggere versioni SCM per quelli rimossi.
+        if ".min." in Path(status.path).name.casefold():
+            self.markdown_mode_button.hide()
+            if status.state == "removed":
+                self._set_plain_text("Diff disabled for minified files.")
+            else:
+                self._load_working_file(root, status.path, request_serial)
+            return
         if markdown_diff:
             # 2026-10-01: Revisioni serve prima di tutto a controllare le
             # modifiche; il documento Markdown renderizzato resta una modalità
@@ -317,7 +327,11 @@ class FilePreview(Gtk.Box):
         ):
             self._set_plain_text("Preview rejected: invalid project path.")
             return
-        candidate = (root_path / relative_path).resolve()
+        try:
+            candidate = (root_path / relative_path).resolve()
+        except (OSError, RuntimeError, ValueError) as error:
+            self._set_plain_text(f"Unable to resolve the file:\n{error}")
+            return
         try:
             candidate.relative_to(root_path)
         except ValueError:
@@ -325,9 +339,15 @@ class FilePreview(Gtk.Box):
                 self._set_plain_text("Preview rejected: the path leaves the project.")
                 return
         try:
-            size = candidate.stat().st_size
+            info = candidate.stat()
+            size = info.st_size
         except OSError as error:
             self._set_plain_text(f"Unable to read the file:\n{error}")
+            return
+        # 2026-11-06: Files può ripiegare su questa preview quando l'editor
+        # rifiuta una FIFO; non avviare letture di flussi o dispositivi speciali.
+        if not stat.S_ISREG(info.st_mode):
+            self._set_plain_text("Preview requires a regular file.")
             return
         image_path = self._is_image_path(relative_path)
         maximum = self.MAX_IMAGE_BYTES if image_path else self.MAX_TEXT_BYTES
