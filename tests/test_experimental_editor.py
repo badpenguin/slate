@@ -16,7 +16,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, Gio, GLib, Gtk
 
-from slate.editor import EditorDocument
+from slate.editor import EditorDocument, EditorWorkspace
 from slate.editor_diff_model import project_diff
 from slate.experimental_editor import ExperimentalEditor
 from slate.processes import CommandResult
@@ -64,6 +64,176 @@ class ExperimentalEditorTest(unittest.TestCase):
         self.editor.close()
         self.parent.destroy()
         self.temporary.cleanup()
+
+    def test_goto_hidden_compact_line_expands_only_its_gap_and_edits_there(self) -> None:
+        """Navigation reveals the requested source line and typing uses that exact position."""
+
+        before = "".join(f"line {number}\n" for number in range(1, 101))
+        current = before.replace("line 50\n", "changed 50\n")
+        self.editor.buffer.set_text(current)
+        self.presentation.base = before
+        self.presentation.old_buffer.set_text(before)
+        self.presentation.rows = project_diff(before, current)
+        self.presentation.rows_serial = self.presentation.serial
+        self.presentation.rows_base_serial = self.presentation.base_serial
+        self.presentation.set_mode("compact")
+        self.presentation._replace_spans()
+        self.presentation._render_projection()
+
+        for number in (10, 90):
+            with self.subTest(line=number):
+                self.editor.goto_line_number(number, focus=False)
+                source_offset = self.editor.buffer.get_iter_at_line(number - 1).get_offset()
+                cursor = self.presentation.projection.get_iter_at_mark(
+                    self.presentation.projection.get_insert()
+                )
+                self.assertEqual(self.presentation._source_offset(cursor.get_offset()), source_offset)
+                self.assertEqual(len(self.presentation.expanded_gaps), 1 if number == 10 else 2)
+                self.assertEqual(len(self.presentation.expanded_gap_marks), 1 if number == 10 else 2)
+
+        self.editor.goto_line_number(10, focus=False)
+        self.assertEqual(len(self.presentation.expanded_gaps), 2)
+        self.presentation.projection.insert_at_cursor("INSERTED ")
+        self.assertEqual(self.presentation.text(), current.replace("line 10\n", "INSERTED line 10\n"))
+        self.editor.undo()
+        self.assertEqual(self.presentation.text(), current)
+
+    def test_goto_during_compact_refresh_retains_target_unless_user_moves(self) -> None:
+        """Deferred navigation reveals its target and respects later cursor moves or typing."""
+
+        for intervention in ("none", "cursor", "typing"):
+            with self.subTest(intervention=intervention):
+                p = self.presentation
+                before = "".join(f"line {number}\n" for number in range(1, 101))
+                current = before.replace("line 50\n", "changed 50\n")
+                self.editor.buffer.set_text(current)
+                p.base = before
+                p.old_buffer.set_text(before)
+                p.rows = project_diff(before, current)
+                p.rows_serial = p.serial
+                p.rows_base_serial = p.base_serial
+                p.expanded_gaps.clear()
+                for first, last in p.expanded_gap_marks:
+                    self.editor.buffer.delete_mark(first)
+                    self.editor.buffer.delete_mark(last)
+                p.expanded_gap_marks.clear()
+                p.set_mode("compact")
+                p._replace_spans()
+                p._render_projection()
+                added = next(span for span in p.spans if span.kind == "added" and span.start is not None)
+                p.projection.insert(p.projection.get_iter_at_mark(added.visual_start), "X")
+                self.editor.goto_line_number(10, focus=False)
+                self.assertIsNotNone(p.pending_navigation)
+                if intervention != "none":
+                    moved = p.projection.get_iter_at_mark(added.visual_end)
+                    moved.backward_chars(2)
+                    self.assertNotEqual(moved.get_offset(), p.pending_navigation[1])
+                    p.projection.place_cursor(moved)
+                    if intervention == "typing":
+                        p.projection.insert_at_cursor("Y")
+                    intended = p._canonical_cursor()
+                else:
+                    intended = self.editor.buffer.get_iter_at_line(9).get_offset()
+                with patch.object(self.editor, "get_mapped", return_value=True), patch(
+                        "slate.experimental_editor.run_async", return_value=MagicMock()) as run:
+                    p._refresh()
+                rows = project_diff(before, p.text())
+                run.call_args.args[1](CommandResult((), 0, json.dumps([asdict(row) for row in rows]), ""))
+                self.assertIsNone(p.pending_navigation)
+                self.assertEqual(p._canonical_cursor(), intended)
+                if intervention == "none":
+                    p.projection.insert_at_cursor("INSERTED ")
+                    self.assertIn("INSERTED line 10\n", p.text())
+
+    def test_historical_document_initializes_syntax_for_visible_modes(self) -> None:
+        """A deleted CSS file has a language without requiring a working-copy load."""
+
+        workspace = EditorWorkspace(Gtk.Box(), 11, MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        try:
+            document = workspace.open_historical("project", self.temporary.name, "deleted.css")
+            p = ExperimentalEditor(document)
+            document.experimental = p
+            p.attach()
+            p.base = "body { color: red; }\n"
+            p.old_buffer.set_text(p.base)
+            for mode in ("code", "side", "unified", "compact"):
+                with self.subTest(mode=mode):
+                    p.set_mode(mode)
+                    self.assertEqual(p.old_buffer.get_language().get_id(), "css")
+                    self.assertEqual(p.old_buffer.get_highlight_syntax(), mode != "compact")
+        finally:
+            workspace.shutdown()
+            workspace.destroy()
+
+    def test_stale_gap_expansion_is_applied_after_worker_refresh(self) -> None:
+        """Deleting a visible line then expanding a stale gap waits for valid coordinates."""
+
+        p = self.presentation
+        before = "".join(f"line {number}\n" for number in range(1, 101))
+        current = before.replace("line 50\n", "changed 50\n")
+        self.editor.buffer.set_text(current)
+        p.base = before
+        p.old_buffer.set_text(before)
+        p.rows = project_diff(before, current)
+        p.rows_serial = p.serial
+        p.rows_base_serial = p.base_serial
+        p.set_mode("compact")
+        p._replace_spans()
+        p._render_projection()
+        added = next(span for span in p.spans if span.kind == "added" and span.start is not None)
+        p.projection.delete(p.projection.get_iter_at_mark(added.visual_start),
+                            p.projection.get_iter_at_mark(added.visual_end))
+        gap = [span for span in p.spans if span.gap][-1]
+        with patch.object(p, "_replace_spans", wraps=p._replace_spans) as replace:
+            self.assertTrue(p.expand_gap_at(p.projection.get_iter_at_mark(gap.visual_start).get_offset()))
+            replace.assert_not_called()
+        self.assertTrue(p.expanded_gap_marks)
+        with patch.object(self.editor, "get_mapped", return_value=True), patch(
+                "slate.experimental_editor.run_async", return_value=MagicMock()) as run:
+            p._refresh()
+        rows = project_diff(before, p.text())
+        run.call_args.args[1](CommandResult((), 0, json.dumps([asdict(row) for row in rows]), ""))
+        self.assertEqual(p.rows_serial, p.serial)
+        self.assertTrue(p.expanded_gaps)
+        self.assertIn("line 99\n", p.projection.get_text(p.projection.get_start_iter(), p.projection.get_end_iter(), True))
+        self.assertEqual(p.text(), current.replace("changed 50\n", ""))
+
+    def test_historical_goto_line_uses_visible_baseline_in_every_source_mode(self) -> None:
+        """Deleted-file navigation uses its baseline in Code, Side, Unified and Compact."""
+
+        workspace = EditorWorkspace(Gtk.Box(), 11, MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        try:
+            document = workspace.open_historical("project", self.temporary.name, "deleted.txt")
+            p = ExperimentalEditor(document)
+            document.experimental = p
+            p.base = "".join(f"line {number}\n" for number in range(1, 101))
+            p.old_buffer.set_text(p.base)
+            p.rows = project_diff(p.base, "")
+            p.rows_serial = p.serial
+            p.rows_base_serial = p.base_serial
+            p.hunks = [0]
+            p.attach()
+            for mode in ("code", "side", "unified", "compact"):
+                with self.subTest(mode=mode):
+                    p.set_mode(mode)
+                    document.goto_line_number(50, focus=False)
+                    # Flush first-change scrolling too: its deferred callback
+                    # must respect later navigation in the historical buffer.
+                    context = GLib.MainContext.default()
+                    while context.pending():
+                        context.iteration(False)
+                    cursor = p.old_buffer.get_iter_at_mark(p.old_buffer.get_insert())
+                    self.assertEqual(cursor.get_line(), 49)
+                    if mode in {"unified", "compact"}:
+                        cursor = p.projection.get_iter_at_mark(p.projection.get_insert())
+                        self.assertEqual(cursor.get_line(), 49)
+            with patch("slate.editor.Gtk.Dialog") as dialog, patch("slate.editor.Gtk.Entry") as entry:
+                dialog.return_value.run.return_value = Gtk.ResponseType.CANCEL
+                document.goto_line()
+                entry.return_value.set_placeholder_text.assert_called_once_with("1–101")
+        finally:
+            workspace.shutdown()
+            workspace.destroy()
 
     def test_initial_diff_runs_without_typing_debounce(self) -> None:
         """The first requested diff is scheduled immediately rather than after typing delay."""
@@ -396,6 +566,67 @@ class ExperimentalEditorTest(unittest.TestCase):
             GLib.source_remove(timeout)
 
 
+    def test_minified_editor_selects_code_before_its_first_presentation(self) -> None:
+        """Opening a minified file does not first select a diff or its loading screen."""
+
+        self.editor.relative_path = "bundle.min.js"
+        presentation = ExperimentalEditor(self.editor)
+        try:
+            self.assertEqual(presentation.mode, "code")
+            self.assertTrue(presentation.initial_chosen)
+            for mode in ("compact", "unified", "side"):
+                self.assertIsNotNone(presentation._projection_error(mode))
+        finally:
+            presentation.shutdown()
+            presentation.destroy()
+
+    def test_minified_files_skip_repository_reads_and_all_diff_workers(self) -> None:
+        """Explicitly minified filenames stay editable while all diff modes are unavailable."""
+
+        for name in ("bundle.min.js", "style.MIN.css", "library.min.js.map"):
+            with self.subTest(name=name), patch("slate.experimental_editor.run_async") as run:
+                self.editor.relative_path = name
+                self.presentation.base_identity = None
+                scm = SimpleNamespace(root=self.temporary.name, kind="git", environment={})
+                self.presentation.configure_base(scm, name, "modified")
+                self.assertEqual(self.presentation.mode, "code")
+                self.assertEqual(self.presentation.stack.get_visible_child_name(), "source")
+                self.assertTrue(self.presentation.notice.get_visible())
+                self.assertIn("minified", self.presentation.notice.get_text())
+                self.assertTrue(self.editor.view.get_editable())
+                for mode in ("compact", "unified", "side"):
+                    self.assertFalse(self.presentation.mode_buttons[mode].get_sensitive())
+                    self.presentation.set_mode(mode)
+                    self.assertEqual(self.presentation.mode, "code")
+                with patch.object(self.editor, "get_mapped", return_value=True):
+                    self.editor.buffer.insert_at_cursor("edited")
+                    self.presentation.schedule()
+                    self.presentation._refresh()
+                run.assert_not_called()
+
+    def test_minified_rename_cancels_inflight_diff_and_ignores_late_result(self) -> None:
+        """Renaming an open diff to .min. stops expensive work and preserves normal files."""
+
+        self.presentation.rows_serial = -1
+        with patch.object(self.editor, "get_mapped", return_value=True), patch(
+                "slate.experimental_editor.run_async") as run:
+            self.presentation._refresh()
+            callback = run.call_args.args[1]
+            command = self.presentation.command
+            self.editor.relative_path = "style.min.css"
+            self.presentation.configure_base(SimpleNamespace(root=self.temporary.name, kind="hg", environment={}),
+                                             "style.min.css", "modified")
+            command.cancel.assert_called_once_with()
+            callback(CommandResult((), 0, "[]", ""))
+            self.assertEqual(self.presentation.mode, "code")
+            self.assertIsNone(self.presentation.command)
+            self.assertEqual(run.call_count, 1)
+            self.editor.relative_path = "directory.min.assets/style.css"
+            self.presentation.configure_base(SimpleNamespace(root=self.temporary.name, kind="hg", environment={}),
+                                             self.editor.relative_path, "modified")
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args.args[0][:2], ["hg", "cat"])
+
     def test_outdated_baseline_does_not_overwrite_the_current_request(self) -> None:
         """Changing repository context invalidates both read callbacks and their timeout."""
 
@@ -471,6 +702,49 @@ class ExperimentalEditorTest(unittest.TestCase):
         workspace.shutdown()
         workspace.destroy()
 
+
+    def test_definition_shortcut_uses_the_focused_side_without_fallback(self) -> None:
+        """Ctrl+B follows the left or right symbol and never falls back from an empty old side."""
+
+        self.presentation.set_mode("side")
+        self.editor.buffer.set_text("right_symbol = 1\n")
+        self.editor.buffer.place_cursor(self.editor.buffer.get_iter_at_offset(3))
+        self.editor.on_definition = MagicMock()
+        owner = SimpleNamespace(current_editor=MagicMock(return_value=self.editor))
+        event = SimpleNamespace(keyval=Gdk.KEY_b, state=Gdk.ModifierType.CONTROL_MASK)
+        for view, old_text, expected in ((self.presentation.old_view, "left_symbol = 1\n", "left_symbol"),
+                                          (self.editor.view, "left_symbol = 1\n", "right_symbol"),
+                                          (self.presentation.old_view, "   ", None)):
+            with self.subTest(expected=expected):
+                self.presentation.old_buffer.set_text(old_text)
+                self.presentation.old_buffer.place_cursor(self.presentation.old_buffer.get_iter_at_offset(2))
+                self.presentation._side_focus(view, None)
+                self.editor.on_definition.reset_mock()
+                self.assertTrue(EditorWorkspace.handle_key(owner, event))
+                if expected is None:
+                    self.editor.on_definition.assert_not_called()
+                else:
+                    self.assertEqual(self.editor.on_definition.call_args.args[2], expected)
+
+    def test_unified_definition_uses_the_symbol_in_the_removed_row(self) -> None:
+        """A removed line's identifier cannot be replaced with one from the hidden live cursor."""
+
+        self.editor.buffer.set_text("current_symbol = 1\n")
+        self.presentation.base = "removed_symbol = 1\n"
+        self.presentation.old_buffer.set_text(self.presentation.base)
+        self.presentation.rows = project_diff(self.presentation.base, self.presentation.text())
+        self.presentation._replace_spans()
+        self.presentation._render_projection()
+        visual = self.presentation.projection.get_text(self.presentation.projection.get_start_iter(),
+                                                       self.presentation.projection.get_end_iter(), True)
+        self.presentation.projection.place_cursor(
+            self.presentation.projection.get_iter_at_offset(visual.index("removed_symbol") + 3))
+        self.editor.buffer.place_cursor(self.editor.buffer.get_iter_at_offset(3))
+        self.editor.on_definition = MagicMock()
+        event = SimpleNamespace(keyval=Gdk.KEY_b, state=Gdk.ModifierType.CONTROL_MASK)
+        self.assertTrue(self.presentation.handle_key(event))
+        self.assertEqual(self.editor.on_definition.call_args.args[2], "removed_symbol")
+        self.assertEqual(self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()).get_offset(), 3)
 
     def test_side_search_uses_the_focused_version(self) -> None:
         """Find in the immutable baseline does not redirect to the editable source."""
