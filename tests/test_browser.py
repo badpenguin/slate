@@ -73,6 +73,24 @@ class BrowserTest(unittest.TestCase):
         self.assertIsNone(normalize_browser_uri("javascript:alert(1)"))
         self.assertIsNone(normalize_browser_uri("   "))
 
+    def test_malformed_ipv6_urls_are_rejected_without_callback_exceptions(self) -> None:
+        """Explicit and scheme-less malformed hosts report validation errors without navigation."""
+
+        for value in ("http://[::1", "https://[invalid]/", "[::1", "http://[]/"):
+            with self.subTest(value=value):
+                self.assertIsNone(normalize_browser_uri(value))
+                owner = SimpleNamespace(on_error=MagicMock(), _open_external_uri=MagicMock(),
+                                        web_view=MagicMock(), error_bar=MagicMock())
+                address = MagicMock()
+                address.get_text.return_value = value
+                with patch("slate.browser._report_blocked_navigation"):
+                    BrowserPage._on_uri_activated(owner, address)
+                owner.on_error.assert_called_once_with("Invalid URL or disallowed scheme.")
+                owner._open_external_uri.assert_not_called()
+                owner.web_view.load_uri.assert_not_called()
+        self.assertEqual(normalize_browser_uri("[::1]:8080/path"), "http://[::1]:8080/path")
+        self.assertEqual(normalize_browser_uri("https://[2001:db8::1]/path"), "https://[2001:db8::1]/path")
+
     def test_first_entered_url_becomes_the_persistent_home(self) -> None:
         """Only the first real address entered in a new tab defines its Home URL."""
 
@@ -862,8 +880,28 @@ class BrowserTest(unittest.TestCase):
         page.reload_bypass_cache = MagicMock()
         data_manager.remove_finish.return_value = True
         page._on_site_data_removed(data_manager, MagicMock())
-        page.reload_bypass_cache.assert_called_once_with()
+        page.reload_bypass_cache.assert_not_called()
+        self.assertIsNone(page.site_data_uri)
+        self.assertIsNone(page.site_data_cancellable)
         manager.shutdown()
+
+    def test_site_data_clear_reloads_only_the_original_page(self) -> None:
+        """Successful cleanup reloads the original URI; failures and navigation never do."""
+
+        for current, error, reloads in (("https://example.test/form", None, True),
+                                        ("https://example.test/other", None, False),
+                                        ("https://other.test/", None, False),
+                                        ("https://example.test/form", "failed", False)):
+            with self.subTest(current=current, error=error):
+                page = SimpleNamespace(site_data_uri="https://example.test/form", uri=current,
+                                       site_data_cancellable=object(), site_data_host="example.test",
+                                       site_data_types=object(), closed=False,
+                                       _update_development_actions=MagicMock(), on_error=MagicMock(),
+                                       reload_bypass_cache=MagicMock())
+                BrowserPage._finish_site_data_clear(page, error)
+                self.assertEqual(page.reload_bypass_cache.called, reloads)
+                self.assertEqual(page.on_error.called, error is not None)
+                self.assertIsNone(page.site_data_uri)
 
     def test_responsive_menu_starts_inactive_and_applies_each_preset(self) -> None:
         """The toolbar menu enters a viewport and can restore Desktop."""
