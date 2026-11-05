@@ -46,9 +46,9 @@ class ExperimentalEditor(Gtk.Box):
         self.closed = False
         # 2026-10-30: la modalità iniziale è già il diff richiesto di default.
         # Non selezionare Editor mentre si attende la lettura asincrona della base.
-        self.mode = "compact"
+        self.mode = "code" if self._is_minified() else "compact"
         self.automatic = True
-        self.initial_chosen = False
+        self.initial_chosen = self._is_minified()
         self.base = None
         self.base_identity = None
         self.rows = []
@@ -73,6 +73,7 @@ class ExperimentalEditor(Gtk.Box):
         self.projection_errors = {}
         self.expanded_gaps = set()
         self.expanded_gap_marks = []
+        self.pending_navigation = None
         self.positioned_modes = set()
         self.first_scroll_id = None
         self.scroll_syncing = False
@@ -226,6 +227,19 @@ class ExperimentalEditor(Gtk.Box):
             self.base_timeout = None
         self.base = None
         self._sync_mode_buttons()
+        # 2026-11-04: i file .min. restano testo modificabile, ma il diff
+        # non è utile. Fermarsi prima di leggere la base o avviare il worker.
+        if self._is_minified():
+            self._cancel_diff()
+            if self.debounce is not None:
+                GLib.source_remove(self.debounce)
+                self.debounce = None
+            self.old_buffer.set_text("")
+            if self.mode in {"compact", "unified", "side"}:
+                self.set_mode("code")
+            else:
+                self._show_mode()
+            return
         if scm is None or state in {"untracked", "added"}:
             self.base = "" if scm is not None else None
             self.old_buffer.set_text("")
@@ -234,7 +248,7 @@ class ExperimentalEditor(Gtk.Box):
             self.schedule()
             return
         target = source or path
-        argv = (["hg", "cat", "-r", ".", "--", target] if scm.kind == "hg"
+        argv = (["hg", "cat", "-r", ".", "--", f"path:{target}"] if scm.kind == "hg"
                 else ["git", "show", f"HEAD:{target}"])
 
         def completed(result) -> None:
@@ -280,6 +294,11 @@ class ExperimentalEditor(Gtk.Box):
 
         return self.editor.buffer.get_text(self.editor.buffer.get_start_iter(), self.editor.buffer.get_end_iter(), True)
 
+    def _is_minified(self) -> bool:
+        """Identify explicitly minified filenames without classifying their text as binary."""
+
+        return ".min." in Path(self.editor.relative_path).name.casefold()
+
     def _choose_initial(self, changed: bool) -> None:
         """Apply common Files/Revisions defaults until the user selects a mode."""
 
@@ -305,6 +324,8 @@ class ExperimentalEditor(Gtk.Box):
     def _projection_error(self, mode: str) -> str | None:
         """Return a failed view's diagnostic only while both document versions still match."""
 
+        if mode in {"compact", "unified", "side"} and self._is_minified():
+            return "Diff disabled for minified files."
         error = self.projection_errors.get(mode)
         if error is not None and error[:2] == (self.serial, self.base_serial):
             return error[2]
@@ -419,6 +440,8 @@ class ExperimentalEditor(Gtk.Box):
             self._render()
         if self.mode in {"side", "unified"} and self.base is None:
             self._error("Diff unavailable until a repository version can be loaded.")
+        if self._is_minified():
+            self._error("Diff disabled for minified files.")
 
     def _error(self, message: str) -> None:
         """Show a selectable non-modal warning without touching editor conflict UI."""
@@ -432,6 +455,9 @@ class ExperimentalEditor(Gtk.Box):
     def _document_changed(self, _buffer) -> None:
         """Update projections for external edits while preserving native source undo."""
 
+        if self.pending_navigation is not None:
+            self.editor.buffer.delete_mark(self.pending_navigation[0])
+            self.pending_navigation = None
         self.serial += 1
         self._sync_mode_buttons()
         if self.enabled and self.mode in {"unified", "compact"} and not self.syncing and not self.composing:
@@ -442,6 +468,8 @@ class ExperimentalEditor(Gtk.Box):
         """Debounce visible derived work and keep hidden editors idle."""
 
         if not self.enabled or self.closed or not self.editor.get_mapped() or self.editor.loading:
+            return
+        if self._is_minified() and self.mode != "rendered":
             return
         if self._projection_error(self.mode) is not None:
             return
@@ -462,6 +490,8 @@ class ExperimentalEditor(Gtk.Box):
             return GLib.SOURCE_REMOVE
         if self.mode == "rendered":
             self._render()
+            return GLib.SOURCE_REMOVE
+        if self._is_minified():
             return GLib.SOURCE_REMOVE
         if self.mode == "code" or self.base is None or self.command is not None:
             return GLib.SOURCE_REMOVE
@@ -511,6 +541,15 @@ class ExperimentalEditor(Gtk.Box):
                 # 2026-10-30: pubblicare righe e seriali solo dopo che tutti
                 # i limiti della proiezione sono stati validati senza toccare
                 # i mark precedenti. Un errore lascia riutilizzabile la vista.
+                pending_line = None
+                if self.pending_navigation is not None:
+                    mark, insert, bound, mode = self.pending_navigation
+                    if (self.mode == mode
+                            and self.projection.get_iter_at_mark(self.projection.get_insert()).get_offset() == insert
+                            and self.projection.get_iter_at_mark(self.projection.get_selection_bound()).get_offset() == bound):
+                        pending_line = self.editor.buffer.get_iter_at_mark(mark).get_line()
+                    self.editor.buffer.delete_mark(mark)
+                    self.pending_navigation = None
                 self._replace_spans(candidate_rows, candidate_gaps)
                 self.rows = candidate_rows
                 self.expanded_gaps = candidate_gaps
@@ -537,6 +576,8 @@ class ExperimentalEditor(Gtk.Box):
                     in_change = True
                 self._show_mode()
                 self._position_first_change()
+                if pending_line is not None:
+                    self.editor.goto_line_number(pending_line + 1, focus=False)
             except (ValueError, TypeError, KeyError) as error:
                 self.projection_errors[self.mode] = (self.serial, self.base_serial, str(error))
                 self._sync_mode_buttons()
@@ -897,6 +938,20 @@ class ExperimentalEditor(Gtk.Box):
             start = self.projection.get_iter_at_mark(span.visual_start).get_offset()
             end = self.projection.get_iter_at_mark(span.visual_end).get_offset()
             if start <= offset < end:
+                if self.rows_serial != self.serial or self.rows_base_serial != self.base_serial:
+                    # 2026-11-05: durante il debounce gli indici del vecchio
+                    # diff non sono validi. I mark live dei bordi conservano
+                    # l'espansione richiesta per il prossimo risultato worker.
+                    index = self.spans.index(span)
+                    source = self.editor.buffer
+                    previous = next((item for item in reversed(self.spans[:index]) if item.end is not None), None)
+                    following = next((item for item in self.spans[index + 1:] if item.start is not None), None)
+                    first = source.get_iter_at_mark(previous.end) if previous is not None else source.get_start_iter()
+                    last = source.get_iter_at_mark(following.start) if following is not None else source.get_end_iter()
+                    self.expanded_gap_marks.append((source.create_mark(None, first, True),
+                                                    source.create_mark(None, last, False)))
+                    self.schedule()
+                    return True
                 self.expanded_gaps.add(span.gap)
                 # 2026-10-30: mantenere l'espansione sul testo sorgente, anche
                 # quando una modifica precedente sposta gli indici del diff.
@@ -935,7 +990,8 @@ class ExperimentalEditor(Gtk.Box):
             self.first_scroll_id = None
             if self.closed or not self.enabled or self.mode != mode or self.serial != serial:
                 return GLib.SOURCE_REMOVE
-            if self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()).get_line() != target:
+            navigation, _view = self.editor._navigation_source()
+            if navigation.get_iter_at_mark(navigation.get_insert()).get_line() != target:
                 return GLib.SOURCE_REMOVE
             if mode == "side":
                 self.old_buffer.place_cursor(self.old_buffer.get_iter_at_line(old_line))
@@ -1098,8 +1154,54 @@ class ExperimentalEditor(Gtk.Box):
 
         if self.mode not in {"unified", "compact"}:
             return
-        source = self.editor.buffer.get_iter_at_line(line)
-        cursor = self.projection.get_iter_at_offset(self._visual_offset(source.get_offset()))
+        if self.mode == "compact" and not self.editor.historical and (
+                self.rows_serial != self.serial or self.rows_base_serial != self.base_serial):
+            # 2026-11-06: il blocco può essere espanso soltanto dopo il worker.
+            # Conservare anche la navigazione, senza spostare il cursore a EOF;
+            # clic e modifiche successivi dell'utente prevalgono sulla richiesta.
+            if self.pending_navigation is not None:
+                self.editor.buffer.delete_mark(self.pending_navigation[0])
+            source = self.editor.buffer.get_iter_at_line(line)
+            self.pending_navigation = (
+                self.editor.buffer.create_mark(None, source, True),
+                self.projection.get_iter_at_mark(self.projection.get_insert()).get_offset(),
+                self.projection.get_iter_at_mark(self.projection.get_selection_bound()).get_offset(),
+                self.mode,
+            )
+            if focus:
+                self.projection_view.grab_focus()
+            self.schedule()
+            return
+        # 2026-11-05: una riga omessa non ha coordinate nella proiezione;
+        # espandere il suo blocco evita il fallback a EOF e inserimenti altrove.
+        if self.mode == "compact":
+            for span in self.spans:
+                if span.gap is None or span.visual_start is None:
+                    continue
+                first = self.rows[span.gap[0]].new_line
+                last = self.rows[span.gap[1] - 1].new_line
+                if first is not None and last is not None and first <= line <= last:
+                    self.expand_gap_at(
+                        self.projection.get_iter_at_mark(span.visual_start).get_offset()
+                    )
+                    break
+        if self.editor.historical:
+            # 2026-11-05: anche nel diff di un file eliminato la riga richiesta
+            # appartiene alla baseline e va mappata sulle righe storiche visibili.
+            source = self.old_buffer.get_iter_at_line(line)
+            offset = self.projection.get_char_count()
+            for span in self.spans:
+                if span.old_line is None or span.visual_start is None:
+                    continue
+                start = self.old_buffer.get_iter_at_line(span.old_line).get_offset()
+                relative = source.get_offset() - start
+                if 0 <= relative <= len(span.text):
+                    offset = self.projection.get_iter_at_mark(span.visual_start).get_offset() + relative
+                    break
+        else:
+            source = self.editor.buffer.get_iter_at_line(line)
+            offset = self._visual_offset(source.get_offset())
+        cursor = self.projection.get_iter_at_offset(offset)
         self.projection.place_cursor(cursor)
         # 2026-10-30: lo scroll su un mark viene applicato da GTK dopo il
         # layout; scroll_to_iter può fallire quando la pagina è appena cambiata.
@@ -1133,8 +1235,14 @@ class ExperimentalEditor(Gtk.Box):
         if key == Gdk.KEY_f and self.show_search():
             return True
         if self.mode in {"unified", "compact"} and key == Gdk.KEY_b:
-            self.editor.buffer.place_cursor(self.editor.buffer.get_iter_at_offset(self._canonical_cursor()))
-            return self.editor.go_to_definition()
+            # 2026-11-04: il simbolo appartiene alla superficie visibile,
+            # comprese righe rimosse; non usare il cursore del buffer nascosto.
+            self.editor.go_to_definition(self.projection)
+            return True
+        if key == Gdk.KEY_b and ((self.mode == "side" and self.last_side == "old")
+                                or getattr(self.editor, "historical", False)):
+            self.editor.go_to_definition(self.old_buffer)
+            return True
         if key == Gdk.KEY_g and self.mode == "rendered":
             self.set_mode("code")
         return False
@@ -1179,6 +1287,9 @@ class ExperimentalEditor(Gtk.Box):
     def shutdown(self) -> None:
         """Release derived resources without saving or closing the canonical document."""
 
+        if self.pending_navigation is not None:
+            self.editor.buffer.delete_mark(self.pending_navigation[0])
+            self.pending_navigation = None
         self.closed = True
         self.syntax.close()
         self._unmapped(self.editor)
