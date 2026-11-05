@@ -27,6 +27,14 @@ class MercurialSCM(SCM):
         "C": "clean",
     }
 
+    @staticmethod
+    def _literal_paths(paths: Sequence[str]) -> list[str]:
+        """Keep selected filenames literal instead of interpreting Mercurial pattern prefixes."""
+
+        # 2026-11-04: -- stops options but glob:, re: and similar prefixes
+        # still expand patterns. path: anchors the exact name at the repository root.
+        return [f"path:{path}" for path in paths]
+
     def status_argv(self, paths: Sequence[str] = ()) -> list[str]:
         """Return JSON status arguments, optionally limited to explicit paths."""
 
@@ -35,7 +43,7 @@ class MercurialSCM(SCM):
             "status",
             "--copies",
             "-Tjson",
-            *(["--", *paths] if paths else []),
+            *(["--", *self._literal_paths(paths)] if paths else []),
         ]
 
     def parse_status(self, output: str) -> list[FileStatus]:
@@ -85,15 +93,17 @@ class MercurialSCM(SCM):
 
         # 2026-10-27: hg status -i can abort on a file below a nested .hg;
         # filtering its output afterwards is too late. path: is a literal root.
-        argv = ["hg", "status", "-i", "-T", "{path}\\n"]
+        argv = ["hg", "status", "-i", "-T", "{path}\\0"]
         for path in excluded_paths:
             argv.extend(["--exclude", f"path:{path}"])
         return argv
 
     def parse_ignored(self, output: str) -> set[str]:
-        """Parse Mercurial's plain newline-delimited ignored paths."""
+        """Parse NUL-delimited ignored paths without splitting literal newlines in names."""
 
-        return {line.rstrip("/") for line in output.splitlines() if line}
+        # 2026-11-04: newline-delimited names could invent unrelated ignored
+        # directories and silently remove their watcher coverage.
+        return {path.rstrip("/") for path in output.split("\0") if path}
 
     def branch_argv(self) -> list[str]:
         """Return the command for the current named branch."""
@@ -298,7 +308,7 @@ class MercurialSCM(SCM):
     def base_argv(self, path: str) -> list[str]:
         """Return a command that reads parent-revision content for one path."""
 
-        return ["hg", "cat", "-r", ".", "--", path]
+        return ["hg", "cat", "-r", ".", "--", *self._literal_paths((path,))]
 
     def is_locked(self) -> bool:
         """Return whether Mercurial currently owns its working-copy lock."""
@@ -308,32 +318,32 @@ class MercurialSCM(SCM):
     def commit_argv(self, message: str, paths: Sequence[str]) -> list[str]:
         """Return a commit constrained to already tracked selected paths."""
 
-        return ["hg", "commit", "-m", message, "--", *paths]
+        return ["hg", "commit", "-m", message, "--", *self._literal_paths(paths)]
 
     def revert_argv(self, paths: Sequence[str]) -> list[str]:
         """Return a no-backup revert command for explicitly selected paths."""
 
-        return ["hg", "revert", "--no-backup", "--", *paths]
+        return ["hg", "revert", "--no-backup", "--", *self._literal_paths(paths)]
 
     def add_argv(self, paths: Sequence[str]) -> list[str]:
         """Return an add command constrained to explicitly selected new paths."""
 
-        return ["hg", "add", "--", *paths]
+        return ["hg", "add", "--", *self._literal_paths(paths)]
 
     def forget_argv(self, paths: Sequence[str]) -> list[str]:
         """Return a forget command that keeps explicitly selected files on disk."""
 
-        return ["hg", "forget", "--", *paths]
+        return ["hg", "forget", "--", *self._literal_paths(paths)]
 
     def record_removal_argv(self, paths: Sequence[str]) -> list[str]:
         """Record explicitly selected paths that the UI already deleted."""
 
-        return ["hg", "remove", "--after", "--", *paths]
+        return ["hg", "remove", "--after", "--", *self._literal_paths(paths)]
 
     def preview_diff_argv(self, path: str) -> list[str]:
         """Return a contextual function-aware unified diff for the preview."""
 
-        return ["hg", "diff", "-p", "-U", "8", "--nodates", "--", path]
+        return ["hg", "diff", "-p", "-U", "8", "--nodates", "--", *self._literal_paths((path,))]
 
     def preview_move_diff_argv(self, source: str, destination: str) -> list[str]:
         """Return one Git-style diff that preserves Mercurial rename metadata."""
@@ -347,14 +357,13 @@ class MercurialSCM(SCM):
             "8",
             "--nodates",
             "--",
-            source,
-            destination,
+            *self._literal_paths((source, destination)),
         ]
 
     def editor_diff_argv(self, path: str) -> list[str]:
         """Return a compact unified diff for assisted editing."""
 
-        return ["hg", "diff", "-p", "-U", "3", "--nodates", "--", path]
+        return ["hg", "diff", "-p", "-U", "3", "--nodates", "--", *self._literal_paths((path,))]
 
     def editor_move_diff_argv(self, source: str, destination: str) -> list[str]:
         """Return a compact rename-aware unified diff for assisted editing."""
@@ -368,8 +377,7 @@ class MercurialSCM(SCM):
             "3",
             "--nodates",
             "--",
-            source,
-            destination,
+            *self._literal_paths((source, destination)),
         ]
 
     def diff_argv(self, paths: Sequence[str] = ()) -> list[str]:
@@ -385,7 +393,7 @@ class MercurialSCM(SCM):
             "-p",
             "meld",
             "--option=--newtab",
-            *( ["--", *paths] if paths else [] ),
+            *( ["--", *self._literal_paths(paths)] if paths else [] ),
         ]
 
     def external_tool_argv(self) -> list[str]:
