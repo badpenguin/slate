@@ -1,5 +1,8 @@
 """Git adapter parser and explicit-command tests."""
 
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,20 +86,20 @@ class GitSCMTest(unittest.TestCase):
                 "--untracked-files=all",
                 "--find-renames=50%",
                 "--",
-                "a b.py",
+                ":(top,literal)a b.py",
             ],
         )
         self.assertEqual(
             self.scm.commit_argv("messaggio", ("a b.py",)),
-            ["git", "commit", "--only", "-m", "messaggio", "--", "a b.py"],
+            ["git", "commit", "--only", "-m", "messaggio", "--", ":(top,literal)a b.py"],
         )
         self.assertEqual(
             self.scm.add_argv(("nuovo.py",)),
-            ["git", "add", "--", "nuovo.py"],
+            ["git", "add", "--", ":(top,literal)nuovo.py"],
         )
         self.assertEqual(
             self.scm.record_removal_argv(("rimosso.py",)),
-            ["git", "add", "-u", "--", "rimosso.py"],
+            ["git", "add", "-u", "--", ":(top,literal)rimosso.py"],
         )
         self.assertEqual(self.scm.environment["GIT_OPTIONAL_LOCKS"], "0")
         self.assertIn(
@@ -104,8 +107,42 @@ class GitSCMTest(unittest.TestCase):
         )
         self.assertNotIn("--newtab", self.scm.merge_tool_argv())
         self.assertEqual(
-            self.scm.diff_argv(("a b.py",))[-3:], ["HEAD", "--", "a b.py"]
+            self.scm.diff_argv(("a b.py",))[-3:], ["HEAD", "--", ":(top,literal)a b.py"]
         )
+
+    def test_every_path_operation_encodes_special_names_as_literals(self) -> None:
+        """Wildcards and pathspec prefixes cannot expand an explicit UI selection."""
+
+        paths = ["src/[id]/page.tsx", "file?.txt", "file*.txt", ":(exclude)*"]
+        commands = [self.scm.status_argv(paths), self.scm.commit_argv("message", paths),
+                    self.scm.add_argv(paths), self.scm.forget_argv(paths),
+                    self.scm.record_removal_argv(paths), self.scm.revert_argv(paths), self.scm.diff_argv(paths)]
+        for command in commands:
+            self.assertEqual(command[command.index("--") + 1:], [f":(top,literal){path}" for path in paths])
+        for path in paths:
+            for command in (self.scm.preview_diff_argv(path), self.scm.editor_diff_argv(path)):
+                self.assertEqual(command[command.index("--") + 1:], [f":(top,literal){path}"])
+        for command in (self.scm.preview_move_diff_argv(paths[0], paths[-1]),
+                        self.scm.editor_move_diff_argv(paths[0], paths[-1])):
+            self.assertEqual(command[command.index("--") + 1:],
+                             [f":(top,literal){paths[0]}", f":(top,literal){paths[-1]}"])
+
+    def test_literal_selection_does_not_match_another_tracked_filename(self) -> None:
+        """A real read-only Git query cannot interpret [e] as a match for editor.py."""
+
+        root = Path(__file__).resolve().parent.parent
+        if not (root / ".git").is_dir() or shutil.which("git") is None:
+            self.skipTest("Requires a normal Git source checkout")
+        environment = dict(os.environ)
+        environment.update(self.scm.environment)
+        control = subprocess.run(["git", "ls-files", "--", "slate/editor.py"], cwd=root, env=environment,
+                                 capture_output=True, text=True, check=True)
+        if control.stdout.strip() != "slate/editor.py":
+            self.skipTest("Source file is not tracked in this checkout")
+        encoded = self.scm.status_argv(["slate/[e]ditor.py"])[-1]
+        result = subprocess.run(["git", "ls-files", "--", encoded], cwd=root, env=environment,
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout, "")
 
     def test_ignore_and_index_lock_use_normal_git_metadata(self) -> None:
         """Ignored paths are NUL-safe and index.lock gates automatic status."""
