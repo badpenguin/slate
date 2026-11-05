@@ -185,7 +185,9 @@ class RepositoryOperationDialog(Gtk.Dialog):
     def _redact_credentials(message: str) -> str:
         """Remove passwords embedded in HTTP-style repository URLs."""
 
-        return re.sub(r"(https?://[^\s/:]+:)[^@\s]+@", r"\1…@", message)
+        # 2026-11-06: gli schemi URI non distinguono maiuscole/minuscole;
+        # proteggere anche trasporti diversi da HTTP quando includono password.
+        return re.sub(r"([a-z][a-z0-9+.-]*://[^\s/:]+:)[^@\s]+@", r"\1…@", message, flags=re.IGNORECASE)
 
     def _on_response(self, _dialog: Gtk.Dialog, response: int) -> None:
         """Route submission, safe cancellation and completed closure."""
