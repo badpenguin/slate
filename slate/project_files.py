@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
+import sys
 from typing import Callable
 
 import gi
 
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
+
+from .processes import CommandResult, run_async
 
 
 OperationCallback = Callable[[str | None], None]
@@ -260,65 +264,15 @@ class ProjectFileOperations:
     def delete_flat_directory(self, path: str, callback: OperationCallback) -> None:
         """Delete a directory only after proving it has no real subdirectories."""
 
-        self.inspect_directory(
-            path,
-            partial(self._on_flat_directory_inspected, path, callback),
+        # 2026-11-05: il worker fissa la directory tramite descrittori, senza
+        # risolvere nuovamente il path fra ispezione e cancellazione dei figli.
+        run_async(
+            [sys.executable, "-m", "slate.flat_delete_worker", path],
+            partial(self._on_flat_directory_deleted, callback),
+            cwd=str(Path(__file__).resolve().parent.parent),
         )
 
-    def _on_flat_directory_inspected(
-        self,
-        path: str,
-        callback: OperationCallback,
-        inspection: DirectoryInspection | None,
-        error: str | None,
-    ) -> None:
-        """Reject subdirectories or begin deleting collected non-directory children."""
+    def _on_flat_directory_deleted(self, callback: OperationCallback, result: CommandResult) -> None:
+        """Publish the pinned-directory worker result through the existing callback."""
 
-        if error is not None or inspection is None:
-            callback(error or "Unable to inspect the directory.")
-            return
-        if inspection.contains_directory:
-            callback("The directory contains other directories and cannot be deleted.")
-            return
-        parent = Gio.File.new_for_path(path)
-        self._delete_next_child(parent, list(inspection.child_names), callback)
-
-    def _delete_next_child(
-        self,
-        parent: Gio.File,
-        names: list[str],
-        callback: OperationCallback,
-    ) -> None:
-        """Delete direct non-directory children sequentially, then their parent."""
-
-        if not names:
-            parent.delete_async(
-                GLib.PRIORITY_DEFAULT,
-                None,
-                self._on_entry_deleted,
-                callback,
-            )
-            return
-        child = parent.get_child(names.pop())
-        child.delete_async(
-            GLib.PRIORITY_DEFAULT,
-            None,
-            self._on_flat_child_deleted,
-            (parent, names, callback),
-        )
-
-    def _on_flat_child_deleted(
-        self,
-        child: Gio.File,
-        result: Gio.AsyncResult,
-        request: tuple[Gio.File, list[str], OperationCallback],
-    ) -> None:
-        """Continue flat deletion only after one child was removed successfully."""
-
-        parent, names, callback = request
-        try:
-            child.delete_finish(result)
-        except GLib.Error as error:
-            callback(str(error))
-            return
-        self._delete_next_child(parent, names, callback)
+        callback(None if result.ok else str(result.error or result.stderr.strip() or "Directory deletion failed"))
