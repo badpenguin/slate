@@ -52,7 +52,9 @@ class DiffSyntaxHighlighter:
             self.baseline.set_language(language)
         if self.baseline.get_style_scheme() != scheme:
             self.baseline.set_style_scheme(scheme)
-        self.baseline.set_highlight_syntax(language is not None and mode in {"unified", "side"})
+        self.baseline.set_highlight_syntax(language is not None and (
+            mode in {"unified", "side"} or (mode == "code" and self.presentation.editor.historical)
+        ))
         self.projection.set_highlight_syntax(False)
         self.projection.set_style_scheme(scheme)
         preferences = self.presentation.editor.appearance
