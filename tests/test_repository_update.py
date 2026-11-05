@@ -108,11 +108,15 @@ class RepositoryUpdateDialogTest(RepositoryDialogFixture, unittest.TestCase):
     def test_error_text_redacts_embedded_http_password(self) -> None:
         """Credential-bearing remote failures never expose their password."""
 
-        redacted = RepositoryUpdateDialog._redact_credentials(
-            "fatal: https://alice:secret@example.test/repo"
-        )
-        self.assertNotIn("secret", redacted)
-        self.assertIn("alice:…@", redacted)
+        for scheme in ("https", "HTTPS", "Http", "ssh", "ftp", "git+ssh"):
+            with self.subTest(scheme=scheme):
+                redacted = RepositoryUpdateDialog._redact_credentials(
+                    f"fatal: {scheme}://alice:secret@example.test/repo"
+                )
+                self.assertNotIn("secret", redacted)
+                self.assertIn("alice:…@", redacted)
+        self.assertEqual(RepositoryUpdateDialog._redact_credentials("ssh://alice@example.test/repo"),
+                         "ssh://alice@example.test/repo")
 
 
 if __name__ == "__main__":
