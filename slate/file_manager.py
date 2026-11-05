@@ -78,7 +78,7 @@ class ProjectFileManager(Gtk.Box):
         on_rename: Callable[[str], None],
         on_open_terminal: Callable[[str], None],
         on_delete: Callable[[str], None],
-        on_preferences: Callable[[dict[str, object]], None],
+        on_preferences: Callable[[str, dict[str, object]], None],
         *,
         on_file_change: Callable[[str, str], None] | None = None,
     ) -> None:
@@ -118,9 +118,12 @@ class ProjectFileManager(Gtk.Box):
         self.rebuilding_model = False
         self.expand_all_requested = False
         self.expand_all_complete = False
+        self.expansion_preferences_pending = False
         self.context_relative: str | None = None
         self.context_directory = False
         self.context_blocked = False
+        self.context_generation = 0
+        self.context_menu = None
         self.pending_cursor_path: str | None = None
         self.project_states: dict[str, _ProjectTreeState] = {}
 
@@ -316,7 +319,12 @@ class ProjectFileManager(Gtk.Box):
         """Select a project and reuse its cached tree when still coherent."""
 
         resolved_root = str(Path(root).resolve())
+        self._invalidate_context()
         self._stash_project_state()
+        # 2026-11-04: anche un modello pulito ripreso dalla cache deve poter
+        # espandere nuove directory senza riusare il token appena annullato.
+        self.cancellable = Gio.Cancellable()
+        self.refresh_pending_paths.clear()
         self.project_name = project_name
         self.root = resolved_root
         self.repo_watched = repo_watched
@@ -369,6 +377,7 @@ class ProjectFileManager(Gtk.Box):
 
         if self.project_name is None or self.root is None:
             return
+        self._stop_expand_all()
         incomplete = bool(self.loading_paths)
         self._cancel_requests()
         self._clear_monitors()
@@ -408,6 +417,8 @@ class ProjectFileManager(Gtk.Box):
     def clear_project(self) -> None:
         """Release project resources and show the inactive empty state."""
 
+        self._stop_expand_all()
+        self._invalidate_context()
         self.project_name = None
         self.root = None
         self.ignored.clear()
@@ -426,6 +437,8 @@ class ProjectFileManager(Gtk.Box):
     def set_active(self, active: bool) -> None:
         """Refresh deferred changes when the file page becomes visible."""
 
+        if not active and self.expand_all_requested:
+            self._stop_expand_all()
         self.active = active
         if active:
             # 2026-08-16: Gtk.Widget.show_all() può riportare lo Stack interno
@@ -985,6 +998,23 @@ class ProjectFileManager(Gtk.Box):
         except ValueError:
             inside_root = False
             target_contains_parent = True
+        if is_symlink and not target_contains_parent:
+            # 2026-11-04: i link incrociati A -> B -> A non risalgono al
+            # padre fisico immediato. Confrontare anche gli antenati del ramo
+            # visualizzato evita di visitare nuovamente la stessa directory.
+            ancestor = os.path.dirname(candidate)
+            while ancestor != self.root and ancestor != os.path.dirname(ancestor):
+                ancestor = os.path.dirname(ancestor)
+                ancestor_target = os.path.realpath(ancestor)
+                try:
+                    if os.path.commonpath((ancestor_target, target)) == target:
+                        target_contains_parent = True
+                        break
+                except ValueError:
+                    target_contains_parent = True
+                    break
+                if ancestor == self.root:
+                    break
         if not is_symlink and inside_root:
             return info.get_file_type() == Gio.FileType.DIRECTORY, False, False
         # 2026-10-03: Files può esplorare un symlink esterno su richiesta
@@ -1125,7 +1155,10 @@ class ProjectFileManager(Gtk.Box):
             self._monitor_directory(relative, excluded)
         self._load_directory(relative)
         if not self.restoring_expansion:
-            self._save_preferences()
+            if self.expand_all_requested:
+                self.expansion_preferences_pending = True
+            else:
+                self._save_preferences()
 
     def _on_row_collapsed(
         self, _tree: Gtk.TreeView, tree_iter: Gtk.TreeIter, _path: Gtk.TreePath
@@ -1147,7 +1180,10 @@ class ProjectFileManager(Gtk.Box):
         if not self.expand_all_requested:
             self._set_expand_action(False)
         if not self.restoring_expansion:
-            self._save_preferences()
+            if self.expand_all_requested:
+                self.expansion_preferences_pending = True
+            else:
+                self._save_preferences()
 
     def _on_cursor_changed(self, _tree: Gtk.TreeView) -> None:
         """Preview the focused file and clear preview for directories."""
@@ -1296,12 +1332,15 @@ class ProjectFileManager(Gtk.Box):
 
         if self.context_blocked:
             return True
+        self.context_generation += 1
+        context = (self.project_name, self.root, self.context_generation)
         menu = Gtk.Menu()
+        self.context_menu = menu
         if self.context_relative is not None and self.context_directory:
             terminal_item = self._menu_item(
                 "Open terminal here", "utilities-terminal", Gdk.KEY_t
             )
-            terminal_item.connect("activate", self._on_context_open_terminal)
+            terminal_item.connect("activate", self._on_context_open_terminal, context)
             menu.append(terminal_item)
             menu.append(Gtk.SeparatorMenuItem())
         if self.context_relative is not None and not self.context_directory:
@@ -1315,7 +1354,7 @@ class ProjectFileManager(Gtk.Box):
                 ),
             ):
                 item = self._menu_item(label, icon, keyval)
-                item.connect("activate", callback)
+                item.connect("activate", callback, context)
                 menu.append(item)
             menu.append(Gtk.SeparatorMenuItem())
         for label, icon, callback in (
@@ -1323,15 +1362,15 @@ class ProjectFileManager(Gtk.Box):
             ("+ Folder", "folder-new", self._on_context_new_directory),
         ):
             item = self._menu_item(label, icon, None)
-            item.connect("activate", callback)
+            item.connect("activate", callback, context)
             menu.append(item)
         if self.context_relative is not None:
             menu.append(Gtk.SeparatorMenuItem())
             rename_item = self._menu_item("Rename", "edit-rename", Gdk.KEY_r)
-            rename_item.connect("activate", self._on_context_rename)
+            rename_item.connect("activate", self._on_context_rename, context)
             menu.append(rename_item)
             item = self._menu_item("Delete", "edit-delete", Gdk.KEY_Delete)
-            item.connect("activate", self._on_context_delete)
+            item.connect("activate", self._on_context_delete, context)
             menu.append(item)
         menu.show_all()
         if event is not None:
@@ -1359,50 +1398,83 @@ class ProjectFileManager(Gtk.Box):
         item.add(content)
         return item
 
-    def _on_context_view(self, _item: Gtk.MenuItem) -> None:
+    def _invalidate_context(self) -> None:
+        """Close obsolete menus and invalidate actions before changing project ownership."""
+
+        # 2026-11-04: callback e menu possono sopravvivere al cambio progetto;
+        # nessuna azione precedente deve usare il nuovo progetto attivo.
+        self.context_generation += 1
+        self.context_relative = None
+        self.context_directory = False
+        self.context_blocked = False
+        if self.context_menu is not None:
+            self.context_menu.popdown()
+            self.context_menu.destroy()
+            self.context_menu = None
+
+    def _context_is_current(self, context) -> bool:
+        """Accept only actions from the current menu and project generation."""
+
+        return context is None or context == (self.project_name, self.root, self.context_generation)
+
+    def _on_context_view(self, _item: Gtk.MenuItem, context=None) -> None:
         """Forward contextual viewing for the focused file."""
 
+        if not self._context_is_current(context):
+            return
         relative = self.context_relative
         if relative:
             self.on_view(relative)
 
-    def _on_context_edit_internal(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_edit_internal(self, _item: Gtk.MenuItem, context=None) -> None:
         """Forward contextual editing to a SLATE editor tab."""
 
+        if not self._context_is_current(context):
+            return
         relative = self.context_relative
         if relative:
             self.on_edit_internal(relative)
 
 
-    def _on_context_delete(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_delete(self, _item: Gtk.MenuItem, context=None) -> None:
         """Forward confirmed deletion for the contextual file or directory."""
 
+        if not self._context_is_current(context):
+            return
         relative = self.context_relative
         if relative:
             self.on_delete(relative)
 
-    def _on_context_rename(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_rename(self, _item: Gtk.MenuItem, context=None) -> None:
         """Forward rename for the contextual file or directory."""
 
+        if not self._context_is_current(context):
+            return
         relative = self.context_relative
         if relative:
             self.on_rename(relative)
 
-    def _on_context_open_terminal(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_open_terminal(self, _item: Gtk.MenuItem, context=None) -> None:
         """Request a new project terminal rooted in the contextual directory."""
 
+        if not self._context_is_current(context):
+            return
         relative = self.context_relative
         if relative and self.context_directory:
             self.on_open_terminal(relative)
 
-    def _on_context_new_file(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_new_file(self, _item: Gtk.MenuItem, context=None) -> None:
         """Request a new file in the contextual root, directory or file parent."""
 
+        if not self._context_is_current(context):
+            return
         self.on_new_file(self._context_creation_parent())
 
-    def _on_context_new_directory(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_new_directory(self, _item: Gtk.MenuItem, context=None) -> None:
         """Request a new directory in the contextual target parent."""
 
+        if not self._context_is_current(context):
+            return
         self.on_new_directory(self._context_creation_parent())
 
     def _context_creation_parent(self) -> str:
@@ -1476,12 +1548,25 @@ class ProjectFileManager(Gtk.Box):
         if self.project_name is None:
             return
         self.on_preferences(
+            self.project_name,
             {
                 "show_hidden": self.show_hidden,
                 "show_excluded": self.show_excluded,
                 "expanded_paths": sorted(self.expanded_paths),
             }
         )
+        self.expansion_preferences_pending = False
+
+    def _stop_expand_all(self) -> None:
+        """Persist partial expansion before stopping a batch or changing projects."""
+
+        # 2026-11-04: durante Expand all evitare una scrittura con fsync
+        # per cartella; conservare però lo stato parziale quando si interrompe.
+        if self.expansion_preferences_pending:
+            self._save_preferences()
+        self.expand_all_requested = False
+        self.expand_all_complete = False
+        self._set_expand_action(False)
 
     def _monitor_directory(self, relative: str, excluded: bool) -> None:
         """Monitor only directories not already covered by the repository watcher."""
