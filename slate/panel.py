@@ -120,6 +120,7 @@ class SCMPanel(Gtk.Box):
         self.expansion_restore_id: int | None = None
         self.preview_timeout_id: int | None = None
         self.pending_preview_status: FileStatus | None = None
+        self.context_generation = 0
         self.active_context_menu: Gtk.Menu | None = None
         self.context_status: FileStatus | None = None
         self.context_repository: RepositoryRef | None = None
@@ -360,6 +361,8 @@ class SCMPanel(Gtk.Box):
     def bind_project(self, project_name: str, supported: bool) -> None:
         """Switch repositories by attaching cached rows instead of rebuilding them."""
 
+        if project_name != self.current_project:
+            self._invalidate_context()
         if self.current_project is not None:
             self._capture_tree_view_state()
             self.project_states[self.current_project] = self.current_state
@@ -409,13 +412,7 @@ class SCMPanel(Gtk.Box):
             # 2026-10-23: the warning is persistent and does not destroy the
             # last coherent tree, selection, checkboxes or commit message.
             self._cancel_pending_preview()
-            if self.active_context_menu is not None:
-                self.active_context_menu.popdown()
-            self.context_status = self.context_repository = None
-            self.context_add_statuses.clear()
-            self.context_forget_statuses.clear()
-            self.context_checkbox_statuses.clear()
-            self.context_selected_statuses.clear()
+            self._invalidate_context()
             self.show_error("Too many changed or untracked files (at least 1,000). "
                             "Resolve manually or update ignore rules, then press Scan.")
 
@@ -1413,6 +1410,28 @@ class SCMPanel(Gtk.Box):
             return False
         return self._show_file_menu(None)
 
+    def _invalidate_context(self) -> None:
+        """Invalidate menus and queued repository actions before switching ownership."""
+
+        # 2026-11-04: closing a menu alone does not cancel already queued idle
+        # actions. Carry a project generation through activation and dispatch.
+        self.context_generation += 1
+        if self.active_context_menu is not None:
+            self.active_context_menu.popdown()
+            self.active_context_menu.destroy()
+            self.active_context_menu = None
+        self.context_status = self.context_repository = None
+        self.context_add_statuses.clear()
+        self.context_forget_statuses.clear()
+        self.context_checkbox_statuses.clear()
+        self.context_selected_statuses.clear()
+
+    def _context_is_current(self, context) -> bool:
+        """Accept menu actions only while their project generation still owns the panel."""
+
+        return (self.current_project not in self.blocked_projects
+                and (context is None or context == (self.current_project, self.context_generation)))
+
     def _show_repository_menu(self, event: Gdk.EventButton | None) -> bool:
         """Show tools whose working directory is the contextual repository."""
 
@@ -1421,6 +1440,7 @@ class SCMPanel(Gtk.Box):
 
         if self.context_repository is None:
             return False
+        context = (self.current_project, self.context_generation)
         menu = Gtk.Menu()
         verify_item = self._menu_item("Verify…", "view-refresh", None)
         update_item = self._menu_item("Update…", "view-refresh", None)
@@ -1435,21 +1455,21 @@ class SCMPanel(Gtk.Box):
         exclude_item = self._menu_item(
             "Exclude repository", "list-remove", None
         )
-        verify_item.connect("activate", self._on_context_verify)
-        update_item.connect("activate", self._on_context_update)
-        publish_item.connect("activate", self._on_context_publish)
-        new_branch_item.connect("activate", self._on_context_new_branch)
-        switch_branch_item.connect("activate", self._on_context_switch_branch)
-        merge_branch_item.connect("activate", self._on_context_merge_branch)
-        tag_item.connect("activate", self._on_context_tag)
-        meld_item.connect("activate", self._on_context_meld)
-        exclude_item.connect("activate", self._on_context_exclude)
+        verify_item.connect("activate", self._on_context_verify, context)
+        update_item.connect("activate", self._on_context_update, context)
+        publish_item.connect("activate", self._on_context_publish, context)
+        new_branch_item.connect("activate", self._on_context_new_branch, context)
+        switch_branch_item.connect("activate", self._on_context_switch_branch, context)
+        merge_branch_item.connect("activate", self._on_context_merge_branch, context)
+        tag_item.connect("activate", self._on_context_tag, context)
+        meld_item.connect("activate", self._on_context_meld, context)
+        exclude_item.connect("activate", self._on_context_exclude, context)
         menu.append(meld_item)
         if self.context_repository.scm_type == "hg":
             external_item = self._menu_item(
                 "Open in TortoiseHg", "applications-system", None
             )
-            external_item.connect("activate", self._on_context_external)
+            external_item.connect("activate", self._on_context_external, context)
             menu.append(external_item)
         menu.append(verify_item)
         # 2026-08-18: repository mutations follow harmless inspection tools
@@ -1521,6 +1541,7 @@ class SCMPanel(Gtk.Box):
     def _build_file_menu(self) -> Gtk.Menu:
         """Build generic file and source-control action groups for the context."""
 
+        context = (self.current_project, self.context_generation)
         menu = Gtk.Menu()
         # 2026-08-17: una selezione multipla non deve presentare azioni che
         # colpirebbero silenziosamente soltanto il file contestuale.
@@ -1533,9 +1554,9 @@ class SCMPanel(Gtk.Box):
             diff_editor_item = self._menu_item(
                 "Edit with diff…", "text-x-patch", None
             )
-            view_item.connect("activate", self._on_context_view)
-            internal_item.connect("activate", self._on_context_edit_internal)
-            diff_editor_item.connect("activate", self._on_context_edit_with_diff)
+            view_item.connect("activate", self._on_context_view, context)
+            internal_item.connect("activate", self._on_context_edit_internal, context)
+            diff_editor_item.connect("activate", self._on_context_edit_with_diff, context)
             menu.append(view_item)
             menu.append(internal_item)
             if (
@@ -1554,7 +1575,7 @@ class SCMPanel(Gtk.Box):
                 meld_item = self._menu_item(
                     "Open in Meld", "document-open", Gdk.KEY_d
                 )
-                meld_item.connect("activate", self._on_context_file_meld)
+                meld_item.connect("activate", self._on_context_file_meld, context)
                 menu.append(meld_item)
         # 2026-08-16: le operazioni SCM formano un gruppo distinto dalle
         # azioni generiche sul file condivise con il File manager.
@@ -1575,7 +1596,7 @@ class SCMPanel(Gtk.Box):
             checkbox_item = self._menu_item(
                 checkbox_label, "emblem-ok", Gdk.KEY_space
             )
-            checkbox_item.connect("activate", self._on_context_toggle_checkboxes)
+            checkbox_item.connect("activate", self._on_context_toggle_checkboxes, context)
             menu.append(checkbox_item)
         if self.context_add_statuses:
             add_label = (
@@ -1584,11 +1605,11 @@ class SCMPanel(Gtk.Box):
                 else f"Add ({len(self.context_add_statuses)})"
             )
             add_item = self._menu_item(add_label, "list-add", Gdk.KEY_a)
-            add_item.connect("activate", self._on_context_add)
+            add_item.connect("activate", self._on_context_add, context)
             menu.append(add_item)
         if self.context_forget_statuses:
             forget_item = self._menu_item("Undo add", "list-remove", None)
-            forget_item.connect("activate", self._on_context_forget)
+            forget_item.connect("activate", self._on_context_forget, context)
             menu.append(forget_item)
         missing_selection = bool(self.context_selected_statuses) and all(
             status.state == "missing" for status in self.context_selected_statuses
@@ -1602,7 +1623,7 @@ class SCMPanel(Gtk.Box):
             delete_item = self._menu_item(
                 delete_label, "edit-delete", Gdk.KEY_Delete
             )
-            delete_item.connect("activate", self._on_context_delete)
+            delete_item.connect("activate", self._on_context_delete, context)
             if menu.get_children():
                 menu.append(Gtk.SeparatorMenuItem())
             menu.append(delete_item)
@@ -1780,21 +1801,27 @@ class SCMPanel(Gtk.Box):
             return True
         return False
 
-    def _on_context_add(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_add(self, _item: Gtk.MenuItem, context=None) -> None:
         """Forward all contextually selected untracked files for addition."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_add_statuses:
             self.on_add(list(self.context_add_statuses))
 
-    def _on_context_forget(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_forget(self, _item: Gtk.MenuItem, context=None) -> None:
         """Return contextually selected added files to the untracked state."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_forget_statuses:
             self.on_forget(list(self.context_forget_statuses))
 
-    def _on_context_toggle_checkboxes(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_toggle_checkboxes(self, _item: Gtk.MenuItem, context=None) -> None:
         """Apply the contextual multi-selection state to its tracked checkboxes."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_checkbox_statuses:
             self._set_operation_checkboxes(
                 self.context_checkbox_statuses, self.context_checkbox_checked
@@ -1822,29 +1849,37 @@ class SCMPanel(Gtk.Box):
             self.store.set_value(self.iter_by_path[key], self.COL_CHECKED, checked)
         self._sync_checked_actions()
 
-    def _on_context_view(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_view(self, _item: Gtk.MenuItem, context=None) -> None:
         """Open the contextual file with the desktop's default viewer."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_status:
             self.on_view(self.context_status)
 
-    def _on_context_edit_internal(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_edit_internal(self, _item: Gtk.MenuItem, context=None) -> None:
         """Open the contextual working-copy file in a SLATE editor tab."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_status:
             self._cancel_pending_preview()
             self.on_edit_internal(self.context_status)
 
-    def _on_context_edit_with_diff(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_edit_with_diff(self, _item: Gtk.MenuItem, context=None) -> None:
         """Open the contextual tracked patch in the compact diff editor."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_status:
             self.on_edit_with_diff(self.context_status)
 
 
-    def _on_context_delete(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_delete(self, _item: Gtk.MenuItem, context=None) -> None:
         """Request confirmed deletion of the contextual working-copy file."""
 
+        if not self._context_is_current(context):
+            return
         if (
             len(self.context_selected_statuses) > 1
             and self.on_delete_missing is not None
@@ -1858,15 +1893,19 @@ class SCMPanel(Gtk.Box):
         if self.context_status:
             self.on_delete(self.context_status)
 
-    def _on_context_meld(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_meld(self, _item: Gtk.MenuItem, context=None) -> None:
         """Launch Meld rooted at the explicitly clicked repository."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_repository is not None:
             self.on_diff(self.context_repository, ())
 
-    def _on_context_file_meld(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_file_meld(self, _item: Gtk.MenuItem, context=None) -> None:
         """Launch Meld for the explicitly targeted tracked file patch."""
 
+        if not self._context_is_current(context):
+            return
         if (
             self.context_status is not None
             and self.context_status.state
@@ -1878,28 +1917,35 @@ class SCMPanel(Gtk.Box):
                 status.operation_paths(),
             )
 
-    def _on_context_external(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_external(self, _item: Gtk.MenuItem, context=None) -> None:
         """Launch TortoiseHg rooted at the explicitly clicked repository."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_repository is not None:
             self.on_external(self.context_repository)
 
-    def _on_context_verify(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_verify(self, _item: Gtk.MenuItem, context=None) -> None:
         """Schedule explicit remote verification for the contextual repository."""
 
+        if not self._context_is_current(context):
+            return
         self._schedule_repository_action("verify")
 
-    def _on_context_update(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_update(self, _item: Gtk.MenuItem, context=None) -> None:
         """Schedule the repository update modal after menu deactivation."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_repository is not None:
             repository = self.context_repository
-            GLib.idle_add(self._update_context_repository, repository)
+            GLib.idle_add(self._update_context_repository, repository,
+                          (self.current_project, self.context_generation))
 
-    def _update_context_repository(self, repository: RepositoryRef) -> bool:
+    def _update_context_repository(self, repository: RepositoryRef, context=None) -> bool:
         """Open Update only after GTK has finished dispatching the context menu."""
 
-        if self.current_project in self.blocked_projects:
+        if not self._context_is_current(context):
             return GLib.SOURCE_REMOVE
 
         # 2026-08-17: deferring modal creation avoids nesting it in GTK's menu
@@ -1907,29 +1953,39 @@ class SCMPanel(Gtk.Box):
         self.on_update(repository)
         return GLib.SOURCE_REMOVE
 
-    def _on_context_publish(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_publish(self, _item: Gtk.MenuItem, context=None) -> None:
         """Schedule the simple Publish modal for the contextual repository."""
 
+        if not self._context_is_current(context):
+            return
         self._schedule_repository_action("publish")
 
-    def _on_context_new_branch(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_new_branch(self, _item: Gtk.MenuItem, context=None) -> None:
         """Schedule the New branch modal for the contextual repository."""
 
+        if not self._context_is_current(context):
+            return
         self._schedule_repository_action("new_branch")
 
-    def _on_context_switch_branch(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_switch_branch(self, _item: Gtk.MenuItem, context=None) -> None:
         """Schedule the Switch branch modal for the contextual repository."""
 
+        if not self._context_is_current(context):
+            return
         self._schedule_repository_action("switch_branch")
 
-    def _on_context_merge_branch(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_merge_branch(self, _item: Gtk.MenuItem, context=None) -> None:
         """Schedule the local Merge branch modal for the contextual repository."""
 
+        if not self._context_is_current(context):
+            return
         self._schedule_repository_action("merge_branch")
 
-    def _on_context_tag(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_tag(self, _item: Gtk.MenuItem, context=None) -> None:
         """Schedule the Assign tag modal for the contextual repository."""
 
+        if not self._context_is_current(context):
+            return
         self._schedule_repository_action("tag")
 
     def _schedule_repository_action(self, action: str) -> None:
@@ -1940,30 +1996,34 @@ class SCMPanel(Gtk.Box):
                 self._activate_repository_action,
                 action,
                 self.context_repository,
+                (self.current_project, self.context_generation),
             )
 
     def _activate_repository_action(
-        self, action: str, repository: RepositoryRef
+        self, action: str, repository: RepositoryRef, context=None
     ) -> bool:
         """Forward one explicit repository action after menu deactivation."""
 
-        if self.current_project in self.blocked_projects:
+        if not self._context_is_current(context):
             return GLib.SOURCE_REMOVE
 
         self.on_repository_action(action, repository)
         return GLib.SOURCE_REMOVE
 
-    def _on_context_exclude(self, _item: Gtk.MenuItem) -> None:
+    def _on_context_exclude(self, _item: Gtk.MenuItem, context=None) -> None:
         """Schedule exclusion after GTK finishes dispatching menu activation."""
 
+        if not self._context_is_current(context):
+            return
         if self.context_repository is not None:
             repository = self.context_repository
-            GLib.idle_add(self._exclude_context_repository, repository)
+            GLib.idle_add(self._exclude_context_repository, repository,
+                          (self.current_project, self.context_generation))
 
-    def _exclude_context_repository(self, repository: RepositoryRef) -> bool:
+    def _exclude_context_repository(self, repository: RepositoryRef, context=None) -> bool:
         """Exclude a repository once its contextual menu is no longer active."""
 
-        if self.current_project in self.blocked_projects:
+        if not self._context_is_current(context):
             return GLib.SOURCE_REMOVE
 
         self.on_exclude(repository)
