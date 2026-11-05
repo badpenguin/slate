@@ -426,6 +426,57 @@ class SCMPanelTest(unittest.TestCase):
         self.assertEqual(self.panel.error_label.get_text(), "")
         self.assertIn("a.py", self.panel.status_by_path)
 
+    def test_old_revision_menu_cannot_use_new_projects_contextual_paths(self) -> None:
+        """Actions created for A stay invalid even after B populates identical path names."""
+
+        for state in ("modified", "untracked", "added", "missing"):
+            with self.subTest(state=state):
+                self.panel.bind_project("A", True)
+                status = FileStatus("same.txt", state)
+                self.panel.context_status = status
+                self.panel.context_selected_statuses = [status]
+                self.panel.context_add_statuses = [status] if state == "untracked" else []
+                self.panel.context_forget_statuses = [status] if state == "added" else []
+                menu = self.panel._build_file_menu()
+                items = list(menu.get_children())
+                self.panel.active_context_menu = menu
+                self.panel.bind_project("B", True)
+                replacement = FileStatus("same.txt", state)
+                self.panel.context_status = replacement
+                self.panel.context_selected_statuses = [replacement]
+                self.panel.context_add_statuses = [replacement]
+                self.panel.context_forget_statuses = [replacement]
+                for item in items:
+                    item.activate()
+                self.assertIsNone(self.deleted)
+                self.assertIsNone(self.viewed)
+                self.assertIsNone(self.edited_internal)
+                self.assertIsNone(self.edited_with_diff)
+                self.assertEqual(self.added, [])
+                self.assertEqual(self.forgotten, [])
+
+    def test_deferred_repository_actions_expire_across_project_round_trip(self) -> None:
+        """Returning to A cannot revive a modal request queued before switching to B."""
+
+        repository = RepositoryRef(".", "git")
+        for handler in (self.panel._on_context_update, self.panel._on_context_verify,
+                        self.panel._on_context_publish, self.panel._on_context_new_branch,
+                        self.panel._on_context_switch_branch, self.panel._on_context_merge_branch,
+                        self.panel._on_context_tag, self.panel._on_context_exclude):
+            with self.subTest(handler=handler.__name__):
+                self.panel.bind_project("A", True)
+                self.panel.context_repository = repository
+                with mock.patch("slate.panel.GLib.idle_add") as idle:
+                    handler(Gtk.MenuItem())
+                callback, *arguments = idle.call_args.args
+                self.panel.bind_project("B", True)
+                self.panel.bind_project("A", True)
+                self.panel.context_repository = repository
+                self.assertEqual(callback(*arguments), GLib.SOURCE_REMOVE)
+                self.assertIsNone(self.updated_repository)
+                self.assertIsNone(self.repository_action)
+                self.assertIsNone(self.excluded_repository)
+
     def test_empty_repository_remains_visible_and_owns_external_tools(self) -> None:
         """A clean repository node survives and provides contextual GUI actions."""
 
@@ -438,29 +489,29 @@ class SCMPanelTest(unittest.TestCase):
         self.panel._on_context_external(Gtk.MenuItem())
         with mock.patch("slate.panel.GLib.idle_add") as idle_add:
             self.panel._on_context_update(Gtk.MenuItem())
-        update_callback, update_repository = idle_add.call_args.args
+        update_callback, *update_arguments = idle_add.call_args.args
         with mock.patch("slate.panel.GLib.idle_add") as idle_add:
             self.panel._on_context_publish(Gtk.MenuItem())
-        action_callback, action, action_repository = idle_add.call_args.args
+        action_callback, *action_arguments = idle_add.call_args.args
         with mock.patch("slate.panel.GLib.idle_add") as idle_add:
             self.panel._on_context_exclude(Gtk.MenuItem())
-        idle_callback, repository = idle_add.call_args.args
+        idle_callback, *exclude_arguments = idle_add.call_args.args
         self.assertEqual(self.diffed_repository, repository_ref)
         self.assertEqual(self.external_repository, repository_ref)
         self.assertIsNone(self.updated_repository)
         self.assertEqual(
-            update_callback(update_repository), GLib.SOURCE_REMOVE
+            update_callback(*update_arguments), GLib.SOURCE_REMOVE
         )
         self.assertEqual(self.updated_repository, repository_ref)
         self.assertIsNone(self.repository_action)
         self.assertEqual(
-            action_callback(action, action_repository), GLib.SOURCE_REMOVE
+            action_callback(*action_arguments), GLib.SOURCE_REMOVE
         )
         self.assertEqual(self.repository_action, ("publish", repository_ref))
         self.assertIsNone(self.excluded_repository)
         self.assertIs(idle_callback.__self__, self.panel)
-        self.assertEqual(repository, repository_ref)
-        self.assertEqual(idle_callback(repository), GLib.SOURCE_REMOVE)
+        self.assertEqual(exclude_arguments[0], repository_ref)
+        self.assertEqual(idle_callback(*exclude_arguments), GLib.SOURCE_REMOVE)
         self.assertEqual(self.excluded_repository, repository_ref)
 
     def test_repository_menu_keeps_mutations_between_tools_and_exclusion(self) -> None:
