@@ -16,7 +16,21 @@ class GitSCM(SCM):
     # columns into the Mercurial-like explicit-path workflow chosen for SLATE.
     kind = "git"
     display_name = "Git"
-    environment = {"GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+    environment = {
+        "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C",
+        # 2026-11-04: explicit literal/exclude magic must not be changed by
+        # inherited Git defaults, including case-insensitive path matching.
+        "GIT_LITERAL_PATHSPECS": "0", "GIT_GLOB_PATHSPECS": "0",
+        "GIT_NOGLOB_PATHSPECS": "0", "GIT_ICASE_PATHSPECS": "0",
+    }
+
+    @staticmethod
+    def _literal_paths(paths: Sequence[str]) -> list[str]:
+        """Encode selected Git paths literally, including glob and pathspec-magic characters."""
+
+        # 2026-11-04: -- terminates options but does not disable pathspecs.
+        # Every UI-selected path must match only that name or its directory subtree.
+        return [f":(top,literal){path}" for path in paths]
 
     def status_argv(self, paths: Sequence[str] = ()) -> list[str]:
         """Return deterministic NUL-delimited status arguments for optional paths."""
@@ -28,7 +42,7 @@ class GitSCM(SCM):
             "-z",
             "--untracked-files=all",
             "--find-renames=50%",
-            *(["--", *paths] if paths else []),
+            *(["--", *self._literal_paths(paths)] if paths else []),
         ]
 
     def parse_status(self, output: str) -> list[FileStatus]:
@@ -265,22 +279,22 @@ class GitSCM(SCM):
     def commit_argv(self, message: str, paths: Sequence[str]) -> list[str]:
         """Commit complete current content of only explicitly selected paths."""
 
-        return ["git", "commit", "--only", "-m", message, "--", *paths]
+        return ["git", "commit", "--only", "-m", message, "--", *self._literal_paths(paths)]
 
     def add_argv(self, paths: Sequence[str]) -> list[str]:
         """Add only explicitly selected untracked paths."""
 
-        return ["git", "add", "--", *paths]
+        return ["git", "add", "--", *self._literal_paths(paths)]
 
     def forget_argv(self, paths: Sequence[str]) -> list[str]:
         """Remove added paths from the index while preserving disk content."""
 
-        return ["git", "rm", "--cached", "-f", "--", *paths]
+        return ["git", "rm", "--cached", "-f", "--", *self._literal_paths(paths)]
 
     def record_removal_argv(self, paths: Sequence[str]) -> list[str]:
         """Stage only explicitly selected deletions already made by the UI."""
 
-        return ["git", "add", "-u", "--", *paths]
+        return ["git", "add", "-u", "--", *self._literal_paths(paths)]
 
     def revert_argv(self, paths: Sequence[str]) -> list[str]:
         """Discard selected tracked changes from index and working tree."""
@@ -292,7 +306,7 @@ class GitSCM(SCM):
             "--staged",
             "--worktree",
             "--",
-            *paths,
+            *self._literal_paths(paths),
         ]
 
     def base_argv(self, path: str) -> list[str]:
@@ -311,7 +325,7 @@ class GitSCM(SCM):
             "--unified=8",
             "HEAD",
             "--",
-            path,
+            *self._literal_paths((path,)),
         ]
 
     def preview_move_diff_argv(self, source: str, destination: str) -> list[str]:
@@ -326,8 +340,7 @@ class GitSCM(SCM):
             "--unified=8",
             "HEAD",
             "--",
-            source,
-            destination,
+            *self._literal_paths((source, destination)),
         ]
 
     def editor_diff_argv(self, path: str) -> list[str]:
@@ -341,7 +354,7 @@ class GitSCM(SCM):
             "--unified=3",
             "HEAD",
             "--",
-            path,
+            *self._literal_paths((path,)),
         ]
 
     def editor_move_diff_argv(self, source: str, destination: str) -> list[str]:
@@ -356,8 +369,7 @@ class GitSCM(SCM):
             "--unified=3",
             "HEAD",
             "--",
-            source,
-            destination,
+            *self._literal_paths((source, destination)),
         ]
 
     def diff_argv(self, paths: Sequence[str] = ()) -> list[str]:
@@ -370,5 +382,5 @@ class GitSCM(SCM):
             "--extcmd=meld --newtab",
             "--dir-diff",
             "HEAD",
-            *(["--", *paths] if paths else []),
+            *(["--", *self._literal_paths(paths)] if paths else []),
         ]
