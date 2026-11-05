@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -18,6 +19,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, Gio, GLib, Gtk, GtkSource, Pango  # noqa: E402
 
+from .bounded_read import BoundedFileRead
 from .text_search import TextSearchBar
 
 
@@ -114,7 +116,11 @@ def source_symbol_at_cursor(buffer: Gtk.TextBuffer) -> str | None:
     bounds = buffer.get_selection_bounds()
     if bounds:
         selected = buffer.get_text(bounds[0], bounds[1], True).strip()
-        return selected if re.fullmatch(r"(?:--)?[A-Za-z_][\w-]*", selected) else None
+        # 2026-11-05: il doppio clic include il sigillo PHP; normalizzare la
+        # selezione come il token sotto il cursore, anche per variabili CSS.
+        if selected.startswith("$"):
+            selected = selected[1:]
+        return selected.removeprefix("--") if re.fullmatch(r"(?:--)?[A-Za-z_][\w-]*", selected) else None
     cursor = buffer.get_iter_at_mark(buffer.get_insert())
     line_start = cursor.copy()
     line_start.set_line_offset(0)
@@ -131,6 +137,8 @@ def source_symbol_at_cursor(buffer: Gtk.TextBuffer) -> str | None:
 
 class SearchCommand:
     """Stream bounded ripgrep JSON without blocking the GTK main loop."""
+
+    MATCH_SPAN_LIMIT = 256
 
     def __init__(
         self,
@@ -298,7 +306,9 @@ class SearchCommand:
             or line_number < 1
         ):
             return None
-        normalized = path.replace("\\", "/")
+        # 2026-11-04: su Linux il backslash fa parte del nome; convertirlo
+        # in separatore può indirizzare ricerca ed editor a un file diverso.
+        normalized = path
         while normalized.startswith("./"):
             normalized = normalized[2:]
         if (
@@ -311,7 +321,13 @@ class SearchCommand:
         line_text = text.rstrip("\r\n")
         spans: list[tuple[int, int]] = []
         encoded = text.encode("utf-8")
-        for submatch in data.get("submatches", []):
+        byte_spans = []
+        submatches = data.get("submatches", [])
+        if not isinstance(submatches, list):
+            submatches = []
+        # 2026-11-04: una sola riga può contenere migliaia di match; limitare
+        # intervalli e tag prima delle conversioni mantiene il lavoro prevedibile.
+        for submatch in submatches[:SearchCommand.MATCH_SPAN_LIMIT]:
             if not isinstance(submatch, dict):
                 continue
             start = submatch.get("start")
@@ -322,11 +338,25 @@ class SearchCommand:
                 or not 0 <= start <= end <= len(encoded)
             ):
                 continue
+            if any(offset < len(encoded) and encoded[offset] & 0xC0 == 0x80 for offset in (start, end)):
+                continue
+            byte_spans.append((start, end))
+        offsets = {}
+        previous_byte = 0
+        character = 0
+        for offset in sorted({offset for span in byte_spans for offset in span}):
             # 2026-08-20: ripgrep usa offset in byte UTF-8 mentre GtkTextBuffer
             # usa caratteri; la conversione evita highlight spostati con Unicode.
-            char_start = len(encoded[:start].decode("utf-8", "replace"))
-            char_end = len(encoded[:end].decode("utf-8", "replace"))
-            spans.append((char_start, min(char_end, len(line_text))))
+            # 2026-11-04: convertire segmenti disgiunti una sola volta evita
+            # di decodificare ripetutamente l'intero prefisso per ciascun match.
+            character += len(encoded[previous_byte:offset].decode("utf-8", "replace"))
+            offsets[offset] = character
+            previous_byte = offset
+        for start, end in byte_spans:
+            char_start = min(offsets[start], len(line_text))
+            char_end = min(offsets[end], len(line_text))
+            if char_end > char_start:
+                spans.append((char_start, char_end))
         display_text, complete_line = SearchCommand._bounded_line_text(
             line_text, spans
         )
@@ -822,11 +852,11 @@ class ProjectSearch(Gtk.Box):
 
         if self.root is None or os.path.isabs(relative_path):
             return None
-        root = Path(self.root).resolve()
-        candidate = (root / relative_path).resolve()
         try:
+            root = Path(self.root).resolve()
+            candidate = (root / relative_path).resolve()
             candidate.relative_to(root)
-        except ValueError:
+        except (OSError, RuntimeError, ValueError):
             return None
         return str(candidate)
 
@@ -846,19 +876,13 @@ class ProjectSearch(Gtk.Box):
         self.preview_title.set_tooltip_text(f"{result.path}:{result.line}")
         self._set_preview_text("Loading preview…")
         self.preview_cancellable = Gio.Cancellable()
-        Gio.File.new_for_path(path).load_contents_async(
-            self.preview_cancellable,
-            self._on_preview_loaded,
-            (request_serial, result),
+        BoundedFileRead(
+            Gio.File.new_for_path(path), self.MAX_TEXT_BYTES, self.preview_cancellable,
+            partial(self._on_preview_loaded, (request_serial, result)),
         )
 
-    def _on_preview_loaded(
-        self,
-        source: Gio.File,
-        result: Gio.AsyncResult,
-        request: tuple[int, SearchResult],
-    ) -> None:
-        """Validate and render one completed result preview."""
+    def _on_preview_loaded(self, request: tuple[int, SearchResult], data, error) -> None:
+        """Validate and render only the current bounded preview result."""
 
         request_serial, search_result = request
         if (
@@ -867,15 +891,11 @@ class ProjectSearch(Gtk.Box):
         ):
             return
         self.preview_cancellable = None
-        try:
-            _success, contents, _etag = source.load_contents_finish(result)
-        except GLib.Error as error:
-            if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+        if error is not None:
+            if isinstance(error, ValueError):
+                self._set_preview_text(str(error))
+            elif not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 self._set_preview_text(f"Unable to read the file:\n{error}")
-            return
-        data = bytes(contents)
-        if len(data) > self.MAX_TEXT_BYTES:
-            self._set_preview_text("File over 5 MiB: preview is unavailable")
             return
         if b"\0" in data:
             self._set_preview_text("Binary file: preview is unavailable")
@@ -941,6 +961,9 @@ class ProjectSearch(Gtk.Box):
     def _set_preview_message(self, message: str) -> None:
         """Reset preview title and content to a read-only informational state."""
 
+        # 2026-11-05: una preview svuotata non deve conservare il target delle
+        # scorciatoie né accettare il completamento della lettura precedente.
+        self.preview_result = None
         self.preview_title.set_text(message)
         self.preview_title.set_tooltip_text(message)
         self._set_preview_text("")
