@@ -20,6 +20,19 @@ from slate.watcher import RepoWatcher
 class RepoWatcherMountTest(unittest.TestCase):
     """Verify that background monitor discovery yields frequently to GTK."""
 
+    def test_newline_in_ignored_filename_cannot_prune_an_unrelated_source_directory(self) -> None:
+        """Parsing ignored names cannot invent a src boundary and suppress its filesystem events."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            owner = SimpleNamespace(path=directory, scm=SimpleNamespace(kind="hg"),
+                                    nested_repositories=set(),
+                                    ignored=MercurialSCM(directory).parse_ignored("src\nassets/app.js\0"),
+                                    HARD_PRUNE=RepoWatcher.HARD_PRUNE)
+            owner._is_nested_repository_path = RepoWatcher._is_nested_repository_path.__get__(owner)
+            self.assertFalse(RepoWatcher._should_prune(owner, str(root / "src")))
+
     def test_inactive_mount_processes_only_one_directory_per_idle(self) -> None:
         """An inactive large repository cannot monopolize one main-loop turn."""
 
@@ -379,7 +392,7 @@ class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase
         self.watcher.set_nested_repositories({"public/backoffice/atk"})
         self._drain_main_context()
         argv = self.calls[-1][0]
-        self.assertEqual(argv, ["hg", "status", "-i", "-T", "{path}\\n",
+        self.assertEqual(argv, ["hg", "status", "-i", "-T", "{path}\\0",
                                 "--exclude", "path:public/backoffice/atk"])
 
     def test_watcher_diagnostics_are_emitted_only_in_debug_mode(self) -> None:
@@ -516,7 +529,7 @@ class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase
         self._drain_main_context()
         self.assertEqual(
             self.calls[3][0],
-            ["hg", "status", "--copies", "-Tjson", "--", "a.py"],
+            ["hg", "status", "--copies", "-Tjson", "--", 'path:a.py'],
         )
         self._complete(3, "[]")
         self.assertEqual(
@@ -546,7 +559,7 @@ class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase
         self.assertEqual(len(self.calls), 4)
         self._complete(3, "[]")
         self.assertEqual(len(self.calls), 5)
-        self.assertEqual(self.calls[4][0][-1], "second.py")
+        self.assertEqual(self.calls[4][0][-1], "path:second.py")
 
     def test_active_events_reset_one_hundred_millisecond_trailing_debounce(
         self,
@@ -579,8 +592,8 @@ class RepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestCase
                 "--copies",
                 "-Tjson",
                 "--",
-                "first.py",
-                "second.py",
+                'path:first.py',
+                'path:second.py',
             ],
         )
 
@@ -778,7 +791,7 @@ class GitRepoWatcherSchedulingTest(_RepoWatcherSchedulingFixture, unittest.TestC
         self._finish_startup()
         self.watcher.request_paths(("dir/file.py",))
         self._drain_main_context()
-        self.assertEqual(self.calls[3][0][-2:], ["--", "dir/file.py"])
+        self.assertEqual(self.calls[3][0][-2:], ["--", ":(top,literal)dir/file.py"])
 
     def test_git_index_and_head_events_request_only_needed_metadata(self) -> None:
         """Index refreshes status while HEAD refreshes branch then status."""
@@ -899,7 +912,7 @@ class RepoWatcherLimitTest(_RepoWatcherSchedulingFixture, unittest.TestCase):
         self.watcher.suspend_for_limit()
         self.watcher.probe_limit()
         self._drain_main_context()
-        self._complete(1, "mangia-sano/file.txt\n")
+        self._complete(1, "mangia-sano/file.txt\0")
         self.assertEqual(self.watcher.ignored, {"mangia-sano/file.txt"})
         self._complete(2, "main")
         self._complete(3, "[]")
