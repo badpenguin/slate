@@ -15,6 +15,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, GtkSource, Pango  # noqa: E402
 
+from .anchored_save import AnchoredFileSave
 from .editor_preferences import normalize_editor_appearance
 from .editor_appearance import editor_scheme, apply_editor_text_color, editor_font_css
 from .processes import AsyncCommand, CommandResult, run_async
@@ -75,6 +76,7 @@ class EditorDocument(Gtk.Box):
         self.etag: str | None = None
         self.loading = False
         self.saving = False
+        self.closed = False
         self.path_changing = False
         self.force_next_save = False
         self.external_conflict = False
@@ -104,6 +106,9 @@ class EditorDocument(Gtk.Box):
         # 2026-10-30: removed-file presentations never materialize a file or
         # monitor; their immutable repository text is loaded by the derived view.
         if historical:
+            # 2026-11-06: il documento storico non esegue _on_loaded, che
+            # normalmente inizializza linguaggio e tema del sorgente.
+            self._configure_language()
             self.view.set_editable(False)
         else:
             self.initial_load_id = GLib.idle_add(self._start_initial_load)
@@ -134,7 +139,7 @@ class EditorDocument(Gtk.Box):
         if (
             not self.relative_path
             or Path(self.relative_path).is_absolute()
-            or ".." in self.relative_path.replace("\\", "/").split("/")
+            or ".." in self.relative_path.split("/")
         ):
             return None
         root = Path(self.root)
@@ -352,8 +357,12 @@ class EditorDocument(Gtk.Box):
     def _begin_load(self, reason: str) -> None:
         """Load current disk contents asynchronously for opening or reloading."""
 
+        if self.closed:
+            return
         if self.file is None:
             self.on_removed(self, f"Invalid editor path: {self.relative_path}")
+            return
+        if not self._validate_current_path():
             return
         if self.load_cancellable is not None:
             self.load_cancellable.cancel()
@@ -363,12 +372,12 @@ class EditorDocument(Gtk.Box):
         # 2026-10-30: rifiutare i file già troppo grandi prima di leggerli
         # interamente; mantenere anche il controllo finale contro crescite tardive.
         self.file.query_info_async(
-            "standard::size,etag::value", Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT,
+            "standard::size,standard::type,etag::value", Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT,
             self.load_cancellable, self._on_load_info, (reason, self.load_cancellable),
         )
 
     def _on_load_info(self, source: Gio.File, result: Gio.AsyncResult, request) -> None:
-        """Check file size asynchronously before starting the full text load."""
+        """Check file type and size asynchronously before starting the full text load."""
 
         reason, cancellable = request
         if cancellable is not self.load_cancellable:
@@ -378,6 +387,8 @@ class EditorDocument(Gtk.Box):
         except GLib.Error as error:
             self.load_cancellable = None
             self._load_failed(reason, error)
+            return
+        if not self._validate_current_path():
             return
         if reason == "external" and self.dirty:
             # 2026-11-03: con modifiche locali bastano i metadati: non leggere
@@ -390,6 +401,12 @@ class EditorDocument(Gtk.Box):
                 self._on_modified_changed(self.buffer)
             else:
                 self._finish_external_conflict()
+            return
+        # 2026-11-05: FIFO e altri file speciali non sono documenti testuali;
+        # leggerli può attendere indefinitamente un produttore o la fine del flusso.
+        if info.get_file_type() != Gio.FileType.REGULAR:
+            self.load_cancellable = None
+            self._reject_loaded_file(reason, "Internal editing requires a regular file.")
             return
         if info.get_size() > self.MAX_TEXT_BYTES:
             self.load_cancellable = None
@@ -435,6 +452,8 @@ class EditorDocument(Gtk.Box):
         if cancellable is not self.load_cancellable:
             return
         self.load_cancellable = None
+        if not self._validate_current_path():
+            return
         if reason == "external" and self.etag is not None and etag == self.etag:
             # 2026-08-23: gli eventi prodotti dal salvataggio interno vengono
             # differiti oltre il mute; l'etag evita che il loro controllo
@@ -748,6 +767,9 @@ class EditorDocument(Gtk.Box):
 
         if callback is not None:
             self.save_callbacks.append(callback)
+        if self.closed:
+            self._finish_save(False)
+            return
         if self.historical or self.previewing:
             self._finish_save(False)
             return
@@ -761,6 +783,9 @@ class EditorDocument(Gtk.Box):
             self._finish_save(True)
             return
         if self.file is None or not self.view.get_editable():
+            self._finish_save(False)
+            return
+        if not self._validate_current_path():
             self._finish_save(False)
             return
         if self.external_conflict and not self.force_next_save:
@@ -778,39 +803,24 @@ class EditorDocument(Gtk.Box):
             self._show_notice("The buffer exceeds 5 MiB and was not saved.", Gtk.MessageType.ERROR)
             self._finish_save(False)
             return
+        # 2026-11-05: il salvataggio rende obsolete le letture già avviate;
+        # invalidare anche il token impedisce a un risultato già completato di
+        # reinstallare il vecchio testo dopo la scrittura del nuovo snapshot.
+        if self.load_cancellable is not None:
+            self.load_cancellable.cancel()
+            self.load_cancellable = None
+        self.loading = False
         self.saving = True
         self.save_button.set_sensitive(False)
         self.save_cancellable = Gio.Cancellable()
         expected_etag = None if self.force_next_save else self.etag
-        # 2026-08-31: il replace atomico standard conserva la modalità Unix del
-        # file; REPLACE_DESTINATION la ricreava invece con 0664, rimuovendo +x
-        # da script come deploy.sh dopo ogni salvataggio nell'editor interno.
-        create_flags = Gio.FileCreateFlags.NONE
-        if data:
-            self.file.replace_contents_bytes_async(
-                GLib.Bytes.new(data),
-                expected_etag,
-                False,
-                create_flags,
-                self.save_cancellable,
-                self._on_saved,
-                text,
-            )
-        else:
-            # 2026-08-19: the Python-bytes overload handles an empty payload;
-            # GLib.Bytes exposes it as NULL and Gio rejects it before callback.
-            self.file.replace_contents_async(
-                data,
-                expected_etag,
-                False,
-                create_flags,
-                self.save_cancellable,
-                self._on_saved,
-                text,
-            )
+        # 2026-11-04: fissare la directory verificata per tutta la scrittura
+        # asincrona; il percorso non deve essere risolto di nuovo dal worker Gio.
+        AnchoredFileSave(self.root, self.path, self.file, data, expected_etag,
+                         self.save_cancellable, self._on_saved, text)
 
     def _on_saved(
-        self, source: Gio.File, result: Gio.AsyncResult, saved_text: str
+        self, source: Gio.File | AnchoredFileSave, result: Gio.AsyncResult | None, saved_text: str
     ) -> None:
         """Confirm the written snapshot without clearing newer unsaved changes."""
 
@@ -819,6 +829,9 @@ class EditorDocument(Gtk.Box):
             _success, etag = source.replace_contents_finish(result)
         except GLib.Error as error:
             self.saving = False
+            if self.closed:
+                self._finish_save(False)
+                return
             if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 self._finish_save(False)
                 return
@@ -835,6 +848,11 @@ class EditorDocument(Gtk.Box):
             self._finish_save(False)
             return
         self.saving = False
+        # 2026-11-04: consumare sempre il risultato Gio, ma una scheda chiusa
+        # non può più aggiornare widget, righe Projects o avviare il lint PHP.
+        if self.closed:
+            self._finish_save(False)
+            return
         # 2026-10-30: una scrittura avviata prima di un cambio di identità non
         # prova che il nuovo path contenga il buffer. Proteggere anche chiamanti
         # esterni al coordinamento delle rinomine della workspace.
@@ -848,6 +866,11 @@ class EditorDocument(Gtk.Box):
                 (("Use version on disk", self.RESPONSE_DISK), ("Keep my version", self.RESPONSE_MINE)),
             )
             self.on_state(self)
+            self._finish_save(False)
+            return
+        if not self._validate_current_path():
+            self.saved_snapshot = None
+            self.buffer.set_modified(True)
             self._finish_save(False)
             return
         self.etag = etag
@@ -868,10 +891,31 @@ class EditorDocument(Gtk.Box):
         self._start_php_lint()
         self._finish_save(unchanged)
 
+    def _validate_current_path(self) -> bool:
+        """Reject filesystem retargeting instead of following a changed project path."""
+
+        # 2026-11-04: il confine controllato all'apertura può cambiare mentre
+        # il buffer resta vivo. Ricontrollare anche prima delle operazioni e
+        # dopo le letture asincrone, senza spostare il buffer su un altro file.
+        if self.path is not None and self._safe_path() == self.path:
+            return True
+        if self.load_cancellable is not None:
+            self.load_cancellable.cancel()
+            self.load_cancellable = None
+        self.loading = False
+        self.external_conflict = True
+        self.attention = True
+        self._show_notice(
+            "The file target changed or leaves the project. Reopen the file after checking its path.",
+            Gtk.MessageType.ERROR,
+        )
+        self._on_modified_changed(self.buffer)
+        return False
+
     def _start_php_lint(self) -> None:
         """Check a newly saved PHP file without blocking the GTK main loop."""
 
-        if self.path is None or Path(self.path).suffix.lower() != ".php":
+        if self.closed or self.path is None or Path(self.path).suffix.lower() != ".php":
             return
         # 2026-10-12: il lint parte solo dopo una scrittura riuscita; annullare
         # quello precedente evita popup relativi a contenuti ormai superati.
@@ -931,9 +975,10 @@ class EditorDocument(Gtk.Box):
     def _finish_save(self, success: bool) -> None:
         """Resolve and clear every callback waiting on the current save."""
 
-        self.save_button.set_sensitive(
-            self.dirty and self.view.get_editable() and not self.saving and not self.path_changing
-        )
+        if not self.closed:
+            self.save_button.set_sensitive(
+                self.dirty and self.view.get_editable() and not self.saving and not self.path_changing
+            )
         callbacks = tuple(self.save_callbacks)
         self.save_callbacks.clear()
         for callback in callbacks:
@@ -999,6 +1044,15 @@ class EditorDocument(Gtk.Box):
             return True
         return False
 
+    def _navigation_source(self):
+        """Return the displayed historical source or the current editable source."""
+
+        # 2026-11-05: un file eliminato vive nel buffer storico; il buffer
+        # canonico vuoto non deve limitare Ctrl+G a una sola riga.
+        if self.historical and self.experimental is not None and self.experimental.enabled:
+            return self.experimental.old_buffer, self.experimental.old_view
+        return self.buffer, self.view
+
     def goto_line(self) -> None:
         """Ask for a one-based line number and move the insertion cursor."""
 
@@ -1012,7 +1066,8 @@ class EditorDocument(Gtk.Box):
         entry = Gtk.Entry()
         entry.set_input_purpose(Gtk.InputPurpose.DIGITS)
         entry.set_activates_default(True)
-        entry.set_placeholder_text(f"1–{self.buffer.get_line_count()}")
+        buffer, _view = self._navigation_source()
+        entry.set_placeholder_text(f"1–{buffer.get_line_count()}")
         dialog.get_content_area().pack_start(entry, False, False, 12)
         dialog.set_default_response(Gtk.ResponseType.OK)
         dialog.show_all()
@@ -1032,40 +1087,49 @@ class EditorDocument(Gtk.Box):
         if self.loading or self.initial_load_id is not None:
             self.pending_line = max(1, line_number)
             return
-        line = min(max(1, line_number), self.buffer.get_line_count()) - 1
-        cursor = self.buffer.get_iter_at_line(line)
-        self.buffer.place_cursor(cursor)
-        self.view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
+        buffer, view = self._navigation_source()
+        line = min(max(1, line_number), buffer.get_line_count()) - 1
+        cursor = buffer.get_iter_at_line(line)
+        buffer.place_cursor(cursor)
+        view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
         # 2026-10-13: un caricamento tardivo posiziona il cursore senza rubare
         # il focus alla sidebar o alla preview aperta nel frattempo.
         if self.experimental is not None and self.experimental.enabled and self.experimental.mode in {"unified", "compact"}:
             self.experimental.align_line(line, focus)
         elif focus:
-            self.view.grab_focus()
+            view.grab_focus()
         if self.line_navigation_id is not None:
             GLib.source_remove(self.line_navigation_id)
         # 2026-09-12: uno stack appena rimappato può ignorare lo scroll prima
         # dell'allocazione; confermarlo nel prossimo idle mantiene visibile la riga.
         self.line_navigation_id = GLib.idle_add(
-            self._finish_line_navigation, line_number
+            self._finish_line_navigation, line_number, cursor.get_offset()
         )
 
-    def _finish_line_navigation(self, line_number: int) -> bool:
+    def _finish_line_navigation(self, line_number: int, expected_offset: int) -> bool:
         """Confirm cursor and scroll after GTK has mapped the activated editor."""
 
         self.line_navigation_id = None
-        line = min(max(1, line_number), self.buffer.get_line_count()) - 1
-        cursor = self.buffer.get_iter_at_line(line)
-        self.buffer.place_cursor(cursor)
-        self.view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
+        buffer, view = self._navigation_source()
+        cursor = buffer.get_iter_at_mark(buffer.get_insert())
+        bound = buffer.get_iter_at_mark(buffer.get_selection_bound())
+        # 2026-11-04: confermare solo lo scroll della navigazione ancora valida;
+        # un clic, una selezione o una digitazione successiva hanno precedenza.
+        line = min(max(1, line_number), buffer.get_line_count()) - 1
+        if (cursor.get_offset() != expected_offset or bound.get_offset() != expected_offset
+                or cursor.get_line() != line):
+            return GLib.SOURCE_REMOVE
+        view.scroll_to_iter(cursor, 0.15, True, 0.0, 0.5)
         # Il secondo passaggio conferma soltanto lo scroll: il focus potrebbe
         # essere già passato a un'altra vista dopo la richiesta iniziale.
         return GLib.SOURCE_REMOVE
 
-    def go_to_definition(self) -> bool:
+    def go_to_definition(self, source_buffer: Gtk.TextBuffer | None = None) -> bool:
         """Request a project definition search for the symbol at the cursor."""
 
-        symbol = source_symbol_at_cursor(self.buffer)
+        if self.closed:
+            return False
+        symbol = source_symbol_at_cursor(self.buffer if source_buffer is None else source_buffer)
         if symbol is None:
             return False
         if self.on_definition is None:
@@ -1117,6 +1181,10 @@ class EditorDocument(Gtk.Box):
     def close(self) -> None:
         """Cancel asynchronous operations and release the retained file monitor."""
 
+        if self.closed:
+            return
+        self.closed = True
+        self._finish_save(False)
         if self.experimental is not None:
             self.experimental.shutdown()
         self.lint_serial += 1
@@ -1147,6 +1215,8 @@ class EditorDocument(Gtk.Box):
     def _on_modified_changed(self, _buffer: GtkSource.Buffer) -> None:
         """Publish dirty-state changes to the corresponding project-tree row."""
 
+        if self.closed:
+            return
         self.save_button.set_sensitive(
             self.dirty and self.view.get_editable() and not self.loading and not self.saving and not self.path_changing
         )
@@ -1267,14 +1337,26 @@ class EditorWorkspace(Gtk.Stack):
         terminal_page.show()
         self.terminal_page = terminal_page
 
+    def _preview_matches(self, project_name: str, root: str, relative_path: str) -> bool:
+        """Compare transient identities without letting a broken alias block other files."""
+
+        preview = self.preview_entry
+        if preview is None or preview.project_name != project_name:
+            return False
+        # 2026-11-06: un link già visualizzato può diventare circolare mentre
+        # il buffer resta aperto; non deve impedire di aprire un altro documento.
+        try:
+            return (Path(preview.root) / preview.relative_path).resolve() == (Path(root) / relative_path).resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
+
     def open_file(
         self, project_name: str, root: str, relative_path: str, *, focus: bool = True
     ) -> EditorDocument:
         """Create or activate the editor for one physical project file."""
 
         preview = self.preview_entry
-        if (preview is not None and preview.project_name == project_name
-                and (Path(preview.root) / preview.relative_path).resolve() == (Path(root) / relative_path).resolve()):
+        if self._preview_matches(project_name, root, relative_path):
             editor = preview.document
             self.promote(editor)
             self.set_visible_child(editor)
@@ -1307,8 +1389,7 @@ class EditorWorkspace(Gtk.Stack):
         if existing is not None:
             return self.open_file(project_name, root, relative_path, focus=False)
         entry = self.preview_entry
-        same = (entry is not None and entry.project_name == project_name
-                and (Path(entry.root) / entry.relative_path).resolve() == (Path(root) / relative_path).resolve())
+        same = self._preview_matches(project_name, root, relative_path)
         if not same:
             self._close_preview_document()
             entry = EditorEntry(project_name, root, relative_path)
@@ -1499,11 +1580,34 @@ class EditorWorkspace(Gtk.Stack):
                     entry.document._on_modified_changed(entry.document.buffer)
         return True
 
+    def can_relocate_path(self, project_name: str, old_path: str, new_path: str) -> bool:
+        """Reject destinations already represented by another editor or transient document."""
+
+        # 2026-11-05: un file assente può avere ancora un buffer non salvato.
+        # Controllare anche riferimenti lazy e alias della directory destinazione.
+        entries = list(self.editors.values())
+        if self.preview_entry is not None:
+            entries.append(self.preview_entry)
+        for entry in entries:
+            if (entry.project_name != project_name or entry.relative_path == old_path
+                    or entry.relative_path.startswith(old_path + "/")):
+                continue
+            try:
+                existing = (Path(entry.root) / entry.relative_path).resolve()
+                destination = (Path(entry.root) / new_path).resolve()
+            except (OSError, RuntimeError, ValueError):
+                return False
+            if existing == destination or destination in existing.parents:
+                return False
+        return True
+
     def relocate_path(
         self, project_name: str, old_path: str, new_path: str
-    ) -> None:
+    ) -> bool:
         """Rekey editors affected by a successful file or directory rename."""
 
+        if not self.can_relocate_path(project_name, old_path, new_path):
+            return False
         prefix = f"{old_path}/"
         affected = [
             (reference, entry)
@@ -1540,6 +1644,7 @@ class EditorWorkspace(Gtk.Stack):
             # editor; pubblicarle insieme evita riferimenti al vecchio percorso.
             self._persist()
             self.on_collection_changed()
+        return True
 
     def current_editor(self) -> EditorDocument | None:
         """Return the visible editor child, excluding the terminal stack."""
@@ -1630,7 +1735,10 @@ class EditorWorkspace(Gtk.Stack):
     def _close_after_save(self, editor: EditorDocument, success: bool) -> None:
         """Remove an editor row only after its asynchronous save succeeds."""
 
-        if success and not editor.dirty:
+        entry = self.editors.get(editor.reference)
+        # 2026-11-03: un callback tardivo della vecchia scheda non deve
+        # chiudere un nuovo documento aperto nel frattempo allo stesso path.
+        if success and entry is not None and entry.document is editor and not editor.dirty:
             self._remove_editor(editor.reference)
 
     def request_close_all(self, callback: Callable[[bool], None]) -> None:
