@@ -1,6 +1,10 @@
 """Mercurial adapter parser and command tests."""
 
 import json
+from pathlib import Path
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -63,23 +67,64 @@ class MercurialSCMTest(unittest.TestCase):
                 "--copies",
                 "-Tjson",
                 "--",
-                "dir/a b.py",
-                "--strano",
+                'path:dir/a b.py',
+                'path:--strano',
             ],
         )
         self.assertEqual(
             self.scm.commit_argv("messaggio", ["a b", "--strano"]),
-            ["hg", "commit", "-m", "messaggio", "--", "a b", "--strano"],
+            ["hg", "commit", "-m", "messaggio", "--", 'path:a b', 'path:--strano'],
         )
         self.assertEqual(self.scm.environment["HGPLAIN"], "1")
         self.assertEqual(self.scm.environment["LC_ALL"], "C")
+
+    def test_pattern_prefixes_are_literal_in_every_selected_path_operation(self) -> None:
+        """Mercurial pattern syntax in a filename never broadens a selected operation."""
+
+        paths = ["glob:*.py", "re:.*", "path:literal", "folder/[name].txt"]
+        commands = [self.scm.status_argv(paths), self.scm.commit_argv("message", paths),
+                    self.scm.add_argv(paths), self.scm.forget_argv(paths),
+                    self.scm.record_removal_argv(paths), self.scm.revert_argv(paths), self.scm.diff_argv(paths)]
+        for command in commands:
+            self.assertEqual(command[command.index("--") + 1:], [f"path:{path}" for path in paths])
+        for path in paths:
+            for command in (self.scm.base_argv(path), self.scm.preview_diff_argv(path), self.scm.editor_diff_argv(path)):
+                self.assertEqual(command[command.index("--") + 1:], [f"path:{path}"])
+        for command in (self.scm.preview_move_diff_argv(paths[0], paths[-1]),
+                        self.scm.editor_move_diff_argv(paths[0], paths[-1])):
+            self.assertEqual(command[command.index("--") + 1:], [f"path:{paths[0]}", f"path:{paths[-1]}"])
+
+    def test_literal_selection_does_not_expand_and_template_emits_nul(self) -> None:
+        """Read-only Mercurial queries verify literal matching and the binary-safe template."""
+
+        root = Path(__file__).resolve().parent.parent
+        if not (root / ".hg").is_dir() or shutil.which("hg") is None:
+            self.skipTest("Requires a Mercurial source checkout")
+        environment = dict(os.environ)
+        environment.update(self.scm.environment)
+        template = self.scm.ignored_argv()[4]
+        control = subprocess.run(["hg", "files", "-T", template, "--", "path:slate/editor.py"],
+                                 cwd=root, env=environment, capture_output=True, check=True)
+        self.assertEqual(control.stdout, b"slate/editor.py\0")
+        encoded = self.scm.status_argv(["glob:slate/[e]ditor.py"])[-1]
+        result = subprocess.run(["hg", "files", "--", encoded], cwd=root, env=environment,
+                                capture_output=True)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.returncode, 1)
+
+    def test_ignored_names_preserve_newlines_and_other_control_characters(self) -> None:
+        """Only NUL terminates a path; embedded newline and carriage return are literal name bytes."""
+
+        paths = {"src\nassets/app.js", "cache\rfile.txt", "space name.txt"}
+        self.assertEqual(self.scm.parse_ignored("\0".join(sorted(paths)) + "\0"), paths)
+        self.assertEqual(self.scm.parse_ignored(""), set())
 
     def test_ignore_query_excludes_nested_repositories_as_literal_paths(self) -> None:
         """The parent ignore read must not audit paths inside independent child repos."""
 
         self.assertEqual(
             self.scm.ignored_argv(["public/backoffice/atk", "folder/[literal]"]),
-            ["hg", "status", "-i", "-T", "{path}\\n",
+            ["hg", "status", "-i", "-T", "{path}\\0",
              "--exclude", "path:public/backoffice/atk",
              "--exclude", "path:folder/[literal]"],
         )
@@ -90,7 +135,7 @@ class MercurialSCMTest(unittest.TestCase):
         command = self.scm.diff_argv(["file.txt"])
         self.assertEqual(command[:4], ["hg", "--config", "extensions.extdiff=", "extdiff"])
         self.assertIn("--option=--newtab", command)
-        self.assertEqual(command[-2:], ["--", "file.txt"])
+        self.assertEqual(command[-2:], ["--", 'path:file.txt'])
         self.assertNotIn("--newtab", self.scm.merge_tool_argv())
 
     def test_preview_add_and_revert_are_explicit_path_commands(self) -> None:
@@ -106,24 +151,24 @@ class MercurialSCMTest(unittest.TestCase):
                 "8",
                 "--nodates",
                 "--",
-                "--strano.py",
+                'path:--strano.py',
             ],
         )
         self.assertEqual(
             self.scm.add_argv(["nuovo file.py"]),
-            ["hg", "add", "--", "nuovo file.py"],
+            ["hg", "add", "--", 'path:nuovo file.py'],
         )
         self.assertEqual(
             self.scm.forget_argv(["aggiunto.py"]),
-            ["hg", "forget", "--", "aggiunto.py"],
+            ["hg", "forget", "--", 'path:aggiunto.py'],
         )
         self.assertEqual(
             self.scm.record_removal_argv(["rimosso.py"]),
-            ["hg", "remove", "--after", "--", "rimosso.py"],
+            ["hg", "remove", "--after", "--", 'path:rimosso.py'],
         )
         self.assertEqual(
             self.scm.revert_argv(["a.py"]),
-            ["hg", "revert", "--no-backup", "--", "a.py"],
+            ["hg", "revert", "--no-backup", "--", 'path:a.py'],
         )
 
     def test_move_preview_and_operations_include_both_endpoints(self) -> None:
@@ -142,8 +187,8 @@ class MercurialSCMTest(unittest.TestCase):
                 "8",
                 "--nodates",
                 "--",
-                "old.py",
-                "new.py",
+                'path:old.py',
+                'path:new.py',
             ],
         )
         self.assertIn("3", self.scm.editor_move_diff_argv("old.py", "new.py"))
@@ -199,7 +244,7 @@ class MercurialSCMTest(unittest.TestCase):
         self.assertEqual(self.scm.push_argv(), ["hg", "--noninteractive", "push"])
         self.assertEqual(
             self.scm.branch_heads_argv("--strano"),
-            ["hg", "heads", "-Tjson", "--", "--strano"],
+            ["hg", "heads", "-Tjson", "--", '--strano'],
         )
         self.assertEqual(
             self.scm.parse_branches(
