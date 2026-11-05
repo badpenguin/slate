@@ -279,13 +279,17 @@ class TerminalManager:
     ) -> None:
         """Run a persisted launcher only when its tmux session is absent."""
 
-        self.session_checks.pop(key, None)
+        # 2026-11-04: una vecchia verifica non può consumare lo stato di un
+        # terminale ricreato; una rinomina invece conserva lo stesso widget.
+        key = self._key_for_terminal(terminal)
         if (
             self.shutting_down
+            or key is None
             or key in self.closing_keys
-            or self.terminals.get(key) is not terminal
         ):
             return
+        self.session_checks.pop(key, None)
+        project_name, terminal_name_value = key.split("/", 1)
         missing = self._server_absent(result) or "can't find session" in result.stderr.lower()
         if not result.ok and not missing:
             # Un errore non riconosciuto non autorizza l'invio automatico di un
@@ -578,7 +582,25 @@ class TerminalManager:
         # 2026-08-16: il click che cambia la selezione dell'albero termina dopo
         # questo callback; rimandare il focus evita che GTK lo restituisca alla
         # colonna dei progetti al termine dello stesso evento mouse.
-        GLib.idle_add(terminal.grab_focus)
+        top_level = terminal.get_toplevel()
+        previous_focus = top_level.get_focus() if isinstance(top_level, Gtk.Window) else None
+
+        def focus_requested() -> bool:
+            """Focus only a still-visible terminal whose request has not been superseded."""
+
+            # 2026-11-04: editor, preview e ricerca possono aprirsi prima
+            # dell'idle. Non riprendere la tastiera da un contenuto più recente.
+            if (self.shutting_down or self.terminals.get(key) is not terminal
+                    or self.stack.get_visible_child() is not terminal
+                    or not terminal.get_mapped() or not terminal.is_sensitive()):
+                return GLib.SOURCE_REMOVE
+            focus = top_level.get_focus() if isinstance(top_level, Gtk.Window) else None
+            if focus is not previous_focus and focus is not terminal and not isinstance(focus, Gtk.TreeView):
+                return GLib.SOURCE_REMOVE
+            terminal.grab_focus()
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(focus_requested)
         return True
 
     def rename(
@@ -611,6 +633,11 @@ class TerminalManager:
                 self.stack.add_named(terminal, new_key)
                 self.terminals[new_key] = terminal
                 self.sessions[new_key] = new_session
+                # 2026-11-04: i callback in volo seguono l'identità del widget;
+                # spostare anche lo stato pendente preserva launcher e token.
+                for pending in (self.initial_commands, self.session_checks, self.spawn_cancellables):
+                    if old_key in pending:
+                        pending[new_key] = pending.pop(old_key)
                 terminal.show()
             if result.ok:
                 self._set_metadata(new_session, project_name, "", new_name)
@@ -1047,6 +1074,10 @@ class TerminalManager:
         """Report Vte startup errors or attach recovery metadata to tmux."""
 
         key, project_name, project_path, terminal_name_value = metadata
+        key = self._key_for_terminal(terminal)
+        if self.shutting_down or key is None or key in self.closing_keys:
+            return
+        project_name, terminal_name_value = key.split("/", 1)
         self.spawn_cancellables.pop(key, None)
         initial_command = self.initial_commands.pop(key, None)
         if error or pid == -1:
@@ -1068,6 +1099,11 @@ class TerminalManager:
         if initial_command:
             self._feed_initial_command(terminal, initial_command)
         self.request_activity_refresh()
+
+    def _key_for_terminal(self, terminal: Vte.Terminal) -> str | None:
+        """Return the current key of this exact widget, including after a rename."""
+
+        return next((key for key, candidate in self.terminals.items() if candidate is terminal), None)
 
     @staticmethod
     def _feed_initial_command(terminal: Vte.Terminal, command: str) -> None:
