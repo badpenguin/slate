@@ -1,5 +1,6 @@
 """GTK tests for SLATE's read-only internal file preview."""
 
+import os
 import tempfile
 import time
 import unittest
@@ -13,7 +14,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "4")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
 
 from slate import preview as preview_module
 from slate.preview import FilePreview
@@ -35,6 +36,33 @@ class FilePreviewTest(unittest.TestCase):
         """Create a preview with an inert named close callback."""
 
         self.preview = FilePreview(self._ignore_close)
+
+    def test_special_files_and_circular_links_are_rejected_before_reading(self) -> None:
+        """The Files fallback never starts a stream read for a FIFO or circular link."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            os.mkfifo(root / "events.txt")
+            (root / "loop.txt").symlink_to("loop.txt")
+            for name in ("events.txt", "loop.txt"):
+                with self.subTest(name=name), patch.object(Gio.File, "load_contents_async") as read:
+                    self.preview.show_file(directory, name)
+                    read.assert_not_called()
+                    self.assertIsNone(self.preview.file_cancellable)
+
+    def test_minified_legacy_fallback_never_reads_repository_versions_or_diffs(self) -> None:
+        """Legacy fallback shows current minified text or an explanation for removed files."""
+
+        scm = SimpleNamespace(root="/tmp", environment={})
+        for state in ("modified", "added", "moved", "removed"):
+            with self.subTest(state=state), patch("slate.preview.run_async") as run, patch.object(
+                    self.preview, "_load_working_file") as load:
+                self.preview.show_status("/tmp", scm, FileStatus("bundle.min.js", state))
+                run.assert_not_called()
+                if state == "removed":
+                    load.assert_not_called()
+                else:
+                    load.assert_called_once()
 
     def _ignore_close(self) -> None:
         """Accept close signals that are irrelevant to rendering tests."""
