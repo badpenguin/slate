@@ -1032,14 +1032,16 @@ class SlateWindow(Gtk.ApplicationWindow):
             ),
         )
 
-    def _save_file_manager_preferences(self, preferences: dict[str, object]) -> None:
-        """Persist file-browser preferences inside the active project entry."""
+    def _save_file_manager_preferences(self, project_name: str, preferences: dict[str, object]) -> None:
+        """Persist file-browser preferences in the project that produced them."""
 
-        project = self.config.find_project(self.active_project_name or "")
+        project = self.config.find_project(project_name)
         if project is None:
             return
         # 2026-08-16: filtri ed espansione appartengono al progetto, non alla
         # sessione terminale, e restano nel solo file config previsto da SLATE.
+        # 2026-11-04: il flush di un'espansione interrotta può arrivare mentre
+        # è già selezionato un altro progetto; usare sempre l'origine esplicita.
         project["file_manager"] = preferences
         self.config.save()
 
@@ -3502,6 +3504,14 @@ class SlateWindow(Gtk.ApplicationWindow):
             return
         project, old_name = selected
         project_name = project["name"]
+        # 2026-11-05: una seconda F2 non deve accodare una rinomina sul nome
+        # originale mentre tmux sta ancora completando la prima.
+        pending = getattr(self, "pending_terminal_renames", None)
+        if pending is None:
+            pending = self.pending_terminal_renames = set()
+        rename_key = (project_name, old_name)
+        if rename_key in pending:
+            return
         dialog = Gtk.Dialog(
             title="Rename Terminal",
             transient_for=self,
@@ -3534,7 +3544,8 @@ class SlateWindow(Gtk.ApplicationWindow):
         def renamed(success: bool) -> None:
             """Update config and tree only after the session rename succeeds."""
 
-            if not success or not project:
+            pending.discard(rename_key)
+            if not success or not project or old_name not in project["terminals"]:
                 return
             index = project["terminals"].index(old_name)
             project["terminals"][index] = clean_name
@@ -3556,15 +3567,27 @@ class SlateWindow(Gtk.ApplicationWindow):
                     break
             if project.get("last_terminal") == old_name:
                 project["last_terminal"] = clean_name
-            self.config.data["active_terminal"] = terminal_key(project_name, clean_name)
+            # 2026-11-05: la rinomina aggiorna il progetto di origine senza
+            # riattivarlo se l'utente è passato a un altro progetto o elemento.
+            active_reference = self.config.data.get("active_terminal") == terminal_key(project_name, old_name)
+            selected_now = self._selected_terminal()
+            still_selected = (self.active_project_name == project_name and active_reference
+                              and selected_now is not None and selected_now[0]["name"] == project_name
+                              and selected_now[1] == old_name
+                              and self.editor_workspace.get_visible_child() is self.editor_workspace.terminal_page
+                              and not self.preview.get_visible() and not self.project_search.get_visible())
+            if active_reference:
+                self.config.data["active_terminal"] = terminal_key(project_name, clean_name)
             self.config.save()
             self._populate_projects()
-            self._select_tree_row(project_name, clean_name)
+            if still_selected:
+                self._select_tree_row(project_name, clean_name)
             # 2026-10-08: F2 sincronizza la rinomina con Codex soltanto dopo
             # il successo di tmux e della configurazione locale.
             if send_codex_rename:
                 self.terminals.request_codex_rename(project_name, clean_name)
 
+        pending.add(rename_key)
         self.terminals.rename(project_name, old_name, clean_name, renamed)
 
     def _on_add_project(self, _button: Gtk.Widget) -> None:
@@ -3948,8 +3971,17 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         if terminal_name_value not in project["terminals"]:
             return
+        model, tree_iter = self.project_tree.get_selection().get_selected()
+        selection = None if tree_iter is None else (
+            model.get_value(tree_iter, self.COL_PROJECT),
+            model.get_value(tree_iter, self.COL_ITEM),
+            model.get_value(tree_iter, self.COL_KIND),
+        )
         dead_key = terminal_key(project["name"], terminal_name_value)
         active_key = self.config.data.get("active_terminal")
+        was_visible = (active_key == dead_key
+                       and self.editor_workspace.get_visible_child() is self.editor_workspace.terminal_page
+                       and not self.preview.get_visible() and not self.project_search.get_visible())
         project["terminals"].remove(terminal_name_value)
         project.setdefault("terminal_commands", {}).pop(terminal_name_value, None)
         project.setdefault("terminal_icons", {}).pop(terminal_name_value, None)
@@ -3974,6 +4006,17 @@ class SlateWindow(Gtk.ApplicationWindow):
         self._populate_projects()
         # 2026-08-16: una ricostruzione dell'albero non deve spostare l'utente
         # su un altro progetto quando termina un terminale non attivo.
+        # 2026-11-05: ripristinare la selezione senza attivarla preserva anche
+        # editor, browser e overlay che coprono il terminale ricordato in config.
+        if not was_visible:
+            if selection is not None and selection != (project["name"], terminal_name_value, "terminal"):
+                restoring = self.restoring_tree
+                self.restoring_tree = True
+                try:
+                    self._select_tree_row(*selection)
+                finally:
+                    self.restoring_tree = restoring
+            return
         if isinstance(active_key, str) and "/" in active_key:
             active_project, active_terminal = active_key.split("/", 1)
             self._select_tree_row(active_project, active_terminal)
@@ -4630,6 +4673,7 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _delete_status(self, status: FileStatus) -> None:
         """Delete one Revision path and record tracked removal in its SCM."""
 
+        project_name = self.active_project_name or ""
         relative_path = self._workspace_repository_path(
             status.repository, status.path
         )
@@ -4667,7 +4711,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         # 2026-08-17: il pannello Revisioni conosce repository e stato; dopo la
         # cancellazione deve registrare il path nello SCM, non lasciarlo missing.
         callback = partial(
-            self._on_status_entry_deleted, status, relative_path
+            self._on_status_entry_deleted, project_name, status, relative_path
         )
         if exists:
             self.project_file_operations.delete_entry(absolute_path, callback)
@@ -4712,6 +4756,7 @@ class SlateWindow(Gtk.ApplicationWindow):
 
     def _on_status_entry_deleted(
         self,
+        project_name: str,
         status: FileStatus,
         relative_path: str,
         error: str | None,
@@ -4720,27 +4765,25 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         if error is not None:
             self._show_file_error(
-                f"Failed to delete {relative_path}: {error}"
+                f"{project_name}: Failed to delete {relative_path}: {error}"
             )
             return
-        self.file_manager.refresh()
+        self._refresh_project_file_views(project_name, (relative_path,))
+        self._close_project_path_preview(project_name, relative_path)
         if status.state == "untracked":
-            self._close_preview()
-            self._queue_project_status_paths(
-                self.active_project_name or "", (relative_path,)
-            )
             return
         repository = RepositoryRef(status.repository, status.scm_type)
-        scm = self._repository_scm(repository)
+        scm = self.scm_by_repository.get((project_name, repository))
         if scm is None:
             self.panel.show_error(
-                f"Repository unavailable: {repository.path}"
+                f"{project_name}: Repository unavailable: {repository.path}"
             )
             return
         paths = sorted(set(status.operation_paths()))
         self._run_scm_mutations(
             [(repository, scm.record_removal_argv(paths), paths)],
             "Record removal",
+            project_name=project_name,
         )
 
     def _new_project_file(self, parent_relative: str) -> None:
@@ -4788,6 +4831,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         new_relative = None
         destination_path = None
         while dialog.run() == Gtk.ResponseType.OK:
+            # 2026-11-05: ogni tentativo riparte senza la destinazione rifiutata;
+            # ripristinare il nome originale deve restare un'operazione nulla.
+            new_relative = None
+            destination_path = None
             new_name = entry.get_text().strip()
             if (
                 not new_name
@@ -4812,8 +4859,14 @@ class SlateWindow(Gtk.ApplicationWindow):
                 error_label.set_text("A file or folder with this name already exists.")
                 continue
             break
+        else:
+            # Annulla e la chiusura della finestra non autorizzano una rinomina.
+            new_relative = None
         dialog.destroy()
         if new_relative is None or destination_path is None:
+            return
+        if not self.editor_workspace.can_relocate_path(project_name, relative_path, new_relative):
+            self._show_file_error("Close the editor tabs at the destination before renaming.")
             return
         if not self.editor_workspace.set_rename_pending(project_name, relative_path, True):
             self._show_file_error("A save or rename is in progress for this path. Wait for it to finish and retry.")
@@ -4845,11 +4898,14 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.editor_workspace.set_rename_pending(project_name, old_relative, False)
         if error is not None:
             self._show_file_error(
-                f"Failed to rename {old_relative}: {error}"
+                f"{project_name}: Failed to rename {old_relative}: {error}"
             )
             return
+        # 2026-11-05: ripetere il controllo dopo il move asincrono: una scheda
+        # aperta nel frattempo non deve mai essere sovrascritta nel registro.
+        relocated = self.editor_workspace.relocate_path(project_name, old_relative, new_relative)
         project = self.config.find_project(project_name)
-        if project is not None:
+        if project is not None and relocated:
             old_prefix = f"{old_relative}/"
             preferences = project.setdefault("file_manager", {})
             expanded = preferences.get("expanded_paths", [])
@@ -4870,8 +4926,12 @@ class SlateWindow(Gtk.ApplicationWindow):
                 ):
                     item["value"] = f"{new_relative}{value[len(old_relative):]}"
             self.config.save()
-        self.editor_workspace.relocate_path(project_name, old_relative, new_relative)
-        self._close_preview()
+        if not relocated:
+            self._show_file_error(
+                f"{project_name}: Renamed on disk, but editor tabs conflict at {new_relative}. "
+                "All buffers were kept; close the conflicting tabs and reopen the file."
+            )
+        self._close_project_path_preview(project_name, old_relative)
         if self.file_manager.project_name == project_name:
             self.file_manager.relocate_path(old_relative, new_relative)
             self.file_manager.refresh()
@@ -4927,21 +4987,21 @@ class SlateWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         if relative_path is None or absolute_path is None:
             return
-        callback = partial(self._on_project_entry_created, relative_path)
+        callback = partial(self._on_project_entry_created, self.active_project_name or "", relative_path)
         if directory:
             self.project_file_operations.create_directory(absolute_path, callback)
         else:
             self.project_file_operations.create_file(absolute_path, callback)
 
     def _on_project_entry_created(
-        self, relative_path: str, error: str | None
+        self, project_name: str, relative_path: str, error: str | None
     ) -> None:
         """Report creation errors or refresh views without changing their cursor."""
 
         if error is not None:
-            self._show_file_error(f"Failed to create {relative_path}: {error}")
+            self._show_file_error(f"{project_name}: Failed to create {relative_path}: {error}")
             return
-        self._refresh_project_file_views((relative_path,))
+        self._refresh_project_file_views(project_name, (relative_path,))
 
     def _delete_project_file(self, relative_path: str) -> None:
         """Request safe deletion of a file-manager file, link or directory."""
@@ -4951,13 +5011,14 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _delete_project_path(self, relative_path: str) -> None:
         """Validate and dispatch confirmed deletion for one project entry."""
 
+        project_name = self.active_project_name or ""
         path = self._project_file_path(relative_path, follow_symlink=False)
         if path is None:
             return
         if os.path.isdir(path) and not os.path.islink(path):
             self.project_file_operations.inspect_directory(
                 path,
-                partial(self._on_project_directory_inspected, relative_path, path),
+                partial(self._on_project_directory_inspected, project_name, relative_path, path),
             )
             return
         if not self._confirm_scm_paths(
@@ -4970,17 +5031,23 @@ class SlateWindow(Gtk.ApplicationWindow):
             return
         self.project_file_operations.delete_entry(
             path,
-            partial(self._on_project_entry_deleted, relative_path),
+            partial(self._on_project_entry_deleted, project_name, relative_path),
         )
 
     def _on_project_directory_inspected(
         self,
+        project_name: str,
         relative_path: str,
         absolute_path: str,
         inspection: DirectoryInspection | None,
         error: str | None,
     ) -> None:
         """Reject nested directories or ask the appropriate deletion confirmation."""
+
+        # 2026-11-04: una conferma tardiva non deve riferirsi a un progetto
+        # diverso da quello ora mostrato; l'utente può ripetere l'azione lì.
+        if project_name != self.active_project_name:
+            return
 
         if error is not None or inspection is None:
             self._show_file_error(
@@ -5013,25 +5080,39 @@ class SlateWindow(Gtk.ApplicationWindow):
         # mai in sottodirectory, anche se il contenuto cambia durante il dialogo.
         self.project_file_operations.delete_flat_directory(
             absolute_path,
-            partial(self._on_project_entry_deleted, relative_path),
+            partial(self._on_project_entry_deleted, project_name, relative_path),
         )
 
     def _on_project_entry_deleted(
-        self, relative_path: str, error: str | None
+        self, project_name: str, relative_path: str, error: str | None
     ) -> None:
         """Report deletion failure or reconcile both file and SCM views."""
 
         if error is not None:
-            self._show_file_error(f"Failed to delete {relative_path}: {error}")
+            self._show_file_error(f"{project_name}: Failed to delete {relative_path}: {error}")
             return
-        self._close_preview()
-        self._refresh_project_file_views((relative_path,))
+        self._close_project_path_preview(project_name, relative_path)
+        self._refresh_project_file_views(project_name, (relative_path,))
 
-    def _refresh_project_file_views(self, paths: Sequence[str]) -> None:
+    def _close_project_path_preview(self, project_name: str, relative_path: str) -> None:
+        """Close a legacy preview only when it belongs to the mutated project and path."""
+
+        # 2026-11-04: una modifica terminata in background non deve chiudere
+        # l'anteprima di un altro progetto o di un file non coinvolto.
+        if project_name != self.active_project_name:
+            return
+        status = getattr(self, "preview_status", None)
+        path = (self._workspace_repository_path(status.repository, status.path)
+                if status is not None else getattr(getattr(self, "preview", None), "current_path", None))
+        if path is not None and (path == relative_path or path.startswith(relative_path + "/")):
+            self._close_preview()
+
+    def _refresh_project_file_views(self, project_name: str, paths: Sequence[str]) -> None:
         """Refresh file-manager and SCM state after a filesystem mutation."""
 
-        self.file_manager.refresh()
-        self._queue_project_status_paths(self.active_project_name or "", paths)
+        if self.file_manager.project_name == project_name:
+            self.file_manager.refresh()
+        self._queue_project_status_paths(project_name, paths)
 
     def _show_file_error(self, message: str) -> None:
         """Show path-operation errors in whichever third-column page is visible."""
@@ -5073,36 +5154,49 @@ class SlateWindow(Gtk.ApplicationWindow):
         action_name: str,
         *,
         full_refresh: bool = False,
+        project_name: str | None = None,
     ) -> None:
-        """Run repository mutations and refresh either affected paths or all state."""
+        """Run mutations against captured adapters, independent of later project selection."""
 
+        project_name = project_name if project_name is not None else self.active_project_name or ""
         if (getattr(self, "project_limit", None) is not None
-                and self.active_project_name in self.project_limit.blocked):
+                and project_name in self.project_limit.blocked):
             return
-
         if not operations:
             return
-        self._close_preview()
+        # 2026-11-04: risolvere tutti i destinatari prima del primo comando;
+        # i callback non devono usare il progetto selezionato nel frattempo.
+        captured = []
+        for repository, argv, paths in operations:
+            if project_name == self.active_project_name:
+                scm = self._repository_scm(repository)
+                watcher = self._repository_watcher(repository)
+            else:
+                scm = self.scm_by_repository.get((project_name, repository))
+                watcher = self.watchers.get((project_name, repository))
+            if scm is None:
+                self.panel.show_error(f"{project_name}: Repository unavailable: {repository.path}")
+                return
+            captured.append((repository, list(argv), tuple(paths), scm, watcher))
+        for repository, _argv, paths, _scm, _watcher in captured:
+            for path in paths:
+                self._close_project_path_preview(
+                    project_name, self._workspace_repository_path(repository.path, path)
+                )
 
         def run_operation(index: int) -> None:
-            """Start the indexed mutation only after its predecessor succeeds."""
+            """Execute the next captured mutation after its predecessor succeeds."""
 
-            if index >= len(operations):
-                self.panel.clear_error()
+            if index >= len(captured):
+                if project_name == self.active_project_name:
+                    SlateWindow._refresh_repository_errors(self, project_name)
                 return
-            repository, argv, paths = operations[index]
-            scm = self._repository_scm(repository)
-            if scm is None:
-                self.panel.show_error(
-                    f"Repository unavailable: {repository.path}"
-                )
-                return
-            watcher = self._repository_watcher(repository)
+            repository, argv, paths, scm, watcher = captured[index]
             if watcher is not None:
                 watcher.mute_metadata_events()
 
             def completed(result: CommandResult) -> None:
-                """Refresh the affected watcher and continue only after success."""
+                """Refresh the original watcher and continue using captured recipients."""
 
                 if watcher is not None:
                     if full_refresh:
@@ -5111,11 +5205,11 @@ class SlateWindow(Gtk.ApplicationWindow):
                         watcher.request_paths(paths)
                 if not result.ok:
                     detail = result.stderr.strip() or f"{action_name} failed."
-                    self.panel.show_error(f"{repository.path}: {detail}")
+                    self.panel.show_error(f"{project_name} / {repository.path}: {detail}")
                     return
                 run_operation(index + 1)
 
-            run_async(list(argv), completed, cwd=scm.root, env=scm.environment)
+            run_async(argv, completed, cwd=scm.root, env=scm.environment)
 
         run_operation(0)
 
