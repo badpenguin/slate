@@ -1,5 +1,7 @@
 """GTK tests for persistent internal GtkSource editor behavior."""
 
+import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -13,6 +15,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk
 
+from slate.anchored_save import AnchoredFileSave
 from slate.editor import EditorDocument, EditorWorkspace
 from slate.processes import CommandResult
 from slate.preview import FilePreview
@@ -81,6 +84,156 @@ class EditorTest(unittest.TestCase):
         self._wait_until(lambda: not editor.loading and editor.etag is not None)
         return editor
 
+    def test_retargeted_parent_blocks_save_and_external_reads(self) -> None:
+        """Replacing a parent with an external link never redirects an existing editor's I/O."""
+
+        for operation in ("save", "load", "metadata"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory(dir="/tmp") as external:
+                folder = self.root / operation
+                folder.mkdir()
+                (folder / "file.txt").write_text("original\n")
+                outside = Path(external) / "file.txt"
+                shutil.copy2(folder / "file.txt", outside)
+                editor = EditorDocument("project", str(self.root), f"{operation}/file.txt", 11,
+                                        self._state_changed, self._removed)
+                try:
+                    self._wait_until(lambda: editor.etag is not None and not editor.loading)
+                    with patch("gi.repository.Gio.File.load_contents_async") as contents:
+                        if operation == "metadata":
+                            editor._begin_load("external")
+                        folder.rename(self.root / f"old-{operation}")
+                        folder.symlink_to(Path(external), target_is_directory=True)
+                        if operation == "save":
+                            editor.buffer.set_text("local edits\n")
+                            for force in (False, True):
+                                editor.force_next_save = force
+                                completed = []
+                                editor.save(completed.append)
+                                self.assertEqual(completed, [False])
+                            self.assertTrue(editor.dirty)
+                        elif operation == "load":
+                            with patch.object(editor.file, "query_info_async") as query:
+                                editor._begin_load("external")
+                                query.assert_not_called()
+                        else:
+                            self._wait_until(lambda: not editor.loading)
+                        contents.assert_not_called()
+                    self.assertEqual(outside.read_text(), "original\n")
+                    self.assertTrue(editor.attention)
+                    self.assertTrue(editor.external_conflict)
+                finally:
+                    editor.close()
+                    editor.destroy()
+
+    def test_parent_change_during_save_preserves_external_file_and_dirty_buffer(self) -> None:
+        """A raced save remains anchored and cannot certify the replaced logical path as clean."""
+
+        folder = self.root / "sub"
+        folder.mkdir()
+        (folder / "file.txt").write_text("original")
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            outside = Path(directory) / "file.txt"
+            shutil.copy2(folder / "file.txt", outside)
+            editor = EditorDocument("project", str(self.root), "sub/file.txt", 11,
+                                    self._state_changed, self._removed)
+            try:
+                self._wait_until(lambda: editor.etag is not None and not editor.loading)
+                editor.buffer.set_text("local snapshot")
+                original = Gio.File.replace_async
+
+                def switched(file, *args):
+                    """Replace the pathname after validation and before asynchronous replacement."""
+
+                    folder.rename(self.root / "old-sub")
+                    folder.symlink_to(directory, target_is_directory=True)
+                    original(file, *args)
+
+                completed = []
+                with patch.object(Gio.File, "replace_async", switched):
+                    editor.save(completed.append)
+                    self._wait_until(lambda: bool(completed))
+                self.assertEqual(completed, [False])
+                self.assertEqual(outside.read_text(), "original")
+                self.assertEqual((self.root / "old-sub" / "file.txt").read_text(), "local snapshot")
+                self.assertTrue(editor.dirty)
+                self.assertTrue(editor.external_conflict)
+            finally:
+                editor.close()
+                editor.destroy()
+
+    def test_literal_backslash_file_remains_distinct_from_a_nested_path(self) -> None:
+        """Loading and saving a Linux backslash name never touches its slash-separated counterpart."""
+
+        literal = self.root / "a\\b.txt"
+        nested = self.root / "a" / "b.txt"
+        nested.parent.mkdir()
+        literal.write_text("literal")
+        nested.write_text("nested")
+        editor = EditorDocument("project", str(self.root), "a\\b.txt", 11,
+                                self._state_changed, self._removed)
+        try:
+            self._wait_until(lambda: editor.etag is not None and not editor.loading)
+            text = editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True)
+            self.assertEqual(text, "literal")
+            editor.buffer.set_text("edited literal")
+            completed = []
+            editor.save(completed.append)
+            self._wait_until(lambda: bool(completed))
+            self.assertEqual(completed, [True])
+            self.assertEqual(literal.read_text(), "edited literal")
+            self.assertEqual(nested.read_text(), "nested")
+        finally:
+            editor.close()
+            editor.destroy()
+
+    def test_fifo_is_rejected_before_reading_contents(self) -> None:
+        """A FIFO without a writer is rejected without starting a blocking content read."""
+
+        self.path.unlink()
+        os.mkfifo(self.path)
+        editor = None
+        try:
+            with patch.object(Gio.File, "load_contents_async") as load:
+                editor = EditorDocument("project", str(self.root), "TODO.md", 11,
+                                        self._state_changed, self._removed)
+                self._wait_until(self.removed.__len__)
+                load.assert_not_called()
+            self.assertFalse(editor.loading)
+            self.assertIsNone(editor.load_cancellable)
+            self.assertFalse(editor.view.get_editable())
+            self.assertIn("regular file", self.removed[0])
+        finally:
+            if editor is not None:
+                editor.close()
+
+    def test_external_fifo_replacement_preserves_existing_buffer(self) -> None:
+        """Replacing a document with a FIFO never reads it or discards local edits."""
+
+        for dirty in (False, True):
+            with self.subTest(dirty=dirty):
+                self.path.unlink()
+                self.path.write_text("original\n")
+                editor = self._document()
+                try:
+                    if dirty:
+                        editor.buffer.set_text("unsaved edits\n")
+                    self.path.unlink()
+                    os.mkfifo(self.path)
+                    with patch.object(Gio.File, "load_contents_async") as load:
+                        editor._begin_load("external")
+                        self._wait_until(lambda: not editor.loading)
+                        load.assert_not_called()
+                    self.assertEqual(
+                        editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True),
+                        "unsaved edits\n" if dirty else "original\n",
+                    )
+                    self.assertEqual(editor.dirty, dirty)
+                    self.assertEqual(editor.view.get_editable(), dirty)
+                    self.assertEqual(editor.external_conflict, dirty)
+                    self.assertEqual(self.removed, [])
+                finally:
+                    editor.close()
+
     def test_oversized_file_is_rejected_before_reading_contents(self) -> None:
         """The metadata preflight never starts a content read for an oversized file."""
 
@@ -88,6 +241,7 @@ class EditorTest(unittest.TestCase):
         original_file = editor.file
         source = MagicMock()
         source.query_info_finish.return_value.get_size.return_value = editor.MAX_TEXT_BYTES + 1
+        source.query_info_finish.return_value.get_file_type.return_value = Gio.FileType.REGULAR
         editor.file = source
         try:
             editor._begin_load("initial")
@@ -128,24 +282,27 @@ class EditorTest(unittest.TestCase):
         source = MagicMock()
         editor.file = source
         callbacks = []
+        write_patch = patch("slate.editor.AnchoredFileSave")
+        write = write_patch.start()
+        self.addCleanup(write_patch.stop)
         try:
             editor.buffer.set_text("first snapshot\n")
             editor.save(callbacks.append)
-            request = source.replace_contents_bytes_async.call_args.args
-            self.assertEqual(request[0].get_data(), b"first snapshot\n")
+            request = write.call_args.args
+            self.assertEqual(request[3], b"first snapshot\n")
             editor.buffer.insert(editor.buffer.get_end_iter(), "later typing\n")
             source.replace_contents_finish.return_value = (True, "saved-first")
-            request[5](source, MagicMock(), request[6])
+            request[6](source, MagicMock(), request[7])
             self.assertTrue(editor.dirty)
             self.assertTrue(editor.save_button.get_sensitive())
             self.assertEqual(callbacks, [False])
             self.assertEqual(editor.etag, "saved-first")
             editor.save(callbacks.append)
-            request = source.replace_contents_bytes_async.call_args.args
-            self.assertEqual(request[0].get_data(), b"first snapshot\nlater typing\n")
-            self.assertEqual(request[1], "saved-first")
+            request = write.call_args.args
+            self.assertEqual(request[3], b"first snapshot\nlater typing\n")
+            self.assertEqual(request[4], "saved-first")
             source.replace_contents_finish.return_value = (True, "saved-second")
-            request[5](source, MagicMock(), request[6])
+            request[6](source, MagicMock(), request[7])
             self.assertFalse(editor.dirty)
             self.assertEqual(callbacks, [False, True])
         finally:
@@ -159,18 +316,21 @@ class EditorTest(unittest.TestCase):
         original_file = editor.file
         source = MagicMock()
         editor.file = source
+        write_patch = patch("slate.editor.AnchoredFileSave")
+        write = write_patch.start()
+        self.addCleanup(write_patch.stop)
         try:
             editor.buffer.begin_user_action()
             editor.buffer.insert(editor.buffer.get_end_iter(), "first edit\n")
             editor.buffer.end_user_action()
             editor.save()
-            request = source.replace_contents_bytes_async.call_args.args
-            saved_text = request[0].get_data().decode("utf-8")
+            request = write.call_args.args
+            saved_text = request[3].decode("utf-8")
             editor.buffer.begin_user_action()
             editor.buffer.insert(editor.buffer.get_end_iter(), "later edit\n")
             editor.buffer.end_user_action()
             source.replace_contents_finish.return_value = (True, "saved-first")
-            request[5](source, MagicMock(), request[6])
+            request[6](source, MagicMock(), request[7])
             for action, expected_dirty in (("undo", False), ("undo", True), ("redo", False), ("redo", True)):
                 getattr(editor.buffer, action)()
                 current = editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True)
@@ -230,11 +390,11 @@ class EditorTest(unittest.TestCase):
 
         editor = self._document()
         old_file = editor.file
-        original_write = old_file.replace_contents_bytes_async
+        original_write = AnchoredFileSave
         saved = []
         try:
             editor.buffer.set_text("edited\n")
-            with patch.object(old_file, "replace_contents_bytes_async") as write:
+            with patch("slate.editor.AnchoredFileSave") as write:
                 editor.save(saved.append)
                 request = write.call_args.args
             destination = self.root / "renamed.md"
@@ -257,7 +417,7 @@ class EditorTest(unittest.TestCase):
         self._wait_until(lambda: editor.etag is not None)
         try:
             editor.buffer.set_text("edited\n")
-            with patch.object(editor.file, "replace_contents_bytes_async"):
+            with patch("slate.editor.AnchoredFileSave"):
                 editor.save()
                 self.assertFalse(workspace.set_rename_pending("project", "TODO.md", True))
                 self.assertEqual(workspace.renaming_paths, set())
@@ -275,6 +435,7 @@ class EditorTest(unittest.TestCase):
                 original_file = editor.file
                 source = MagicMock()
                 source.query_info_finish.return_value.get_size.return_value = 10
+                source.query_info_finish.return_value.get_file_type.return_value = Gio.FileType.REGULAR
                 editor.file = source
                 try:
                     editor._begin_load("external")
@@ -428,6 +589,52 @@ class EditorTest(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o751)
         editor.close()
 
+    def test_save_invalidates_completed_external_read_before_its_delivery(self) -> None:
+        """A completed old read cannot replace a newer successfully saved buffer."""
+
+        editor = self._document()
+        pending = []
+        original = Gio.File.load_contents_async
+
+        def deferred(file, cancellable, callback, request):
+            """Complete a real file read but defer delivery to the editor."""
+
+            def completed(source, result, user_data):
+                """Retain the real result until the newer save has finished."""
+
+                pending.append((callback, source, result, user_data))
+
+            original(file, cancellable, completed, request)
+
+        try:
+            with patch.object(Gio.File, "load_contents_async", deferred):
+                editor._begin_load("external")
+                self._wait_until(pending.__len__)
+            old_token = editor.load_cancellable
+            editor.buffer.set_text("New saved contents\n")
+            saved = []
+            editor.save(saved.append)
+            self._wait_until(saved.__len__)
+            saved_etag = editor.etag
+
+            callback, source, result, request = pending.pop()
+            callback(source, result, request)
+
+            self.assertEqual(saved, [True])
+            self.assertTrue(old_token.is_cancelled())
+            self.assertIsNone(editor.load_cancellable)
+            self.assertFalse(editor.loading)
+            self.assertEqual(editor.etag, saved_etag)
+            self.assertEqual(self.path.read_text(), "New saved contents\n")
+            self.assertEqual(
+                editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True),
+                "New saved contents\n",
+            )
+            self.assertFalse(editor.dirty)
+            self.assertFalse(editor.external_conflict)
+        finally:
+            editor.close()
+
     def test_unchanged_external_read_restores_save_after_concurrent_edit(self) -> None:
         """Typing during an unchanged disk check leaves Save enabled and state published."""
 
@@ -473,6 +680,74 @@ class EditorTest(unittest.TestCase):
         editor.saved_snapshot = "different saved version"
         self.assertTrue(editor.dirty)
         editor.close()
+
+    def test_completed_save_callback_is_inert_after_document_destruction(self) -> None:
+        """A completed write cannot revive a closed PHP document, update UI or launch lint."""
+
+        path = self.root / "closed.php"
+        path.write_text("<?php echo 1;\n")
+        editor = EditorDocument("project", str(self.root), "closed.php", 11, MagicMock(), MagicMock())
+        self._wait_until(lambda: editor.etag is not None and not editor.loading)
+        editor.buffer.set_text("<?php echo 2;\n")
+        original = editor._on_saved
+        queued = []
+        callbacks = []
+
+        def deferred(*args):
+            """Hold the completed write until the original editor has been destroyed."""
+
+            queued.append(args)
+
+        with patch.object(editor, "_on_saved", side_effect=deferred):
+            editor.save(callbacks.append)
+            self._wait_until(lambda: bool(queued))
+        editor.close()
+        self.assertEqual(callbacks, [False])
+        editor.destroy()
+        editor.on_state.reset_mock()
+        with patch("slate.editor.run_async") as lint, patch.object(editor, "_hide_notice") as notice:
+            original(*queued[0])
+            lint.assert_not_called()
+            notice.assert_not_called()
+        editor.on_state.assert_not_called()
+        self.assertFalse(editor.saving)
+        self.assertEqual(callbacks, [False])
+        with patch("slate.editor.AnchoredFileSave") as write:
+            editor.save(callbacks.append)
+            write.assert_not_called()
+        self.assertEqual(callbacks, [False, False])
+
+    def test_failed_save_callback_cannot_show_errors_after_document_closure(self) -> None:
+        """Finishing a failed Gio request after closure consumes its error without touching widgets."""
+
+        editor = self._document()
+        editor.close()
+        editor.destroy()
+        source = MagicMock()
+        source.replace_contents_finish.side_effect = GLib.Error.new_literal(
+            Gio.io_error_quark(), "late failure", Gio.IOErrorEnum.FAILED)
+        editor.on_state = MagicMock()
+        with patch.object(editor, "_show_notice") as notice:
+            editor._on_saved(source, MagicMock(), "old snapshot")
+            notice.assert_not_called()
+        source.replace_contents_finish.assert_called_once()
+        editor.on_state.assert_not_called()
+
+    def test_late_close_after_save_preserves_a_reopened_document(self) -> None:
+        """An old save may close only the original registered document, never its replacement."""
+
+        old = SimpleNamespace(reference=("project", "TODO.md"), dirty=False)
+        replacement = SimpleNamespace(reference=old.reference, dirty=True)
+        owner = SimpleNamespace(editors={old.reference: SimpleNamespace(document=replacement)},
+                                _remove_editor=MagicMock())
+        EditorWorkspace._close_after_save(owner, old, True)
+        owner._remove_editor.assert_not_called()
+        owner.editors.clear()
+        EditorWorkspace._close_after_save(owner, old, True)
+        owner._remove_editor.assert_not_called()
+        owner.editors[old.reference] = SimpleNamespace(document=old)
+        EditorWorkspace._close_after_save(owner, old, True)
+        owner._remove_editor.assert_called_once_with(old.reference)
 
     def test_external_clean_reload_is_silent(self) -> None:
         """An external write silently reloads a buffer without local edits."""
@@ -961,9 +1236,35 @@ class EditorTest(unittest.TestCase):
             editor.goto_line_number(1)
             grab_focus.assert_called_once_with()
             grab_focus.reset_mock()
-            callback, line = idle.call_args.args
-            self.assertFalse(callback(line))
+            callback, *arguments = idle.call_args.args
+            self.assertFalse(callback(*arguments))
             grab_focus.assert_not_called()
+
+    def test_delayed_line_navigation_preserves_newer_cursor_selection_and_edits(self) -> None:
+        """An idle scroll confirmation never replaces newer user navigation or selection."""
+
+        editor = self._document()
+        self.addCleanup(editor.close)
+        for action in ("cursor", "selection", "typing"):
+            with self.subTest(action=action):
+                editor.buffer.set_text("one\ntwo\nthree\n")
+                with patch("slate.editor.GLib.idle_add", return_value=71) as idle:
+                    editor.goto_line_number(2, focus=False)
+                callback, *arguments = idle.call_args.args
+                if action == "cursor":
+                    editor.buffer.place_cursor(editor.buffer.get_iter_at_line(2))
+                elif action == "selection":
+                    editor.buffer.select_range(editor.buffer.get_iter_at_line(1),
+                                               editor.buffer.get_iter_at_line(2))
+                else:
+                    editor.buffer.insert_at_cursor("new text")
+                cursor = editor.buffer.get_iter_at_mark(editor.buffer.get_insert()).get_offset()
+                bound = editor.buffer.get_iter_at_mark(editor.buffer.get_selection_bound()).get_offset()
+                with patch.object(editor.view, "scroll_to_iter") as scroll:
+                    self.assertFalse(callback(*arguments))
+                    scroll.assert_not_called()
+                self.assertEqual(editor.buffer.get_iter_at_mark(editor.buffer.get_insert()).get_offset(), cursor)
+                self.assertEqual(editor.buffer.get_iter_at_mark(editor.buffer.get_selection_bound()).get_offset(), bound)
 
     def test_workspace_rekeys_dirty_editor_after_file_rename(self) -> None:
         """A renamed open file keeps its buffer and receives the new identity."""
