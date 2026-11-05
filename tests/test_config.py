@@ -432,6 +432,30 @@ class ConfigStoreTest(unittest.TestCase):
                 [{"path": "legacy", "type": "hg"}],
             )
 
+    def test_linux_backslashes_survive_config_round_trip_without_aliasing_slashes(self) -> None:
+        """Editor, ordering, expanded directory and repository references retain literal backslashes."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "config.json"
+            literal = "a\\b.txt"
+            raw = {"projects": [{"name": "project", "path": directory, "terminals": [],
+                   "item_order": [{"kind": "editor", "value": literal}],
+                   "file_manager": {"expanded_paths": ["dir\\name", "dir/name"]},
+                   "repositories": {"known": [{"path": "repo\\name", "type": "git"}]}}],
+                   "editor": {"tabs": [{"project": "project", "path": literal},
+                                       {"project": "project", "path": "a/b.txt"}],
+                              "active_tab": {"project": "project", "path": literal}}}
+            store = ConfigStore(path)
+            store.data = store._normalize(raw)
+            store.save()
+            restored = ConfigStore(path).data
+            self.assertEqual([tab["path"] for tab in restored["editor"]["tabs"]], [literal, "a/b.txt"])
+            self.assertEqual(restored["editor"]["active_tab"]["path"], literal)
+            project = restored["projects"][0]
+            self.assertEqual(project["item_order"][0]["value"], literal)
+            self.assertEqual(project["file_manager"]["expanded_paths"], ["dir\\name", "dir/name"])
+            self.assertEqual(project["repositories"]["known"][0]["path"], "repo\\name")
+
     def test_editor_rows_keep_only_safe_known_project_paths(self) -> None:
         """Persistent editors reject traversal, duplicates and unknown projects."""
 
@@ -463,6 +487,32 @@ class ConfigStoreTest(unittest.TestCase):
             self.assertEqual(
                 editor["active_tab"], {"project": "p", "path": "TODO.md"}
             )
+
+    def test_malformed_browser_url_does_not_discard_other_configuration(self) -> None:
+        """An invalid IPv6 tab or Home URL cannot erase otherwise valid projects and settings."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            path = Path(directory) / "config.json"
+            raw = {"projects": [
+                {"name": "first", "path": directory, "terminals": ["main"], "browsers": [
+                    {"id": "good", "url": "https://example.com/", "title": "good"},
+                    {"id": "bad", "url": "http://[::1", "title": "bad"},
+                    {"id": "bad-home", "url": "https://other.example/", "home_url": "https://[invalid]/"}]},
+                {"name": "second", "path": str(Path(directory) / "second"), "terminals": ["logs"]}],
+                "settings": {"editor": {"font_size": 14}}, "pinned_projects": ["first"],
+                "active_terminal": "first/main"}
+            original = json.dumps(raw)
+            path.write_text(original)
+            store = ConfigStore(path)
+            self.assertIsNone(store.error)
+            self.assertEqual([project["name"] for project in store.data["projects"]], ["first", "second"])
+            self.assertEqual(store.data["settings"]["editor"]["font_size"], 14)
+            self.assertEqual(store.data["pinned_projects"], ["first"])
+            self.assertEqual(store.data["active_terminal"], "first/main")
+            browsers = store.data["projects"][0]["browsers"]
+            self.assertEqual([browser["id"] for browser in browsers], ["good", "bad-home"])
+            self.assertIsNone(browsers[1]["home_url"])
+            self.assertEqual(path.read_text(), original)
 
     def test_browser_rows_keep_only_safe_normal_page_metadata(self) -> None:
         """Browser normalization rejects private, duplicate and unsafe records."""
