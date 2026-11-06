@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
-from gi.repository import Gdk, Gtk, Vte
+from gi.repository import Gdk, GLib, Gtk, Vte
 
 from slate.processes import CommandResult
 from slate.terminals import (
@@ -627,6 +627,41 @@ class TerminalHelpersTest(unittest.TestCase):
         owner._spawn_terminal.assert_not_called()
         owner._feed_initial_command.assert_not_called()
         owner.on_error.assert_not_called()
+
+    def test_failed_spawn_releases_cached_terminal_for_retry(self) -> None:
+        """A failed VTE spawn keeps config reusable rather than retaining a dead cached widget."""
+
+        terminal = MagicMock()
+        owner = SimpleNamespace(
+            terminals={"repo/main": terminal}, sessions={"repo/main": "repo--main"},
+            spawn_cancellables={"repo/main": object()}, initial_commands={"repo/main": "codex resume"},
+            shutting_down=False, closing_keys=set(), stack=MagicMock(), on_error=MagicMock(),
+            on_attention=MagicMock(), request_activity_refresh=MagicMock(),
+        )
+        owner._key_for_terminal = TerminalManager._key_for_terminal.__get__(owner)
+        TerminalManager._on_spawned(owner, terminal, -1, GLib.Error("spawn failed"),
+                                    ("repo/main", "repo", "/tmp", "main"))
+        self.assertEqual(owner.terminals, {})
+        self.assertEqual(owner.sessions, {})
+        self.assertEqual(owner.spawn_cancellables, {})
+        owner.stack.remove.assert_called_once_with(terminal)
+        owner.on_attention.assert_called_once_with(terminal, False)
+        owner.on_error.assert_called_once()
+        # A new selection takes the normal add path and receives the launcher
+        # from project config again; it cannot return the failed widget early.
+        owner.url_regex = MagicMock()
+        owner._on_terminal_key_press = owner._on_terminal_button_press = MagicMock()
+        owner._on_terminal_popup_menu = owner._on_terminal_child_exited = MagicMock()
+        owner._on_terminal_bell = owner._on_terminal_focus_in = MagicMock()
+        owner.session_checks = {}
+        owner.tmux = ("tmux", "-L", "test")
+        with patch("slate.terminals.Vte.Terminal", return_value=MagicMock()) as factory, patch(
+                "slate.terminals.run_async", return_value=MagicMock()) as run:
+            replacement = TerminalManager.add(owner, {"name": "repo", "path": "/tmp"}, "main", initial_command="codex resume")
+        self.assertIsNot(replacement, terminal)
+        factory.assert_called_once_with()
+        self.assertIs(owner.terminals["repo/main"], replacement)
+        self.assertEqual(run.call_args.args[0], ["tmux", "-L", "test", "has-session", "-t", "repo--main"])
 
     def test_spawn_completion_follows_pending_terminal_rename(self) -> None:
         """Renaming a starting terminal moves pending state and preserves its launcher."""
