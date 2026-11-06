@@ -1,7 +1,9 @@
 """Focused window-action tests without constructing another SLATE GUI."""
 
 import io
+import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +14,7 @@ import gi
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, GdkPixbuf, Gtk
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
 from slate.project_files import DirectoryInspection
 from slate.project_limit import ProjectStatusLimit
@@ -26,6 +28,24 @@ from slate.window import SlateWindow, _CODEX_RESUME_COMMAND, _moved_sequence
 
 class WindowActionTest(unittest.TestCase):
     """Verify high-level SCM actions independently from GTK window startup."""
+
+    def test_unavailable_project_red_does_not_leak_to_other_sidebar_rows(self) -> None:
+        """Reused renderers color only unavailable project names using cached access state."""
+
+        model = Gtk.TreeStore(str, str, str)
+        missing = model.append(None, ["missing", "project", "missing"])
+        ready = model.append(None, ["ready", "project", "ready"])
+        child = model.append(missing, ["main", "terminal", "missing"])
+        owner = SimpleNamespace(COL_TEXT=0, COL_KIND=1, COL_PROJECT=2,
+                                project_availability=SimpleNamespace(available={"missing": False, "ready": True}),
+                                _set_project_row_background=MagicMock())
+        renderer = Gtk.CellRendererText()
+        for row, expected in ((missing, True), (child, False), (ready, False)):
+            SlateWindow._render_tree_name(owner, None, renderer, model, row)
+            self.assertEqual(renderer.get_property("foreground-set"), expected)
+        owner.project_availability.available["missing"] = True
+        SlateWindow._render_tree_name(owner, None, renderer, model, missing)
+        self.assertFalse(renderer.get_property("foreground-set"))
 
     def test_collection_changes_restore_other_surface_without_activation(self) -> None:
         """Background editor/browser closures preserve the opposite visible surface."""
@@ -2269,6 +2289,7 @@ class WindowActionTest(unittest.TestCase):
             terminals=MagicMock(),
             _after_editors_close=MagicMock(),
             _decide_close=MagicMock(),
+            set_sensitive=MagicMock(),
         )
         SlateWindow._request_close(owner)
         self.assertTrue(owner.closing)
@@ -2281,6 +2302,30 @@ class WindowActionTest(unittest.TestCase):
         owner._after_editors_close(True)
         owner.terminals.set_activity_monitoring.assert_called_once_with(False)
         owner.terminals.query_panes.assert_called_once_with(owner._decide_close)
+
+    def test_quit_blocks_editor_input_until_terminal_decision_is_cancelled(self) -> None:
+        """Pending tmux queries cannot leave an approved editor open to new input."""
+
+        surface = Gtk.Box()
+        editor = Gtk.TextView()
+        surface.add(editor)
+        owner = SimpleNamespace(
+            closing=True, terminals=MagicMock(), set_sensitive=surface.set_sensitive,
+            _decide_close=MagicMock(), is_active=MagicMock(return_value=True),
+        )
+        try:
+            self.assertTrue(editor.is_sensitive())
+            SlateWindow._after_editors_close(owner, True)
+            self.assertFalse(editor.is_sensitive())
+            owner.terminals.query_panes.assert_called_once_with(owner._decide_close)
+            with patch("slate.window.Gtk.MessageDialog") as dialog_class:
+                dialog_class.return_value.run.return_value = Gtk.ResponseType.CANCEL
+                SlateWindow._decide_close(owner, [PaneInfo("repo--main", "bash", 100)])
+            self.assertTrue(editor.is_sensitive())
+            self.assertFalse(owner.closing)
+            owner.terminals.set_activity_monitoring.assert_has_calls([call(False), call(True)])
+        finally:
+            surface.destroy()
 
     def test_codex_close_respects_background_cancel_and_terminate_choices(self) -> None:
         """Codex without a red dot still requires an explicit shutdown choice."""
@@ -2329,6 +2374,7 @@ class WindowActionTest(unittest.TestCase):
             closing=True, terminals=MagicMock(), _terminate_all=MagicMock(),
             _save_window_state=MagicMock(), _final_destroy=MagicMock(),
             is_active=MagicMock(return_value=True),
+            set_sensitive=MagicMock(),
         )
         with patch("slate.window.Gtk.MessageDialog") as dialog_class:
             dialog_class.return_value.run.return_value = Gtk.ResponseType.CANCEL
@@ -2425,6 +2471,76 @@ class WindowActionTest(unittest.TestCase):
         )
         owner._start_next_unattended_verification.assert_called_once_with()
         self.assertEqual(panel.set_commit_busy.call_args_list, [call(True), call(False)])
+
+    def test_real_multi_repository_commit_keeps_project_after_slow_hook(self) -> None:
+        """Switching project during a real Git hook cannot redirect the next commit or its watcher."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="slate-commit-test-") as folder:
+            root = Path(folder)
+            adapters, heads, watchers = {}, {}, {}
+
+            def git(path: Path, *arguments: str) -> str:
+                """Execute bounded Git fixture commands only in disposable repositories."""
+
+                return subprocess.check_output(
+                    ["git", "-C", str(path), *arguments], stderr=subprocess.STDOUT, timeout=8
+                ).decode()
+
+            # Real corresponding repository paths in both projects expose a wrong-target write.
+            for project in ("A", "B"):
+                for repository in ("one", "two"):
+                    path = root / project / repository
+                    path.mkdir(parents=True)
+                    git(path, "init", "-q")
+                    git(path, "config", "user.name", "Audit")
+                    git(path, "config", "user.email", "audit@example.invalid")
+                    (path / "file.txt").write_text(f"{project} base\n")
+                    git(path, "add", "file.txt")
+                    git(path, "commit", "-qm", "Base")
+                    heads[project, repository] = git(path, "rev-parse", "HEAD")
+                    (path / "file.txt").write_text(f"{project} edited\n")
+                    key = (project, RepositoryRef(repository, "git"))
+                    adapters[key] = GitSCM(str(path))
+                    watchers[key] = MagicMock()
+            # 2026-11-06: a slow test/lint hook leaves a realistic human-sized
+            # interval to select another project; this is not an injected microsecond race.
+            hook = root / "A" / "one" / ".git" / "hooks" / "pre-commit"
+            hook.write_text("#!/bin/sh\ntouch hook-entered\nsleep 3\n")
+            hook.chmod(0o755)
+            panel = MagicMock()
+            owner = SimpleNamespace(
+                active_project_name="A", scm_by_repository=adapters, watchers=watchers, panel=panel,
+                unattended_verification_queue=[], _close_preview=MagicMock(),
+                _start_next_unattended_verification=MagicMock(),
+            )
+            owner._repository_scm = SlateWindow._repository_scm.__get__(owner)
+            owner._repository_watcher = SlateWindow._repository_watcher.__get__(owner)
+            statuses = [FileStatus("file.txt", "modified", repository=name, scm_type="git")
+                        for name in ("one", "two")]
+            SlateWindow._commit(owner, "Commit selected A files", statuses)
+            context = GLib.MainContext.default()
+            entered = root / "A" / "one" / "hook-entered"
+            deadline = time.monotonic() + 5
+            while not entered.exists() and time.monotonic() < deadline:
+                context.iteration(False)
+                time.sleep(0.005)
+            self.assertTrue(entered.exists())
+            time.sleep(1)
+            owner.active_project_name = "B"
+            deadline = time.monotonic() + 8
+            while panel.set_commit_busy.call_count < 2 and time.monotonic() < deadline:
+                context.iteration(False)
+                time.sleep(0.005)
+            self.assertGreaterEqual(panel.set_commit_busy.call_count, 2)
+            panel.show_error.assert_not_called()
+            for repository in ("one", "two"):
+                self.assertNotEqual(git(root / "A" / repository, "rev-parse", "HEAD"), heads["A", repository])
+                self.assertEqual(git(root / "B" / repository, "rev-parse", "HEAD"), heads["B", repository])
+                watchers["A", RepositoryRef(repository, "git")].request_full.assert_called_once_with(refresh_base=True)
+                watchers["B", RepositoryRef(repository, "git")].mute_metadata_events.assert_not_called()
+            panel.uncheck_statuses.assert_not_called()
+            panel.clear_error.assert_not_called()
+            self.assertEqual([args.args[0] for args in panel.set_project_remote_status.call_args_list], ["A", "A"])
 
     def test_commit_expands_one_moved_row_to_both_mercurial_paths(self) -> None:
         """A move commit includes its removal and destination atomically."""
