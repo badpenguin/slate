@@ -27,6 +27,63 @@ from slate.window import SlateWindow, _CODEX_RESUME_COMMAND, _moved_sequence
 class WindowActionTest(unittest.TestCase):
     """Verify high-level SCM actions independently from GTK window startup."""
 
+    def test_collection_changes_restore_other_surface_without_activation(self) -> None:
+        """Background editor/browser closures preserve the opposite visible surface."""
+
+        for kind in ("editor", "browser"):
+            with self.subTest(visible=kind):
+                project = {"name": "repo", "terminals": ["main"], "last_terminal": "main",
+                           "item_order": [], "browsers": []}
+                document = SimpleNamespace(reference=("repo", "file.py"), project_name="repo", relative_path="file.py")
+                page = SimpleNamespace(reference=("repo", "browser-1"), project_name="repo", identifier="browser-1")
+                owner = SimpleNamespace(
+                    project_store=MagicMock(), terminals=MagicMock(),
+                    editor_workspace=SimpleNamespace(current_editor=MagicMock(return_value=document if kind == "editor" else None),
+                                                     editors={document.reference: object()}),
+                    browser_manager=SimpleNamespace(current_page=MagicMock(return_value=page if kind == "browser" else None),
+                                                    serialized_project=MagicMock(return_value=[]), pages={}),
+                    config=SimpleNamespace(data={"projects": [project]}, save=MagicMock(), find_project=MagicMock(return_value=project)),
+                    _populate_projects=MagicMock(), active_editor_ref=None, active_project_name="repo", restoring_tree=False,
+                )
+                selections = []
+
+                def select(*identity):
+                    """Observe whether GTK selection changes are allowed to activate a view."""
+
+                    selections.append((identity, owner.restoring_tree))
+
+                owner._select_tree_row = select
+                if kind == "editor":
+                    SlateWindow._on_browser_collection_changed(owner)
+                    expected = ("repo", "file.py", "editor")
+                else:
+                    SlateWindow._on_editor_collection_changed(owner)
+                    expected = ("repo", "browser-1", "browser")
+                self.assertEqual(selections, [(expected, True)])
+                self.assertFalse(owner.restoring_tree)
+
+    def test_create_dialog_cannot_follow_a_background_project_change(self) -> None:
+        """A background project switch during the modal aborts creation before path resolution."""
+
+        for directory in (False, True):
+            with self.subTest(directory=directory):
+                owner = SimpleNamespace(active_project_name="first", _project_file_path=MagicMock(),
+                                        project_file_operations=MagicMock(), _on_project_entry_created=MagicMock())
+
+                def switched():
+                    """Simulate the event loop handling a BELL project activation."""
+
+                    owner.active_project_name = "second"
+                    return Gtk.ResponseType.OK
+
+                with patch("slate.window.Gtk.Dialog") as dialog, patch("slate.window.Gtk.Entry"), patch("slate.window.Gtk.Label"):
+                    dialog.return_value.run.side_effect = switched
+                    SlateWindow._prompt_project_entry(owner, "src", directory)
+                    dialog.return_value.destroy.assert_called_once_with()
+                owner._project_file_path.assert_not_called()
+                owner.project_file_operations.create_file.assert_not_called()
+                owner.project_file_operations.create_directory.assert_not_called()
+
     def test_project_sort_keeps_fifo_pins_before_alphabetical_projects(self) -> None:
         """Alphabetical sorting affects only the unpinned project band."""
 
