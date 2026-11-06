@@ -198,7 +198,7 @@ class RepositoryActionDialogTest(RepositoryDialogFixture, unittest.TestCase):
         dialog._submit()
         self.assertEqual(
             self.calls[4][0],
-            ["git", "merge", "--no-ff", "--no-commit", "--no-edit", "feature"],
+            ["git", "merge", "--no-ff", "--no-commit", "--no-edit", "refs/heads/feature"],
         )
         self._complete(4, stderr="merge conflict", returncode=1)
         self._complete(5, "conflict.py\0")
