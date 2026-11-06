@@ -770,12 +770,20 @@ class ExperimentalEditor(Gtk.Box):
     def _visual_offset(self, offset: int) -> int:
         """Map a canonical caret back to its live visual span."""
 
+        # 2026-11-07: la fine del sorgente deve seguire anche la coda storica;
+        # il primo span che termina a EOF può precedere righe eliminate.
+        # _replace_spans mantiene un punto di inserimento vivo in fondo alla vista.
+        if offset == self.editor.buffer.get_char_count():
+            return self.projection.get_char_count()
         for span in self.spans:
             if span.start is None or span.visual_start is None:
                 continue
             start = self.editor.buffer.get_iter_at_mark(span.start).get_offset()
             end = self.editor.buffer.get_iter_at_mark(span.end).get_offset()
-            if start <= offset <= end:
+            # 2026-11-07: il confine appartiene al blocco corrente successivo,
+            # altrimenti la navigazione atterra sulle righe storiche interposte.
+            # L'EOF resta un punto di inserimento valido nell'ultimo blocco.
+            if start <= offset < end:
                 return self.projection.get_iter_at_mark(span.visual_start).get_offset() + offset - start
         return self.projection.get_char_count()
 
@@ -1250,6 +1258,19 @@ class ExperimentalEditor(Gtk.Box):
     def handle_key(self, event) -> bool:
         """Handle projection-specific shortcuts while save/undo remain canonical."""
 
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if event.keyval == Gdk.KEY_F3 and modifiers in (0, Gdk.ModifierType.SHIFT_MASK):
+            # 2026-11-06: la barra è un sibling del testo, quindi non riceve
+            # F3 quando si torna nel diff. Instradare al buffer visibile senza
+            # riaprire la ricerca o cambiare modalità.
+            if self.mode in {"unified", "compact"}:
+                return self.projection_search.handle_key(event)
+            if (self.mode == "side" and self.last_side == "old") or (
+                    self.mode == "code" and self.editor.historical):
+                return self.old_search.handle_key(event)
+            if self.mode in {"side", "code"}:
+                self.editor.search(bool(modifiers & Gdk.ModifierType.SHIFT_MASK))
+                return True
         if not event.state & Gdk.ModifierType.CONTROL_MASK:
             return False
         key = Gdk.keyval_to_lower(event.keyval)
