@@ -54,6 +54,26 @@ class GitSCMTest(unittest.TestCase):
             ],
         )
 
+    def test_deleted_staged_addition_is_missing(self) -> None:
+        """Real Git AD status exposes the missing-file action instead of Added."""
+
+        def git(*arguments: str) -> str:
+            """Run Git only inside this test's disposable repository."""
+
+            return subprocess.check_output(
+                ["git", "-C", self.temporary.name, *arguments], stderr=subprocess.STDOUT
+            ).decode()
+
+        git("init", "-q")
+        target = Path(self.temporary.name) / "new.txt"
+        target.write_text("new\n")
+        git("add", "--", "new.txt")
+        target.unlink()
+        output = git(*self.scm.status_argv()[1:])
+        self.assertIn("1 AD ", output)
+        self.assertEqual(self.scm.parse_status(output),
+                         [FileStatus("new.txt", "missing", scm_type="git")])
+
     def test_porcelain_rename_retains_both_atomic_endpoints(self) -> None:
         """A porcelain type-2 rename becomes one moved row with its source."""
 
@@ -192,6 +212,42 @@ class GitSCMTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.scm.parse_update_comparison("invalid")
 
+    def test_branch_tag_collision_preserves_exact_switch_and_merge_targets(self) -> None:
+        """Real Git switches and merges the selected branch despite an identically named tag."""
+
+        def git(*arguments: str) -> str:
+            """Execute Git inside the disposable test working copy."""
+
+            return subprocess.check_output(
+                ["git", "-C", self.temporary.name, *arguments], stderr=subprocess.STDOUT
+            ).decode()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Audit")
+        git("config", "user.email", "audit@example.invalid")
+        root = Path(self.temporary.name)
+        (root / "base.txt").write_text("base\n")
+        git("add", "base.txt")
+        git("commit", "-qm", "Create base")
+        git("tag", "topic")
+        git("branch", "heads/topic")
+        git("switch", "-c", "topic")
+        (root / "branch.txt").write_text("branch version\n")
+        git("add", "branch.txt")
+        git("commit", "-qm", "Add branch content")
+        git("switch", "main")
+        branches = self.scm.parse_branches(git(*self.scm.branches_argv()[1:]))
+        self.assertEqual({target.name for target in branches}, {"main", "topic", "heads/topic"})
+        for name in ("topic", "heads/topic"):
+            with self.subTest(branch=name):
+                git(*self.scm.switch_branch_argv(name)[1:])
+                self.assertEqual(git("branch", "--show-current").strip(), name)
+        git("switch", "main")
+        git(*self.scm.merge_branch_argv("topic")[1:])
+        self.assertEqual((root / "branch.txt").read_text(), "branch version\n")
+        self.assertEqual(git("rev-parse", "MERGE_HEAD"), git("rev-parse", "refs/heads/topic"))
+        self.assertNotEqual(git("rev-parse", "MERGE_HEAD"), git("rev-parse", "refs/tags/topic"))
+
     def test_repository_actions_remain_local_and_never_force(self) -> None:
         """Branch, merge, publish and tag commands use only the simple path."""
 
@@ -221,7 +277,7 @@ class GitSCMTest(unittest.TestCase):
         )
         self.assertEqual(
             self.scm.merge_branch_argv("topic"),
-            ["git", "merge", "--no-ff", "--no-commit", "--no-edit", "topic"],
+            ["git", "merge", "--no-ff", "--no-commit", "--no-edit", "refs/heads/topic"],
         )
         self.assertEqual(
             self.scm.parse_merge_conflicts("a.py\0dir/b.py\0"),
