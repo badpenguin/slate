@@ -16,6 +16,57 @@ from slate.scm.base import FileStatus, RepositoryRef, RepositorySyncStatus
 class SCMPanelTest(unittest.TestCase):
     """Verify filtered groups and explicit repository presentation states."""
 
+    def test_commit_checkboxes_are_isolated_and_restored_per_project(self) -> None:
+        """Native toggles cannot leak into another project's visible checks or commit payload."""
+
+        for kind in ("hg", "git"):
+            for cached in (False, True):
+                with self.subTest(scm=kind, cached_b=cached):
+                    self.committed = None
+                    repository = RepositoryRef(".", kind)
+                    status = FileStatus(f"src/config-{int(cached)}.py", "modified", scm_type=kind)
+                    project_a, project_b = f"{kind}-{cached}-A", f"{kind}-{cached}-B"
+                    if cached:
+                        self.panel.bind_project(project_b, True)
+                        self.panel.set_repositories([repository])
+                        self.panel.update_status([status], "main", repository)
+                    self.panel.bind_project(project_a, True)
+                    self.panel.set_repositories([repository])
+                    self.panel.update_status([status], "main", repository)
+                    store_a = self.panel.store
+                    key = self.panel._status_key(status)
+                    source = self.panel.store.get_path(self.panel.iter_by_path[key])
+                    visible = self.panel.filtered_store.convert_child_path_to_path(source)
+                    self.panel.toggle_renderer.emit("toggled", visible.to_string())
+                    self.assertEqual(self.panel.checked_statuses(), [status])
+                    self.panel.bind_project(project_b, True)
+                    self.panel.set_repositories([repository])
+                    self.panel.update_status([status], "main", repository)
+                    row_b = self.panel.iter_by_path[key]
+                    self.panel.message.get_buffer().set_text("B commit message")
+                    if self.panel.commit_button.get_sensitive():
+                        self.panel.commit_button.emit("clicked")
+                    self.assertEqual(
+                        (self.panel.store.get_value(row_b, self.panel.COL_CHECKED),
+                         self.panel.checked_statuses(), self.committed),
+                        (False, [], None),
+                    )
+                    # Selecting and deselecting B must leave A's cached checkbox intact.
+                    source = self.panel.store.get_path(row_b)
+                    visible = self.panel.filtered_store.convert_child_path_to_path(source)
+                    self.panel.toggle_renderer.emit("toggled", visible.to_string())
+                    self.panel.toggle_renderer.emit("toggled", visible.to_string())
+                    self.panel.bind_project(project_a, True)
+                    self.panel.set_repositories([repository])
+                    self.panel.update_status([status], "main", repository)
+                    self.assertIs(self.panel.store, store_a)
+                    self.assertTrue(self.panel.store.get_value(self.panel.iter_by_path[key], self.panel.COL_CHECKED))
+                    self.assertEqual(self.panel.checked_statuses(), [status])
+                    self.panel.message.get_buffer().set_text("A commit message")
+                    self.assertTrue(self.panel.commit_button.get_sensitive())
+                    self.panel.commit_button.emit("clicked")
+                    self.assertEqual(self.committed, ("A commit message", [status]))
+
     @classmethod
     def setUpClass(cls) -> None:
         """Require the GTK display used by the final integration test session."""
