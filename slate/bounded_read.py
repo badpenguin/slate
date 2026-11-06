@@ -1,12 +1,18 @@
 """Bounded asynchronous file reads for textual previews."""
 
+import base64
+from pathlib import Path
+import sys
+
 from gi.repository import Gio, GLib
+
+from .processes import run_async
 
 
 class BoundedFileRead:
     """Check file size and read at most the byte limit plus one overflow byte."""
 
-    def __init__(self, file, limit, cancellable, callback):
+    def __init__(self, file, limit, cancellable, callback, *, root=None):
         """Start metadata inspection before opening the file stream."""
 
         # 2026-11-03: checking metadata alone cannot bound a file that grows
@@ -17,8 +23,46 @@ class BoundedFileRead:
         self.stream = None
         self.data = bytearray()
         self.error = None
+        self.command = None
+        self.cancel_handler = None
+        if root is not None:
+            # 2026-11-06: la ricerca non può seguire link sostituiti dopo la
+            # validazione; il worker legge attraverso descrittori no-follow.
+            self.command = run_async(
+                [sys.executable, "-m", "slate.bounded_read_worker", str(root), file.get_path(), str(limit)],
+                self._worker_completed, cwd=str(Path(__file__).resolve().parent.parent),
+            )
+            self.cancel_handler = cancellable.connect(self._cancel_worker, None)
+            return
         file.query_info_async("standard::size,standard::type", Gio.FileQueryInfoFlags.NONE,
                               GLib.PRIORITY_DEFAULT, cancellable, self._inspected)
+
+    def _cancel_worker(self):
+        """Stop a project-bound read when its owning search is superseded."""
+
+        if self.command is not None:
+            self.command.cancel()
+
+    def _worker_completed(self, result):
+        """Decode bounded binary contents or deliver an explicit cancellation/error."""
+
+        self.command = None
+        if self.cancel_handler:
+            self.cancellable.disconnect(self.cancel_handler)
+            self.cancel_handler = None
+        if self.cancellable.is_cancelled():
+            self.callback(None, GLib.Error.new_literal(Gio.io_error_quark(), "Cancelled", Gio.IOErrorEnum.CANCELLED))
+        elif not result.ok:
+            self.callback(None, ValueError(str(result.error or result.stderr.strip() or "Unable to read the file")))
+        else:
+            try:
+                data = base64.b64decode(result.stdout, validate=True)
+                if len(data) > self.limit:
+                    raise ValueError("Preview byte limit exceeded")
+            except ValueError as error:
+                self.callback(None, error)
+                return
+            self.callback(data, None)
 
     def _inspected(self, file, result):
         """Reject oversized or nonregular files before requesting their contents."""
