@@ -878,7 +878,7 @@ class ProjectSearch(Gtk.Box):
         self.preview_cancellable = Gio.Cancellable()
         BoundedFileRead(
             Gio.File.new_for_path(path), self.MAX_TEXT_BYTES, self.preview_cancellable,
-            partial(self._on_preview_loaded, (request_serial, result)),
+            partial(self._on_preview_loaded, (request_serial, result)), root=self.root,
         )
 
     def _on_preview_loaded(self, request: tuple[int, SearchResult], data, error) -> None:
