@@ -83,6 +83,7 @@ class EditorDocument(Gtk.Box):
         self.deleted_conflict = False
         self.attention = False
         self.monitor: Gio.FileMonitor | None = None
+        self.ancestor_monitors: dict[str, Gio.FileMonitor] = {}
         self.monitor_source_id: int | None = None
         self.load_cancellable: Gio.Cancellable | None = None
         self.save_cancellable: Gio.Cancellable | None = None
@@ -111,6 +112,9 @@ class EditorDocument(Gtk.Box):
             self._configure_language()
             self.view.set_editable(False)
         else:
+            # 2026-11-06: prima della lettura iniziale non esiste ancora un
+            # buffer modificabile; il risultato Gio altrimenti cancella l'input.
+            self.view.set_editable(False)
             self.initial_load_id = GLib.idle_add(self._start_initial_load)
 
     @property
@@ -123,6 +127,11 @@ class EditorDocument(Gtk.Box):
     def dirty(self) -> bool:
         """Return whether the source buffer contains unsaved edits."""
 
+        # 2026-11-06: una scelta esplicita di sovrascrittura resta da salvare
+        # anche se Undo raggiunge il vecchio save-point. Il disco è cambiato;
+        # solo una scrittura riuscita può consumare questa intenzione.
+        if self.force_next_save:
+            return True
         # 2026-10-30: dopo una scrittura concorrente il save-point nativo
         # può indicare una versione precedente a quella realmente sul disco.
         if self.saved_snapshot is not None:
@@ -367,6 +376,8 @@ class EditorDocument(Gtk.Box):
         if self.load_cancellable is not None:
             self.load_cancellable.cancel()
         self.loading = True
+        if reason == "initial":
+            self.view.set_editable(False)
         self.save_button.set_sensitive(False)
         self.load_cancellable = Gio.Cancellable()
         # 2026-10-30: rifiutare i file già troppo grandi prima di leggerli
@@ -574,7 +585,9 @@ class EditorDocument(Gtk.Box):
     def _ensure_monitor(self) -> None:
         """Monitor the parent directory so atomic file replacements stay visible."""
 
-        if self.monitor is not None or self.file is None:
+        if self.closed or self.monitor is not None or self.file is None:
+            return
+        if self._safe_path() != self.path:
             return
         parent = self.file.get_parent()
         if parent is None:
@@ -583,6 +596,19 @@ class EditorDocument(Gtk.Box):
                 Gtk.MessageType.WARNING,
             )
             return
+        # 2026-11-06: il monitor del contenuto segue l'inode della directory,
+        # non il suo nome. Osservare anche le singole voci degli antenati
+        # permette di riagganciarlo dopo rename/recreate, senza polling né
+        # notifiche per ogni file contenuto nelle directory superiori.
+        for ancestor in Path(self.path).parents:
+            if ancestor.parent == ancestor or str(ancestor) in self.ancestor_monitors:
+                continue
+            try:
+                monitor = Gio.File.new_for_path(str(ancestor)).monitor_file(Gio.FileMonitorFlags.WATCH_MOVES, None)
+            except GLib.Error:
+                continue
+            monitor.connect("changed", self._on_ancestor_changed)
+            self.ancestor_monitors[str(ancestor)] = monitor
         try:
             # 2026-09-29: gli agenti sostituiscono spesso il file con rename
             # atomici. Il monitor della directory conserva la propria identità
@@ -593,6 +619,42 @@ class EditorDocument(Gtk.Box):
             self.monitor.connect("changed", self._on_file_changed)
         except GLib.Error as error:
             self._show_notice(f"File monitor unavailable: {error}", Gtk.MessageType.WARNING)
+
+    def _on_ancestor_changed(self, monitor, file, other, event_type) -> None:
+        """Reattach only after directory-entry topology changes, preserving normal conflict handling."""
+
+        if self.closed or self.file is None or monitor not in self.ancestor_monitors.values():
+            return
+        if event_type not in {Gio.FileMonitorEvent.CREATED, Gio.FileMonitorEvent.DELETED,
+                              Gio.FileMonitorEvent.MOVED, Gio.FileMonitorEvent.RENAMED,
+                              Gio.FileMonitorEvent.MOVED_IN, Gio.FileMonitorEvent.MOVED_OUT}:
+            return
+        changed = {item.get_path() for item in (file, other) if item is not None}
+        affected = changed & self.ancestor_monitors.keys()
+        if not affected:
+            return
+        # Entry monitors above the replacement remain alive so delayed
+        # recreation is observable. Descendants may still follow old inodes.
+        for path in tuple(self.ancestor_monitors):
+            if any(path.startswith(ancestor + "/") for ancestor in affected):
+                self.ancestor_monitors.pop(path).cancel()
+        if self.monitor is not None:
+            self.monitor.cancel()
+            self.monitor = None
+        self._ensure_monitor()
+        # Reuse debounce, save muting, etag checks and dirty-buffer choices;
+        # directory replacement must not introduce a second reload policy.
+        self._on_file_changed(None, self.file, None, Gio.FileMonitorEvent.CHANGED)
+
+    def _clear_file_monitors(self) -> None:
+        """Release the content monitor and every retained ancestor-entry monitor."""
+
+        if self.monitor is not None:
+            self.monitor.cancel()
+            self.monitor = None
+        for monitor in self.ancestor_monitors.values():
+            monitor.cancel()
+        self.ancestor_monitors.clear()
 
     def relocate(self, relative_path: str) -> None:
         """Retarget this buffer after its file or an ancestor was renamed."""
@@ -607,9 +669,7 @@ class EditorDocument(Gtk.Box):
         if self.monitor_source_id is not None:
             GLib.source_remove(self.monitor_source_id)
             self.monitor_source_id = None
-        if self.monitor is not None:
-            self.monitor.cancel()
-            self.monitor = None
+        self._clear_file_monitors()
         self.relative_path = relative_path
         self.path = self._safe_path()
         self.file = Gio.File.new_for_path(self.path) if self.path else None
@@ -745,9 +805,13 @@ class EditorDocument(Gtk.Box):
             self._begin_load("conflict-disk")
             return
         if response in {self.RESPONSE_MINE, self.RESPONSE_RECREATE}:
-            if response == self.RESPONSE_RECREATE and not self.dirty:
+            if response == self.RESPONSE_RECREATE:
                 # Anche un buffer pulito conserva l'ultima versione valida; la
                 # scelta esplicita lo rende salvabile sul path ormai assente.
+                # 2026-11-06: lo snapshot di un salvataggio concorrente non
+                # rappresenta più un file su disco; non deve annullare Recreate.
+                self.saved_snapshot = None
+                self.dirty_cache = None
                 self.buffer.set_modified(True)
             self.external_conflict = False
             self.deleted_conflict = False
@@ -755,6 +819,11 @@ class EditorDocument(Gtk.Box):
             self.attention = False
             self._hide_notice()
             self.on_state(self)
+            if response == self.RESPONSE_MINE:
+                # 2026-11-06: Keep my version è una scelta di sovrascrittura,
+                # non un'autorizzazione differita; salvare subito fissa anche
+                # il nuovo save-point rispetto al quale Undo deve restare dirty.
+                self.save()
             return
         if response == self.RESPONSE_DISCARD:
             self.on_removed(self, f"Tab closed: {self.relative_path}")
@@ -1208,9 +1277,7 @@ class EditorDocument(Gtk.Box):
             self.load_cancellable = None
         if self.save_cancellable is not None:
             self.save_cancellable.cancel()
-        if self.monitor is not None:
-            self.monitor.cancel()
-            self.monitor = None
+        self._clear_file_monitors()
 
     def _on_modified_changed(self, _buffer: GtkSource.Buffer) -> None:
         """Publish dirty-state changes to the corresponding project-tree row."""
@@ -1412,7 +1479,7 @@ class EditorWorkspace(Gtk.Stack):
         self.preview_entry = None
         self.editors[editor.reference] = entry
         editor.previewing = False
-        editor.view.set_editable(not editor.loading and not editor.historical)
+        editor.view.set_editable(not editor.loading and editor.initial_load_id is None and not editor.historical)
         editor.edit_button.hide()
         self.active_ref = editor.reference
         self._persist()
@@ -1656,11 +1723,13 @@ class EditorWorkspace(Gtk.Stack):
         """Handle editor shortcuts only while an editor child is active."""
 
         editor = self.current_editor()
-        if editor is None or not event.state & Gdk.ModifierType.CONTROL_MASK:
+        if editor is None:
             return False
         if editor.experimental is not None and editor.experimental.enabled:
             if editor.experimental.handle_key(event):
                 return True
+        if not event.state & Gdk.ModifierType.CONTROL_MASK:
+            return False
         keyval = Gdk.keyval_to_lower(event.keyval)
         if keyval == Gdk.KEY_s:
             editor.save()
