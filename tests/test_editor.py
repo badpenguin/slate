@@ -849,6 +849,53 @@ class EditorTest(unittest.TestCase):
         self.assertEqual(self.path.read_text(encoding="utf-8"), "# TODO\n")
         editor.close()
 
+    def test_recreate_restores_clean_snapshot_after_concurrent_save(self) -> None:
+        """Recreate writes retained text even when a concurrent-save snapshot matches it."""
+
+        editor = self._document()
+        try:
+            editor.buffer.set_text("saved text\n")
+            editor.save()
+            editor.buffer.insert(editor.buffer.get_end_iter(), "later typing\n")
+
+            def saved() -> bool:
+                """Wait for the real asynchronous snapshot write."""
+
+                return not editor.saving
+
+            self._wait_until(saved)
+            self.assertEqual(self.path.read_text(), "saved text\n")
+            self.assertIsNotNone(editor.saved_snapshot)
+            editor.buffer.set_text("saved text\n")
+            self.assertFalse(editor.dirty)
+            self.path.unlink()
+            editor.mute_monitor_until = 0
+            editor._handle_external_change()
+
+            def deleted() -> bool:
+                """Wait for missing-file metadata to trigger the conflict."""
+
+                return editor.deleted_conflict
+
+            self._wait_until(deleted)
+            editor._on_info_response(editor.info_bar, editor.RESPONSE_RECREATE)
+            self.assertTrue(editor.dirty)
+            completed = []
+            editor.save(completed.append)
+
+            def recreated() -> bool:
+                """Wait for the actual recreation write to complete."""
+
+                return bool(completed)
+
+            self._wait_until(recreated)
+            self.assertEqual(completed, [True])
+            self.assertEqual(self.path.read_text(), "saved text\n")
+            self.assertFalse(editor.dirty)
+        finally:
+            editor.close()
+            editor.destroy()
+
     def test_repeated_atomic_replacements_keep_clean_markdown_current(self) -> None:
         """Agent-style atomic writes keep refreshing an already open document."""
 
@@ -879,6 +926,112 @@ class EditorTest(unittest.TestCase):
             self.assertIsNotNone(editor.monitor)
 
         editor.close()
+
+    def test_replaced_parent_or_ancestor_reloads_clean_buffers_and_protects_dirty_ones(self) -> None:
+        """Real ancestor replacements refresh clean text, preserve edits and keep later writes observable."""
+
+        for deep, dirty in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(nested=deep, unsaved=dirty):
+                container = self.root / f"case-{deep}-{dirty}"
+                replaced = container / "src"
+                directory = replaced / "deep" if deep else replaced
+                directory.mkdir(parents=True)
+                path = directory / "file.txt"
+                path.write_text("initial\n")
+                editor = EditorDocument("project", str(self.root), str(path.relative_to(self.root)),
+                                        11, self._state_changed, self._removed)
+                try:
+                    def loaded() -> bool:
+                        """Wait until the real initial read has installed its monitor."""
+
+                        return editor.etag is not None and not editor.loading
+
+                    self._wait_until(loaded)
+                    if dirty:
+                        editor.buffer.insert(editor.buffer.get_end_iter(), "local edit\n")
+                    # A build/deployment tool can replace the whole containing directory.
+                    replaced.rename(container / "retired-src")
+                    directory.mkdir(parents=True)
+                    path.write_text("replacement\n")
+
+                    def updated() -> bool:
+                        """Wait for an automatic reload or an explicit dirty-buffer conflict."""
+
+                        text = editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True)
+                        return not editor.loading and (editor.external_conflict if dirty else text == "replacement\n")
+
+                    self._wait_until(updated)
+                    if dirty:
+                        text = editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True)
+                        self.assertEqual(text, "initial\nlocal edit\n")
+                        self.assertEqual(path.read_text(), "replacement\n")
+                        editor._on_info_response(editor.info_bar, editor.RESPONSE_DISK)
+
+                    def replacement_loaded() -> bool:
+                        """Wait for the replacement to become the clean current buffer."""
+
+                        text = editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True)
+                        return not editor.loading and not editor.dirty and text == "replacement\n"
+
+                    self._wait_until(replacement_loaded)
+                    path.write_text("later external write\n")
+
+                    def later_loaded() -> bool:
+                        """Verify subsequent writes use the renewed parent monitor."""
+
+                        text = editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True)
+                        return not editor.loading and text == "later external write\n"
+
+                    self._wait_until(later_loaded)
+                    self.assertFalse(editor.external_conflict)
+                finally:
+                    editor.close()
+                    editor.destroy()
+
+    def test_missing_ancestor_can_return_later_and_all_monitors_close(self) -> None:
+        """A delayed recreation recovers automatically and closing cancels every real monitor."""
+
+        replaced = self.root / "src"
+        directory = replaced / "deep"
+        directory.mkdir(parents=True)
+        path = directory / "file.txt"
+        path.write_text("initial\n")
+        editor = EditorDocument("project", str(self.root), "src/deep/file.txt", 11,
+                                self._state_changed, self._removed)
+        try:
+            def loaded() -> bool:
+                """Wait for the initial read and installed monitors."""
+
+                return editor.etag is not None and not editor.loading
+
+            self._wait_until(loaded)
+            replaced.rename(self.root / "retired-src")
+
+            def missing() -> bool:
+                """Allow the missing directory to persist until its conflict is visible."""
+
+                return editor.deleted_conflict
+
+            self._wait_until(missing)
+            directory.mkdir(parents=True)
+            path.write_text("returned\n")
+
+            def returned() -> bool:
+                """Wait for recovery driven by the ancestor creation event."""
+
+                text = editor.buffer.get_text(editor.buffer.get_start_iter(), editor.buffer.get_end_iter(), True)
+                return not editor.loading and not editor.external_conflict and text == "returned\n"
+
+            self._wait_until(returned)
+            self.assertFalse(editor.info_bar.get_visible())
+        finally:
+            monitors = list(editor.ancestor_monitors.values())
+            if editor.monitor is not None:
+                monitors.append(editor.monitor)
+            editor.close()
+            editor.destroy()
+            for monitor in monitors:
+                self.assertTrue(monitor.is_cancelled())
 
     def test_directory_monitor_survives_atomic_replacement_gap(self) -> None:
         """The retained parent monitor observes replacements without inode gaps."""
@@ -916,12 +1069,115 @@ class EditorTest(unittest.TestCase):
         self.assertTrue(editor.force_next_save)
         self.assertFalse(editor.info_bar.get_revealed())
         self.assertFalse(editor.info_bar.get_visible())
-        completed: list[bool] = []
-        editor.save(completed.append)
-        self._wait_until(lambda: bool(completed))
-        self.assertEqual(completed, [True])
+        def saved() -> bool:
+            """Wait for Keep my version to finish its automatic write."""
+
+            return not editor.saving
+
+        self._wait_until(saved)
         self.assertEqual(self.path.read_text(encoding="utf-8"), "# Locale\n")
         editor.close()
+
+    def test_keep_my_version_saves_immediately_and_undo_remains_unsaved(self) -> None:
+        """The explicit overwrite writes now; a later Undo differs from the new disk save point."""
+
+        editor = self._document()
+        try:
+            original = self.path.read_text()
+            editor.buffer.begin_user_action()
+            editor.buffer.insert(editor.buffer.get_end_iter(), "local change\n")
+            editor.buffer.end_user_action()
+            self.path.write_text("external version\n")
+            editor._handle_external_change()
+
+            def conflicted() -> bool:
+                """Wait for the real external metadata conflict."""
+
+                return editor.external_conflict
+
+            self._wait_until(conflicted)
+            editor._on_info_response(editor.info_bar, editor.RESPONSE_MINE)
+
+            def saved() -> bool:
+                """Wait for the write started by the explicit conflict choice."""
+
+                return not editor.saving
+
+            self._wait_until(saved)
+            self.assertEqual(self.path.read_text(), original + "local change\n")
+            self.assertFalse(editor.dirty)
+            editor.undo()
+            self.assertTrue(editor.dirty)
+            self.assertTrue(editor.save_button.get_sensitive())
+            self.assertEqual(self.path.read_text(), original + "local change\n")
+            completed = []
+            editor.save(completed.append)
+
+            def saved_undo() -> bool:
+                """Wait for saving the version restored by Undo."""
+
+                return bool(completed)
+
+            self._wait_until(saved_undo)
+            self.assertEqual(completed, [True])
+            self.assertEqual(self.path.read_text(), original)
+        finally:
+            editor.close()
+            editor.destroy()
+
+    def test_keep_my_version_after_undo_writes_and_preserves_failed_save_intent(self) -> None:
+        """Undo before the choice cannot suppress overwrite, and failed writes remain retryable."""
+
+        for fail_first in (False, True):
+            with self.subTest(failed_write=fail_first):
+                self.path.write_text("original\n")
+                editor = self._document()
+                try:
+                    editor.buffer.begin_user_action()
+                    editor.buffer.insert(editor.buffer.get_end_iter(), "local edit\n")
+                    editor.buffer.end_user_action()
+                    self.path.write_text("external version\n")
+                    editor._handle_external_change()
+
+                    def conflicted() -> bool:
+                        """Wait for the external write to produce its real conflict."""
+
+                        return editor.external_conflict
+
+                    self._wait_until(conflicted)
+                    editor.undo()
+                    self.assertFalse(editor.dirty)
+                    self.assertTrue(editor.external_conflict)
+                    if fail_first:
+                        with patch("slate.editor.AnchoredFileSave") as write:
+                            editor._on_info_response(editor.info_bar, editor.RESPONSE_MINE)
+                            self.assertTrue(editor.saving)
+                            request = write.call_args.args
+                        source = MagicMock()
+                        source.replace_contents_finish.side_effect = GLib.Error.new_literal(
+                            Gio.io_error_quark(), "Write denied", Gio.IOErrorEnum.PERMISSION_DENIED
+                        )
+                        request[6](source, None, request[7])
+                        self.assertTrue(editor.dirty)
+                        self.assertTrue(editor.save_button.get_sensitive())
+                        self.assertEqual(self.path.read_text(), "external version\n")
+                        editor.save()
+                    else:
+                        editor._on_info_response(editor.info_bar, editor.RESPONSE_MINE)
+                    self.assertTrue(editor.saving)
+
+                    def saved() -> bool:
+                        """Wait for the real overwrite or retry to reach disk."""
+
+                        return not editor.saving
+
+                    self._wait_until(saved)
+                    self.assertEqual(self.path.read_text(), "original\n")
+                    self.assertFalse(editor.force_next_save)
+                    self.assertFalse(editor.dirty)
+                finally:
+                    editor.close()
+                    editor.destroy()
 
     def test_typing_during_external_reload_preserves_the_local_buffer(self) -> None:
         """A late asynchronous disk read becomes a conflict after local typing."""
