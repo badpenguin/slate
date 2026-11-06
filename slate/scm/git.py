@@ -83,14 +83,16 @@ class GitSCM(SCM):
 
         if "U" in (index_state, worktree_state):
             return "conflict"
-        if "A" in (index_state, worktree_state):
-            return "added"
         # 2026-09-05: una cancellazione solo nel working tree richiede ancora
         # `git add -u`; non deve apparire come una rimozione pronta al commit.
         if index_state == "D":
             return "removed"
         if worktree_state == "D":
             return "missing"
+        # 2026-11-06: AD è ancora assente dal working tree; offrire la
+        # registrazione della rimozione prima di considerare l'aggiunta staged.
+        if "A" in (index_state, worktree_state):
+            return "added"
         if any(code not in {".", " "} for code in (index_state, worktree_state)):
             return "modified"
         return None
@@ -170,10 +172,12 @@ class GitSCM(SCM):
     def branches_argv(self) -> list[str]:
         """Return NUL-delimited local branch names only."""
 
+        # 2026-11-06: :short aggiunge heads/ in presenza di tag omonimi;
+        # rimuovere esattamente refs/heads/ conserva il nome accettato da switch.
         return [
             "git",
             "for-each-ref",
-            "--format=%(refname:short)%00",
+            "--format=%(refname:lstrip=2)%00",
             "refs/heads",
         ]
 
@@ -226,7 +230,9 @@ class GitSCM(SCM):
     def merge_branch_argv(name: str) -> list[str]:
         """Start an explicit non-fast-forward local branch merge without commit."""
 
-        return ["git", "merge", "--no-ff", "--no-commit", "--no-edit", name]
+        # 2026-11-06: l'elenco espone nomi esatti; qualificare il merge evita
+        # che Git scelga un tag omonimo al posto del branch selezionato.
+        return ["git", "merge", "--no-ff", "--no-commit", "--no-edit", f"refs/heads/{name}"]
 
     def merge_conflicts_argv(self) -> list[str]:
         """Return NUL-delimited unresolved paths from the Git index."""
