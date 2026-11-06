@@ -41,6 +41,7 @@ class ExperimentalEditorTest(unittest.TestCase):
         self.editor = EditorDocument("project", self.temporary.name, "style.css", 11, MagicMock(), MagicMock())
         GLib.source_remove(self.editor.initial_load_id)
         self.editor.initial_load_id = None
+        self.editor.view.set_editable(True)
         self.editor.buffer.begin_not_undoable_action()
         self.editor.buffer.set_text("font-size: 12px;\n")
         self.editor.buffer.end_not_undoable_action()
@@ -64,6 +65,72 @@ class ExperimentalEditorTest(unittest.TestCase):
         self.editor.close()
         self.parent.destroy()
         self.temporary.cleanup()
+
+    def test_goto_changed_line_accepts_typing_and_preserves_undo_in_each_mode(self) -> None:
+        """Navigate to a changed line and edit the live version through native GTK actions."""
+
+        before = "".join(f"row {number}: width = 10;\n" for number in range(1, 31))
+        current = before.replace("row 11: width = 10;", "row 11: width = 14;")
+        expected = current.replace("row 11: width = 14;", "/* caffè */ row 11: width = 14;")
+        # 2026-11-07: verificare lo stesso gesto nelle quattro viste distingue
+        # gli errori di proiezione dai problemi del buffer e della sua history.
+        for mode in ("compact", "unified", "side", "code"):
+            with self.subTest(mode=mode):
+                self.editor.buffer.begin_not_undoable_action()
+                self.editor.buffer.set_text(current)
+                self.editor.buffer.end_not_undoable_action()
+                self.editor.buffer.set_modified(False)
+                self.presentation.base = before
+                self.presentation.old_buffer.set_text(before)
+                self.presentation.rows = project_diff(before, current)
+                self.presentation.rows_serial = self.presentation.serial
+                self.presentation.rows_base_serial = self.presentation.base_serial
+                self.presentation.set_mode(mode)
+                if mode in {"compact", "unified"}:
+                    self.presentation._replace_spans()
+                    self.presentation._render_projection()
+                self.editor.goto_line_number(11, focus=False)
+                context = GLib.MainContext.default()
+                while context.pending():
+                    context.iteration(False)
+                view = self.presentation.projection_view if mode in {"compact", "unified"} else self.editor.view
+                view.emit("insert-at-cursor", "/* caffè */ ")
+                self.assertEqual(self.presentation.text(), expected)
+                self.editor.undo()
+                self.assertEqual(self.presentation.text(), current)
+                self.editor.redo()
+                self.assertEqual(self.presentation.text(), expected)
+
+    def test_goto_eof_after_trailing_deletion_accepts_typing_and_undo(self) -> None:
+        """Navigate past deleted historical tail rows to the live EOF, even for an empty file."""
+
+        for current in ("keep\n", ""):
+            for mode in ("compact", "unified", "side", "code"):
+                with self.subTest(current=current, mode=mode):
+                    self.editor.buffer.begin_not_undoable_action()
+                    self.editor.buffer.set_text(current)
+                    self.editor.buffer.end_not_undoable_action()
+                    self.editor.buffer.set_modified(False)
+                    self.presentation.base = "keep\nremoved\n"
+                    self.presentation.old_buffer.set_text(self.presentation.base)
+                    self.presentation.rows = project_diff(self.presentation.base, current)
+                    self.presentation.rows_serial = self.presentation.serial
+                    self.presentation.rows_base_serial = self.presentation.base_serial
+                    self.presentation.set_mode(mode)
+                    if mode in {"compact", "unified"}:
+                        self.presentation._replace_spans()
+                        self.presentation._render_projection()
+                    self.editor.goto_line_number(self.editor.buffer.get_line_count(), focus=False)
+                    context = GLib.MainContext.default()
+                    while context.pending():
+                        context.iteration(False)
+                    view = self.presentation.projection_view if mode in {"compact", "unified"} else self.editor.view
+                    view.emit("insert-at-cursor", "new last line\n")
+                    self.assertEqual(self.presentation.text(), current + "new last line\n")
+                    self.editor.undo()
+                    self.assertEqual(self.presentation.text(), current)
+                    self.editor.redo()
+                    self.assertEqual(self.presentation.text(), current + "new last line\n")
 
     def test_goto_hidden_compact_line_expands_only_its_gap_and_edits_there(self) -> None:
         """Navigation reveals the requested source line and typing uses that exact position."""
@@ -817,6 +884,47 @@ class ExperimentalEditorTest(unittest.TestCase):
         self.assertTrue(self.presentation.handle_key(event))
         self.assertEqual(self.editor.on_definition.call_args.args[2], "removed_symbol")
         self.assertEqual(self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()).get_offset(), 3)
+
+    def test_f3_uses_visible_diff_search_after_returning_to_text(self) -> None:
+        """F3 and Shift+F3 navigate the visible diff buffer without a control modifier."""
+
+        self.editor.buffer.set_text("needle needle\n")
+        self.presentation.base = "needle needle old\n"
+        self.presentation.old_buffer.set_text(self.presentation.base)
+        self.presentation.rows = project_diff(self.presentation.base, self.presentation.text())
+        self.presentation.rows_serial = self.presentation.serial
+        self.presentation.rows_base_serial = self.presentation.base_serial
+        owner = SimpleNamespace(current_editor=MagicMock(return_value=self.editor))
+        for mode, side in (("unified", "current"), ("compact", "current"),
+                           ("side", "old"), ("side", "current")):
+            with self.subTest(mode=mode, side=side):
+                self.presentation.set_mode(mode)
+                if mode in {"unified", "compact"}:
+                    self.presentation._replace_spans()
+                    self.presentation._render_projection()
+                    search = self.presentation.projection_search
+                    search.settings.set_search_text("needle")
+                    buffer = search.buffer
+                    buffer.place_cursor(buffer.get_start_iter())
+                    search.search()
+                elif side == "old":
+                    self.presentation._side_focus(self.presentation.old_view, None)
+                    search = self.presentation.old_search
+                    search.settings.set_search_text("needle")
+                    buffer = search.buffer
+                    buffer.place_cursor(buffer.get_start_iter())
+                    search.search()
+                else:
+                    self.presentation._side_focus(self.editor.view, None)
+                    self.editor.search_settings.set_search_text("needle")
+                    buffer = self.editor.buffer
+                    buffer.place_cursor(buffer.get_start_iter())
+                    self.editor.search()
+                for state, expected in ((Gdk.ModifierType(0), 7), (Gdk.ModifierType.SHIFT_MASK, 0)):
+                    event = SimpleNamespace(keyval=Gdk.KEY_F3, state=state)
+                    self.assertTrue(EditorWorkspace.handle_key(owner, event))
+                    self.assertEqual(buffer.get_selection_bounds()[0].get_offset(), expected)
+                self.assertEqual(self.presentation.mode, mode)
 
     def test_side_search_uses_the_focused_version(self) -> None:
         """Find in the immutable baseline does not redirect to the editable source."""
