@@ -384,13 +384,17 @@ class ProjectFileManager(Gtk.Box):
         self.loading_paths.clear()
         # 2026-08-17: repository watcher persistenti rendono riusabile il modello;
         # un browser senza watcher viene invece ricaricato per non mostrare dati stantii.
+        # 2026-11-06: i rami esclusi già caricati usano monitor supplementari,
+        # appena chiusi. Il watcher SCM non può coprire le modifiche perse:
+        # riallinearli al ritorno tramite il refresh incrementale esistente.
         self.project_states[self.project_name] = _ProjectTreeState(
             self.root,
             self.store,
             set(self.expanded_paths),
             dict(self.dir_iters),
             set(self.loaded_paths),
-            self.dirty or incomplete or not self.repo_watched,
+            self.dirty or incomplete or not self.repo_watched
+            or any(self._is_excluded(path) for path in self.loaded_paths),
             set(self.ignored),
             self.show_hidden,
             self.show_excluded,
@@ -1589,7 +1593,7 @@ class ProjectFileManager(Gtk.Box):
         _monitor: Gio.FileMonitor,
         file: Gio.File,
         _other: Gio.File | None,
-        _event_type: Gio.FileMonitorEvent,
+        event_type: Gio.FileMonitorEvent,
     ) -> None:
         """Forward supplemental directory events through the common debounce."""
 
@@ -1604,6 +1608,16 @@ class ProjectFileManager(Gtk.Box):
             if path:
                 paths.add(os.path.relpath(path, self.root).replace(os.sep, "/"))
         for relative in paths:
+            if event_type in {
+                Gio.FileMonitorEvent.CREATED, Gio.FileMonitorEvent.DELETED,
+                Gio.FileMonitorEvent.MOVED, Gio.FileMonitorEvent.RENAMED,
+                Gio.FileMonitorEvent.MOVED_IN, Gio.FileMonitorEvent.MOVED_OUT,
+            }:
+                # 2026-11-06: il nome può ora indicare un inode diverso anche
+                # se la riga resta una directory. Liberare i monitor del ramo;
+                # il refresh esistente li rinnova per le directory espanse,
+                # senza ricostruire modello, selezione o stato di espansione.
+                self._remove_monitors_below("" if relative == "." else relative)
             self.filesystem_changed(relative)
             if self.on_file_change is not None and self.project_name is not None:
                 self.on_file_change(self.project_name, relative)
@@ -1612,7 +1626,7 @@ class ProjectFileManager(Gtk.Box):
         """Cancel supplemental monitors owned by one collapsed subtree."""
 
         for path, monitor in tuple(self.monitors.items()):
-            if path == relative or path.startswith(f"{relative}/"):
+            if not relative or path == relative or path.startswith(f"{relative}/"):
                 monitor.cancel()
                 self.monitors.pop(path, None)
 
