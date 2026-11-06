@@ -798,6 +798,9 @@ class ExperimentalEditor(Gtk.Box):
 
         for child in menu.get_children():
             menu.remove(child)
+        selection = self.projection.get_selection_bounds()
+        cuttable = (not self.editor.loading and self.editor.view.get_editable() and bool(selection)
+                    and bool(self._live_ranges(selection[0].get_offset(), selection[1].get_offset())))
         for action, label in (("undo", "Undo"), ("redo", "Redo"),
                               ("cut-clipboard", "Cut"), ("copy-clipboard", "Copy"),
                               ("paste-clipboard", "Paste"), ("select-all", "Select all")):
@@ -807,6 +810,8 @@ class ExperimentalEditor(Gtk.Box):
                 item.set_sensitive(self.editor.buffer.can_undo())
             elif action == "redo":
                 item.set_sensitive(self.editor.buffer.can_redo())
+            elif action == "cut-clipboard":
+                item.set_sensitive(cuttable)
             menu.append(item)
         menu.show_all()
 
@@ -883,11 +888,17 @@ class ExperimentalEditor(Gtk.Box):
         """Copy only selected current text before removing editable intersections."""
 
         GObject.signal_stop_emission_by_name(self.projection_view, "cut-clipboard")
+        if self.editor.loading or not self.editor.view.get_editable():
+            return
         selection = self.projection.get_selection_bounds()
         if not selection:
             return
         start, end = selection
         ranges = self._live_ranges(start.get_offset(), end.get_offset())
+        # 2026-11-06: una selezione soltanto storica non è tagliabile;
+        # preservare la clipboard anche se il comando arriva da tastiera.
+        if not ranges:
+            return
         text = "".join(self.editor.buffer.get_text(self.editor.buffer.get_iter_at_offset(a),
                                                   self.editor.buffer.get_iter_at_offset(b), True)
                        for _left, _right, a, b in ranges)
@@ -1015,6 +1026,16 @@ class ExperimentalEditor(Gtk.Box):
                   if self.mode in {"unified", "compact"}
                   else self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()))
         line = cursor.get_line()
+        if self.mode == "side" and self.last_side == "old":
+            # 2026-11-06: il clic nella baseline non sposta il cursore live.
+            # Mappare la riga storica al primo punto corrente corrispondente,
+            # includendo il blocco aggiunto che segue eventuali righe rimosse.
+            old_line = self.old_buffer.get_iter_at_mark(self.old_buffer.get_insert()).get_line()
+            index = next((index for index, row in enumerate(self.rows)
+                          if row.old_line is not None and row.old_line >= old_line), len(self.rows))
+            line = next((self.rows[position].new_line for position in range(index, len(self.rows))
+                         if self.rows[position].new_line is not None),
+                        max(0, self.editor.buffer.get_line_count() - 1))
         candidates = [value for value in self.hunks if (value - line) * delta > 0]
         target = (min(candidates) if delta > 0 else max(candidates)) if candidates else (self.hunks[0] if delta > 0 else self.hunks[-1])
         self.editor.goto_line_number(target + 1, focus=self.mode not in {"unified", "compact"})
