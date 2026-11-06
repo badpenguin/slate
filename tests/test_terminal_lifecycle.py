@@ -9,12 +9,78 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from gi.repository import GLib
+
 from slate.processes import CommandResult
 from slate.terminals import PaneInfo, TerminalManager
 
 
 class TerminalLifecycleTest(unittest.TestCase):
     """Keep launchers and jobs while retiring idle plain shells safely."""
+
+    def test_lazy_terminal_actions_cannot_target_similarly_named_live_session(self) -> None:
+        """Absent main never authorizes renaming or killing main-two on a real isolated server."""
+
+        for action in ("rename", "close", "kill"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory(dir="/tmp", prefix="slate-target-test-") as folder:
+                tmux = ["tmux", "-S", str(Path(folder) / "isolated.sock"), "-f", "/dev/null"]
+
+                def execute(*arguments: str) -> subprocess.CompletedProcess:
+                    """Contact only this test's explicitly isolated tmux socket."""
+
+                    return subprocess.run(tmux + list(arguments), capture_output=True, text=True, timeout=5)
+
+                try:
+                    for name in ("audit-guard", "repo--main-two"):
+                        result = execute("new-session", "-d", "-s", name, "sleep 60")
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    owner = SimpleNamespace(
+                        tmux=tuple(tmux), terminals={}, sessions={}, initial_commands={}, closing_keys=set(),
+                        session_checks={}, stack=MagicMock(), on_error=MagicMock(), on_attention=MagicMock(),
+                        _server_absent=TerminalManager._server_absent, _error=TerminalManager._error,
+                        _set_metadata=MagicMock(), request_activity_refresh=MagicMock(),
+                    )
+                    completed = []
+                    if action == "rename":
+                        TerminalManager.rename(owner, "repo", "main", "work", completed.append)
+                    elif action == "close":
+                        TerminalManager.close(owner, "repo", "main", completed.append)
+                    else:
+                        TerminalManager.kill_session(owner, "repo--main", completed.append)
+                    context = GLib.MainContext.default()
+                    deadline = time.monotonic() + 5
+                    while not completed and time.monotonic() < deadline:
+                        context.iteration(False)
+                        time.sleep(0.005)
+                    self.assertTrue(completed)
+                    if action == "kill":
+                        self.assertFalse(completed[0].ok)
+                    else:
+                        self.assertEqual(completed, [True])
+                    result = execute("list-sessions", "-F", "#{session_name}")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(set(result.stdout.splitlines()), {"audit-guard", "repo--main-two"})
+                    # The exact existing session must still accept its intended action.
+                    completed.clear()
+                    if action == "rename":
+                        TerminalManager.rename(owner, "repo", "main-two", "work", completed.append)
+                    elif action == "close":
+                        TerminalManager.close(owner, "repo", "main-two", completed.append)
+                    else:
+                        TerminalManager.kill_session(owner, "repo--main-two", completed.append)
+                    deadline = time.monotonic() + 5
+                    while not completed and time.monotonic() < deadline:
+                        context.iteration(False)
+                        time.sleep(0.005)
+                    if action == "kill":
+                        self.assertTrue(completed)
+                        self.assertTrue(completed[0].ok)
+                    else:
+                        self.assertEqual(completed, [True])
+                    expected = {"audit-guard", "repo--work"} if action == "rename" else {"audit-guard"}
+                    self.assertEqual(set(execute("list-sessions", "-F", "#{session_name}").stdout.splitlines()), expected)
+                finally:
+                    execute("kill-server")
 
     def test_retirement_keeps_jobs_launchers_and_multiple_panes(self) -> None:
         """Only a verified childless plain shell receives a kill-session request."""
