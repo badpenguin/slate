@@ -61,6 +61,38 @@ class UnifiedLifecycleTest(unittest.TestCase):
             time.sleep(0.002)
         self.assertIsNotNone(document.etag)
 
+    def test_initial_code_load_rejects_input_until_disk_text_is_ready(self) -> None:
+        """Code and promoted previews accept typing only after the initial Gio read completes."""
+
+        for preview in (False, True):
+            with self.subTest(promoted_preview=preview):
+                relative = "preview.css" if preview else "direct.css"
+                (self.root / relative).write_text("original text\n")
+                if preview:
+                    document = self.workspace.open_preview("project", str(self.root), relative)
+                    self.workspace.promote(document)
+                else:
+                    document = self.workspace.open_file("project", str(self.root), relative, focus=False)
+                self.assertFalse(document.view.get_editable())
+                document.experimental = ExperimentalEditor(document)
+                document.experimental.attach()
+                document.experimental.configure_base(None, relative)
+                GLib.source_remove(document.initial_load_id)
+                document.initial_load_id = None
+                document._start_initial_load()
+                self.assertTrue(document.loading)
+                document.experimental.set_mode("code")
+                self.assertEqual(document.experimental.stack.get_visible_child_name(), "source")
+                # Exercise GTK's editing action: direct buffer writes bypass read-only protection.
+                document.view.emit("insert-at-cursor", "premature typing")
+                self.assertEqual(document.buffer.get_char_count(), 0)
+                self._loaded(document)
+                self.assertTrue(document.view.get_editable())
+                document.view.emit("insert-at-cursor", "accepted typing\n")
+                text = document.buffer.get_text(document.buffer.get_start_iter(), document.buffer.get_end_iter(), True)
+                self.assertIn("original text\n", text)
+                self.assertIn("accepted typing\n", text)
+
     def test_circular_preview_alias_cannot_block_opening_other_files(self) -> None:
         """A preview alias becoming circular does not prevent another preview or editor."""
 
@@ -166,6 +198,52 @@ class UnifiedLifecycleTest(unittest.TestCase):
                     time.sleep(0.002)
                 self.assertEqual(saved, [True])
                 self.assertEqual(path.read_text(), "# Plain UTF-8 text\npattern\nedited\n")
+
+    def test_explicit_edit_opens_media_named_text_and_rejects_binary_contents(self) -> None:
+        """Edit accepts SVG/M3U text while selection keeps media previews and PNG bytes stay rejected."""
+
+        owner = SimpleNamespace(
+            active_project_name="project", config=SimpleNamespace(find_project=MagicMock(
+                return_value={"name": "project", "path": str(self.root)})),
+            scm_by_repository={}, editor_workspace=self.workspace, get_focus=MagicMock(return_value=None),
+            _show_file_error=MagicMock(), _close_preview=MagicMock(), _select_tree_row=MagicMock(),
+            _search_result_status=MagicMock(return_value=None),
+        )
+        owner._project_file_path = SlateWindow._project_file_path.__get__(owner)
+        owner._configure_experimental = SlateWindow._configure_experimental.__get__(owner)
+        owner._open_experimental_file = SlateWindow._open_experimental_file.__get__(owner)
+        for relative, contents in (
+                ("logo.svg", b'<svg xmlns="http://www.w3.org/2000/svg"/>\n'),
+                ("playlist.m3u", b"#EXTM3U\nsong.ogg\n"),
+                ("binary.png", b"\x89PNG\r\n\x1a\n\0binary")):
+            with self.subTest(path=relative):
+                path = self.root / relative
+                path.write_bytes(contents)
+                self.assertIsNone(owner._open_experimental_file(relative))
+                document = SlateWindow._edit_project_file_internal(owner, relative)
+                self.assertIsNotNone(document)
+                deadline = time.monotonic() + 3
+                context = GLib.MainContext.default()
+                while (document.loading or document.initial_load_id is not None) and time.monotonic() < deadline:
+                    context.iteration(False)
+                    time.sleep(0.002)
+                if relative.endswith(".png"):
+                    self.assertTrue(document.closed)
+                    self.assertNotIn(document.reference, self.workspace.editors)
+                    self.assertEqual(path.read_bytes(), contents)
+                    continue
+                self.assertIsNotNone(document.etag)
+                self.assertTrue(document.view.get_editable())
+                self.assertFalse(document.previewing)
+                document.buffer.insert(document.buffer.get_end_iter(), "edited\n")
+                saved = []
+                document.save(saved.append)
+                deadline = time.monotonic() + 3
+                while not saved and time.monotonic() < deadline:
+                    context.iteration(False)
+                    time.sleep(0.002)
+                self.assertEqual(saved, [True])
+                self.assertEqual(path.read_bytes(), contents + b"edited\n")
 
     def test_unknown_mime_binary_files_are_still_rejected_by_the_loader(self) -> None:
         """Accepting an unknown filename never makes NUL-containing binary contents editable."""
