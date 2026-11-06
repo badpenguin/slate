@@ -36,6 +36,7 @@ class DiffSyntaxTest(unittest.TestCase):
         self.editor = EditorDocument("project", self.temp.name, "snippet.py", 11, MagicMock(), MagicMock())
         GLib.source_remove(self.editor.initial_load_id)
         self.editor.initial_load_id = None
+        self.editor.view.set_editable(True)
         self.before = '"""unfinished removed string\nremoved_word\n'
         self.current = 'value = 14\n# current comment\n'
         self.editor.buffer.set_text(self.current)
