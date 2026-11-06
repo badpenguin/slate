@@ -17,6 +17,27 @@ from slate.config import (
 class ConfigStoreTest(unittest.TestCase):
     """Verify the single config file remains safe and human-readable."""
 
+    def test_project_name_and_path_keep_literal_surrounding_spaces(self) -> None:
+        """A saved project must never resolve to a different sibling after config reload."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="slate-path-spaces-") as folder:
+            root = Path(folder)
+            selected = root / " project "
+            selected.mkdir()
+            (selected / "file.txt").write_text("selected\n")
+            sibling = root / "project"
+            sibling.mkdir()
+            (sibling / "file.txt").write_text("different\n")
+            config = ConfigStore(root / "config.json")
+            config.data["projects"].append(new_project_config(selected.name, str(selected), ("main",)))
+            config.save()
+            restored = ConfigStore(root / "config.json")
+            self.assertIsNone(restored.error)
+            project = restored.data["projects"][0]
+            self.assertEqual(project["name"], selected.name)
+            self.assertEqual(project["path"], str(selected))
+            self.assertEqual((Path(project["path"]) / "file.txt").read_text(), "selected\n")
+
     def test_terminal_history_ids_persist_and_exclude_custom_launchers(self) -> None:
         """Legacy configs get distinct stable identities only for plain terminals."""
 
