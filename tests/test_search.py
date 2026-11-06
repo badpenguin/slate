@@ -215,6 +215,61 @@ class SearchCommandTest(unittest.TestCase):
 class ProjectSearchTest(unittest.TestCase):
     """Verify query threshold, selection and contextual keyboard actions."""
 
+    def test_preview_parent_replacement_cannot_expose_external_contents(self) -> None:
+        """A swap after path validation is rejected by the actual project-read worker."""
+
+        from slate.processes import run_async
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            base = Path(directory)
+            root = base / "project"
+            folder = root / "sub"
+            folder.mkdir(parents=True)
+            outside = base / "outside"
+            outside.mkdir()
+            (folder / "file.txt").write_text("inside\n")
+            (outside / "file.txt").write_text("external secret\n")
+            self.search.root = str(root)
+            loop = GLib.MainLoop()
+            outcomes = []
+            original = self.search._on_preview_loaded
+
+            def swapped(argv, callback, **kwargs):
+                """Replace the validated pathname before the worker opens its directory chain."""
+
+                folder.rename(root / "original-sub")
+                folder.symlink_to(outside, target_is_directory=True)
+                return run_async(argv, callback, **kwargs)
+
+            def completed(request, data, error):
+                """Apply the real worker completion and stop the bounded test loop."""
+
+                outcomes.append((data, error))
+                original(request, data, error)
+                loop.quit()
+
+            def expired():
+                """Stop waiting if the asynchronous preview never completes."""
+
+                loop.quit()
+                return GLib.SOURCE_REMOVE
+
+            timeout = GLib.timeout_add(3000, expired)
+            try:
+                with patch("slate.bounded_read.run_async", side_effect=swapped), patch.object(
+                        self.search, "_on_preview_loaded", side_effect=completed):
+                    self.search._load_preview(SearchResult("sub/file.txt", 1, "inside", ((0, 3),)))
+                    loop.run()
+                self.assertEqual(len(outcomes), 1)
+                self.assertIsNone(outcomes[0][0])
+                self.assertIsNotNone(outcomes[0][1])
+                buffer = self.search.preview_buffer
+                self.assertNotIn("external secret", buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True))
+                self.assertIsNone(self.search.preview_cancellable)
+            finally:
+                GLib.source_remove(timeout)
+                self.search.cancel()
+
     @classmethod
     def setUpClass(cls) -> None:
         """Require the display server shared by the GTK test session."""
