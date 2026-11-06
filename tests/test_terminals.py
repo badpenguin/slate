@@ -464,11 +464,11 @@ class TerminalHelpersTest(unittest.TestCase):
         run.assert_called_once()
         argv = run.call_args.args[0]
         self.assertIn("mouse", argv)
-        self.assertIn("repo--main", argv)
-        status_target = argv.index("repo--main")
+        self.assertIn("=repo--main:", argv)
+        status_target = argv.index("=repo--main:")
         self.assertEqual(
             argv[status_target - 2 : status_target + 3],
-            ["set-option", "-t", "repo--main", "status", "off"],
+            ["set-option", "-t", "=repo--main:", "status", "off"],
         )
         self.assertIn("WheelUpPane", argv)
         self.assertIn("WheelDownPane", argv)
@@ -500,7 +500,7 @@ class TerminalHelpersTest(unittest.TestCase):
         status_target = argv.index("status")
         self.assertEqual(
             argv[status_target - 2 : status_target + 2],
-            ["-t", "repo--main", "status", "on"],
+            ["-t", "=repo--main:", "status", "on"],
         )
         self.assertGreaterEqual(argv.count(";"), 4)
 
@@ -661,7 +661,7 @@ class TerminalHelpersTest(unittest.TestCase):
         self.assertIsNot(replacement, terminal)
         factory.assert_called_once_with()
         self.assertIs(owner.terminals["repo/main"], replacement)
-        self.assertEqual(run.call_args.args[0], ["tmux", "-L", "test", "has-session", "-t", "repo--main"])
+        self.assertEqual(run.call_args.args[0], ["tmux", "-L", "test", "has-session", "-t", "=repo--main"])
 
     def test_spawn_completion_follows_pending_terminal_rename(self) -> None:
         """Renaming a starting terminal moves pending state and preserves its launcher."""
@@ -836,7 +836,7 @@ class TerminalHelpersTest(unittest.TestCase):
             self.assertEqual(
                 run.call_args.args[0],
                 ["tmux", "-L", "slate", "send-keys", "-t",
-                 "repo--work-two", "-l", "/rename Work two"],
+                 "=repo--work-two:", "-l", "/rename Work two"],
             )
             text_sent = run.call_args.args[1]
             text_sent(CommandResult((), 0, "", ""))
@@ -853,7 +853,7 @@ class TerminalHelpersTest(unittest.TestCase):
             self.assertEqual(
                 run.call_args.args[0],
                 ["tmux", "-L", "slate", "send-keys", "-t",
-                 "repo--work-two", "Enter"],
+                 "=repo--work-two:", "Enter"],
             )
         terminal.feed_child.assert_not_called()
 
@@ -962,7 +962,7 @@ class TerminalHelpersTest(unittest.TestCase):
         with patch("slate.terminals.run_async") as run:
             TerminalManager.close(owner, "Repo", "main", callback)
         self.assertEqual(
-            run.call_args.args[0][-3:], ["kill-session", "-t", "repo--main"]
+            run.call_args.args[0][-3:], ["kill-session", "-t", "=repo--main"]
         )
         completed = run.call_args.args[1]
         completed(CommandResult(tuple(run.call_args.args[0]), 0, "", ""))
