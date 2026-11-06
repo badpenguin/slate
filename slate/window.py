@@ -848,12 +848,25 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.config.data["editor"] = state
         self.config.save()
 
+    def _restore_sidebar_without_activation(self, project_name: str, item_value: str, kind: str) -> None:
+        """Restore a surviving sidebar row without changing the visible central surface."""
+
+        # 2026-11-06: la ricostruzione del modello non è una scelta dell'utente;
+        # il segnale changed non deve riattivare terminali o chiudere overlay.
+        previous = self.restoring_tree
+        self.restoring_tree = True
+        try:
+            self._select_tree_row(project_name, item_value, kind)
+        finally:
+            self.restoring_tree = previous
+
     def _on_editor_collection_changed(self) -> None:
         """Rebuild sidebar rows after an editor is opened or closed."""
 
         if not hasattr(self, "project_store") or not hasattr(self, "terminals"):
             return
         visible_editor = self.editor_workspace.current_editor()
+        visible_browser = self.browser_manager.current_page()
         active_ref = (
             visible_editor.reference
             if visible_editor is not None
@@ -878,6 +891,11 @@ class SlateWindow(Gtk.ApplicationWindow):
         }
         if current_orders != previous_orders:
             self.config.save()
+        if visible_browser is not None:
+            SlateWindow._restore_sidebar_without_activation(
+                self, visible_browser.project_name, visible_browser.identifier, "browser"
+            )
+            return
         if active_ref and active_ref in self.editor_workspace.editors:
             self._select_tree_row(active_ref[0], active_ref[1], "editor")
             return
@@ -920,6 +938,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Persist browser-tab metadata and rebuild all browser rows."""
 
         visible = self.browser_manager.current_page()
+        visible_editor = self.editor_workspace.current_editor()
         active_ref = visible.reference if visible is not None else None
         changed = False
         for project in self.config.data["projects"]:
@@ -951,6 +970,12 @@ class SlateWindow(Gtk.ApplicationWindow):
         if changed:
             self.config.save()
         self._populate_projects()
+        if visible_editor is not None:
+            if visible_editor.reference in self.editor_workspace.editors:
+                SlateWindow._restore_sidebar_without_activation(
+                    self, visible_editor.project_name, visible_editor.relative_path, "editor"
+                )
+            return
         if active_ref is not None and active_ref in self.browser_manager.pages:
             self._select_tree_row(active_ref[0], active_ref[1], "browser")
             return
@@ -4942,6 +4967,7 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _prompt_project_entry(self, parent_relative: str, directory: bool) -> None:
         """Validate a modal entry name before starting one create operation."""
 
+        project_name = self.active_project_name
         title = "New Folder" if directory else "New File"
         dialog = Gtk.Dialog(title=title, transient_for=self, modal=True)
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
@@ -4967,6 +4993,11 @@ class SlateWindow(Gtk.ApplicationWindow):
         relative_path = None
         absolute_path = None
         while dialog.run() == Gtk.ResponseType.OK:
+            # 2026-11-06: BELL e altri callback continuano durante dialog.run;
+            # non risolvere il nome nel progetto attivato nel frattempo.
+            if self.active_project_name != project_name:
+                relative_path = None
+                break
             name = entry.get_text().strip()
             if not name or name in {".", ".."} or "/" in name or "\0" in name:
                 error_label.set_text("Enter a simple, valid name.")
@@ -4987,7 +5018,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         if relative_path is None or absolute_path is None:
             return
-        callback = partial(self._on_project_entry_created, self.active_project_name or "", relative_path)
+        callback = partial(self._on_project_entry_created, project_name or "", relative_path)
         if directory:
             self.project_file_operations.create_directory(absolute_path, callback)
         else:
