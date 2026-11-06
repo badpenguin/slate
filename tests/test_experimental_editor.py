@@ -235,6 +235,78 @@ class ExperimentalEditorTest(unittest.TestCase):
             workspace.shutdown()
             workspace.destroy()
 
+    def test_side_navigation_uses_left_cursor_and_accounts_for_inserted_lines(self) -> None:
+        """Previous/Next use the selected baseline location rather than the hidden live caret."""
+
+        for prefix in ("", "extra one\nextra two\n"):
+            with self.subTest(prefix=prefix):
+                before = "".join(f"line {number}\n" for number in range(1, 101))
+                current = prefix + before
+                for number in (10, 30, 70):
+                    current = current.replace(f"line {number}\n", f"changed {number}\n")
+                p = self.presentation
+                self.editor.buffer.set_text(current)
+                p.base = before
+                p.old_buffer.set_text(before)
+                p.rows = project_diff(before, current)
+                p.rows_serial = p.serial
+                p.rows_base_serial = p.base_serial
+                shift = prefix.count("\n")
+                p.hunks = ([0] if prefix else []) + [9 + shift, 29 + shift, 69 + shift]
+                p.set_mode("side")
+                for old_line, delta, expected in ((69, -1, 29 + shift), (29, 1, 69 + shift)):
+                    with self.subTest(old_line=old_line, delta=delta):
+                        self.editor.buffer.place_cursor(self.editor.buffer.get_start_iter())
+                        p.old_buffer.place_cursor(p.old_buffer.get_iter_at_line(old_line))
+                        p._side_focus(p.old_view, None)
+                        if delta < 0:
+                            p._previous(None)
+                        else:
+                            p._next(None)
+                        cursor = self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert())
+                        self.assertEqual(cursor.get_line(), expected)
+                self.assertEqual(p.text(), current)
+
+    def test_cut_rejects_historical_only_selection_without_changing_clipboard(self) -> None:
+        """Read-only historical selections disable Cut and cannot clear a previous clipboard value."""
+
+        p = self.presentation
+        removed = next(span for span in p.spans if span.kind == "removed")
+        p.projection.select_range(p.projection.get_iter_at_mark(removed.visual_start),
+                                 p.projection.get_iter_at_mark(removed.visual_end))
+        menu = Gtk.Menu()
+        try:
+            p._projection_menu(p.projection_view, menu)
+            cut = next(item for item in menu.get_children() if item.get_label() == "Cut")
+            self.assertFalse(cut.get_sensitive())
+            original = p.text()
+            with patch.object(p.projection_view, "get_clipboard") as clipboard:
+                p.projection_view.emit("cut-clipboard")
+            clipboard.assert_not_called()
+            self.assertEqual(p.text(), original)
+        finally:
+            menu.destroy()
+
+    def test_cut_of_mixed_selection_copies_and_removes_only_live_text(self) -> None:
+        """A mixed diff selection remains cuttable and has one canonical undo operation."""
+
+        p = self.presentation
+        original = p.text()
+        p.projection.select_range(p.projection.get_start_iter(), p.projection.get_end_iter())
+        menu = Gtk.Menu()
+        try:
+            p._projection_menu(p.projection_view, menu)
+            cut = next(item for item in menu.get_children() if item.get_label() == "Cut")
+            self.assertTrue(cut.get_sensitive())
+            with patch.object(p.projection_view, "get_clipboard") as clipboard:
+                cut.activate()
+                clipboard.return_value.set_text.assert_called_once_with(original, -1)
+            self.assertEqual(p.text(), "")
+            self.editor.undo()
+            self.assertEqual(p.text(), original)
+        finally:
+            menu.destroy()
+
     def test_initial_diff_runs_without_typing_debounce(self) -> None:
         """The first requested diff is scheduled immediately rather than after typing delay."""
 
