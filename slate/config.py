@@ -515,8 +515,10 @@ class ConfigStore:
                     )
                     excluded_refs.add(reference)
         return {
-            "name": str(raw.get("name", "")).strip(),
-            "path": str(raw.get("path", "")).strip(),
+            # 2026-11-06: gli spazi fanno parte dei nomi Linux; il reload
+            # deve conservare esattamente il progetto scelto, non un suo vicino.
+            "name": str(raw.get("name", "")),
+            "path": str(raw.get("path", "")),
             "terminals": terminal_names,
             "terminal_commands": terminal_commands,
             "terminal_history_ids": history_ids,
