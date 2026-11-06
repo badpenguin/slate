@@ -246,7 +246,7 @@ class TerminalManager:
                 )
 
             self.session_checks[key] = run_async(
-                [*self.tmux, "has-session", "-t", tmux_session],
+                [*self.tmux, "has-session", "-t", f"={tmux_session}"],
                 session_checked,
             )
         else:
@@ -644,8 +644,10 @@ class TerminalManager:
             self.request_activity_refresh()
             callback(True)
 
+        # 2026-11-06: tmux accetta prefissi se il nome manca. Il target esatto
+        # protegge i terminali simili quando questa scheda è ancora lazy.
         run_async(
-            [*self.tmux, "rename-session", "-t", old_session, new_session], renamed
+            [*self.tmux, "rename-session", "-t", f"={old_session}", new_session], renamed
         )
 
     def request_codex_rename(self, project_name: str, terminal_name_value: str) -> None:
@@ -719,7 +721,7 @@ class TerminalManager:
                                 ):
                                     run_async(
                                         [*self.tmux, "send-keys", "-t",
-                                         tmux_session, "Enter"],
+                                         f"={tmux_session}:", "Enter"],
                                         self._codex_rename_sent,
                                     )
 
@@ -737,8 +739,10 @@ class TerminalManager:
                             self.CODEX_RENAME_SUBMIT_DELAY_MS, submit_after_delay
                         )
 
+                    # 2026-11-06: send-keys interpreta un target-pane;
+                    # il ':' separa la sessione esatta dal window/pane corrente.
                     run_async(
-                        [*self.tmux, "send-keys", "-t", tmux_session, "-l",
+                        [*self.tmux, "send-keys", "-t", f"={tmux_session}:", "-l",
                          f"/rename {terminal_name_value}"],
                         text_sent,
                     )
@@ -823,7 +827,7 @@ class TerminalManager:
             self.request_activity_refresh()
             callback(True)
 
-        run_async([*self.tmux, "kill-session", "-t", tmux_session], killed)
+        run_async([*self.tmux, "kill-session", "-t", f"={tmux_session}"], killed)
 
     def forget(self, project_name: str, terminal_name_value: str) -> None:
         """Detach and remove a Vte client while leaving its tmux session alive."""
@@ -1006,7 +1010,7 @@ class TerminalManager:
     def kill_session(self, name: str, callback: Callable[[CommandResult], None]) -> None:
         """Terminate one named session on the dedicated server."""
 
-        run_async([*self.tmux, "kill-session", "-t", name], callback)
+        run_async([*self.tmux, "kill-session", "-t", f"={name}"], callback)
 
     def shutdown(self) -> None:
         """Stop manager timers without terminating background sessions."""
@@ -1152,11 +1156,14 @@ class TerminalManager:
         # locale che prevale sul nuovo default globale; riallineiamo quindi
         # tutte le sessioni già collegate al setting caricato da SLATE.
         status_value = "on" if self.status_bar_enabled else "off"
+        # 2026-11-06: set-option risolve un target-pane anche per opzioni di
+        # sessione; '=nome:' mantiene il match esatto senza trattare '=' come
+        # parte del nome, come accade con il solo '=nome'.
         commands.extend(
             (
                 "set-option",
                 "-t",
-                tmux_session,
+                f"={tmux_session}:",
                 "status",
                 status_value,
             )
@@ -1233,7 +1240,7 @@ class TerminalManager:
             # riaggancio della GUI e distingue Codex da un vero processo Node.
             values["@slate_agent_display"] = self._status_label(agent_display)
         commands = [
-            ("set-option", "-t", tmux_session, option, value)
+            ("set-option", "-t", f"={tmux_session}:", option, value)
             for option, value in values.items()
         ]
         # 2026-08-18: le righe lazy vengono collegate anche dopo la prima
@@ -1242,7 +1249,7 @@ class TerminalManager:
             (
                 "set-option",
                 "-t",
-                tmux_session,
+                f"={tmux_session}:",
                 "status",
                 "on" if self.status_bar_enabled else "off",
             )
