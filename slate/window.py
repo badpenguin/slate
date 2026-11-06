@@ -41,6 +41,7 @@ from .repository_actions import (
     RepositoryTagDialog,
 )
 from .project_limit import ProjectStatusLimit
+from .project_availability import ProjectAvailability
 from .repository_discovery import RepositoryDiscovery
 from .repository_update import RepositoryUpdateDialog
 from .repository_verify import RepositoryVerifyDialog, UnattendedRepositoryVerifier
@@ -327,6 +328,7 @@ class SlateWindow(Gtk.ApplicationWindow):
         self.inner_paned.connect("notify::position", self._update_preview_geometry)
         self.content_overlay.connect("size-allocate", self._update_preview_geometry)
 
+        self.project_availability = ProjectAvailability(self._on_project_availability_changed)
         self.terminals = TerminalManager(
             self.terminal_stack,
             self._show_error,
@@ -619,7 +621,10 @@ class SlateWindow(Gtk.ApplicationWindow):
         # 2026-10-30: application/octet-stream indica anche nomi senza MIME
         # noto (.hgignore, .gitignore, .env). La validazione UTF-8, NUL e size
         # del loader asincrono distingue il testo dai binari senza whitelist di nomi.
-        if mime.startswith(("image/", "audio/", "video/")) or mime in {"application/pdf", "application/zip"}:
+        # 2026-11-06: il MIME decide la preview automatica; Edit esplicito
+        # deve poter aprire anche SVG/M3U testuali. Il loader controlla i byte.
+        if not focus and (mime.startswith(("image/", "audio/", "video/"))
+                          or mime in {"application/pdf", "application/zip"}):
             return None
         focused = self.get_focus()
         self._experimental_opening = True
@@ -1407,6 +1412,9 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _populate_projects(self) -> None:
         """Rebuild project rows while restoring, never deriving, expansion state."""
 
+        availability = getattr(self, "project_availability", None)
+        if availability is not None:
+            availability.set_projects(self.config.data["projects"])
         # 2026-10-01: `clear()` emette eventi e rende impossibile conoscere quali
         # righe fossero aperte. Questa funzione deve soltanto leggere la lista
         # persistita e ripristinarla: non deve mai ricavare né sovrascrivere
@@ -1977,6 +1985,9 @@ class SlateWindow(Gtk.ApplicationWindow):
 
         project = self.config.find_project(self.active_project_name or "")
         if project is not None:
+            availability = getattr(self, "project_availability", None)
+            if availability is not None:
+                availability.refresh(project["name"])
             if project["name"] in self.project_limit.pending:
                 return
             self._scan_project_repositories(project, refresh_existing=True)
@@ -2349,6 +2360,11 @@ class SlateWindow(Gtk.ApplicationWindow):
             tree_iter = self.project_store.iter_next(tree_iter)
         return False
 
+    def _on_project_availability_changed(self, _name: str, _available: bool) -> None:
+        """Redraw cached access colors without changing selection, rows or expansion."""
+
+        self.project_tree.queue_draw()
+
     def _render_tree_name(
         self,
         _column: Gtk.TreeViewColumn,
@@ -2362,6 +2378,14 @@ class SlateWindow(Gtk.ApplicationWindow):
         name = model.get_value(tree_iter, self.COL_TEXT)
         kind = model.get_value(tree_iter, self.COL_KIND)
         project_row = kind == "project"
+        availability = getattr(self, "project_availability", None)
+        unavailable = project_row and availability is not None and not availability.available.get(
+            model.get_value(tree_iter, self.COL_PROJECT), True
+        )
+        # 2026-11-06: GTK riusa il renderer: azzerare foreground-set sulle
+        # altre righe evita di propagare il rosso a figli o progetti accessibili.
+        renderer.set_property("foreground", "#e01b24")
+        renderer.set_property("foreground-set", unavailable)
         renderer.set_property("text", name)
         renderer.set_property("ypad", 12 if kind == "spacer" else 0)
         renderer.set_property("weight", Pango.Weight.BOLD if project_row else Pango.Weight.NORMAL)
@@ -2640,6 +2664,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Switch terminal and project panel without remounting a shared watcher."""
 
         self._close_preview()
+        availability = getattr(self, "project_availability", None)
+        if availability is not None:
+            availability.refresh(project["name"])
         previous_project_name = self.active_project_name
         project_changed = previous_project_name != project["name"]
         if project_changed and hasattr(self, "project_search"):
@@ -4167,8 +4194,11 @@ class SlateWindow(Gtk.ApplicationWindow):
             )
             return
         groups = SlateWindow._group_statuses_by_repository(statuses)
-        operations: list[tuple[RepositoryRef, list[FileStatus], list[str]]] = []
+        operations: list[tuple[RepositoryRef, list[FileStatus], list[str], SCM, RepoWatcher | None]] = []
         project_name = self.active_project_name
+        # 2026-11-06: catturare adapter e watcher prima del primo commit;
+        # un hook può lasciare tempo per cambiare progetto, ma i comandi
+        # successivi devono restare nei repository originariamente selezionati.
         for repository, repository_statuses in groups:
             scm = self._repository_scm(repository)
             if scm is None:
@@ -4190,6 +4220,8 @@ class SlateWindow(Gtk.ApplicationWindow):
                             }
                         ),
                     ),
+                    scm,
+                    self._repository_watcher(repository),
                 )
             )
         self._close_preview()
@@ -4200,17 +4232,10 @@ class SlateWindow(Gtk.ApplicationWindow):
 
             if index >= len(operations):
                 self.panel.set_commit_busy(False)
-                self.panel.clear_error()
+                if project_name == self.active_project_name:
+                    self.panel.clear_error()
                 return
-            repository, repository_statuses, argv = operations[index]
-            scm = self._repository_scm(repository)
-            if scm is None:
-                self.panel.set_commit_busy(False)
-                self.panel.show_error(
-                    f"Repository unavailable: {repository.path}"
-                )
-                return
-            watcher = self._repository_watcher(repository)
+            repository, repository_statuses, argv, scm, watcher = operations[index]
             if watcher is not None:
                 watcher.mute_metadata_events()
 
@@ -4222,13 +4247,15 @@ class SlateWindow(Gtk.ApplicationWindow):
                 if not result.ok:
                     self.panel.set_commit_busy(False)
                     detail = result.stderr.strip() or "Commit failed."
-                    self.panel.show_error(f"{repository.path}: {detail}")
+                    target = (repository.path if project_name == self.active_project_name
+                              else f"{project_name} / {repository.path}")
+                    self.panel.show_error(f"{target}: {detail}")
                     return
                 # 2026-08-19: the successful commit invalidates the displayed
                 # comparison and queues a fresh unattended Verify behind any
                 # remote check already in progress.
-                self.panel.set_remote_status(
-                    repository, RepositorySyncStatus()
+                self.panel.set_project_remote_status(
+                    project_name, repository, RepositorySyncStatus()
                 )
                 verification_key = (project_name, repository)
                 if (
@@ -4239,7 +4266,8 @@ class SlateWindow(Gtk.ApplicationWindow):
                     self._start_next_unattended_verification()
                 # 2026-08-17: cross-repository commits cannot be atomic; clearing
                 # only successful targets makes partial completion explicit.
-                self.panel.uncheck_statuses(repository_statuses)
+                if project_name == self.active_project_name:
+                    self.panel.uncheck_statuses(repository_statuses)
                 run_commit(index + 1)
 
             run_async(argv, committed, cwd=scm.root, env=scm.environment)
@@ -5443,6 +5471,9 @@ class SlateWindow(Gtk.ApplicationWindow):
         """Query terminal activity only after editor closure is approved."""
 
         if proceed:
+            # 2026-11-06: freeze input after editor approval so edits made while
+            # the asynchronous tmux query runs cannot escape the dirty check.
+            self.set_sensitive(False)
             self.terminals.set_activity_monitoring(False)
             self.terminals.query_panes(self._decide_close)
         else:
@@ -5488,6 +5519,7 @@ class SlateWindow(Gtk.ApplicationWindow):
             self._terminate_all(panes)
         else:
             self.closing = False
+            self.set_sensitive(True)
             self.terminals.set_activity_monitoring(self.is_active())
 
     def _terminate_all(self, panes: list[PaneInfo]) -> None:
@@ -5567,6 +5599,9 @@ class SlateWindow(Gtk.ApplicationWindow):
     def _final_destroy(self) -> None:
         """Release monitors and timers, then destroy the sole window."""
 
+        availability = getattr(self, "project_availability", None)
+        if availability is not None:
+            availability.close()
         if self.tray_icon is not None:
             self.tray_icon.set_visible(False)
             self.tray_icon = None
