@@ -19,6 +19,42 @@ from slate.file_manager import ProjectFileManager
 class ProjectFileManagerTest(unittest.TestCase):
     """Verify filters, expansion and reusable file shortcuts."""
 
+    def test_replaced_expanded_directory_keeps_automatic_updates(self) -> None:
+        """Real Gio events keep following a replacement directory without losing expansion."""
+
+        self.manager.set_project(
+            "project", str(self.root),
+            {"show_hidden": False, "show_excluded": False, "expanded_paths": []},
+            {"ignored.txt"}, False,
+        )
+        row = self.manager.dir_iters["src"]
+        self.manager.tree.expand_row(self.manager.store.get_path(row), False)
+        self._wait_for_path("src")
+        original_store = self.manager.store
+        context = GLib.MainContext.default()
+
+        def wait_for_row(relative: str) -> None:
+            """Wait for an actual automatic refresh, bounded independently of GTK allocation."""
+
+            deadline = time.monotonic() + 3
+            while self.manager._tree_iter_for_path(relative) is None and time.monotonic() < deadline:
+                context.iteration(False)
+                time.sleep(0.005)
+            self.assertIsNotNone(self.manager._tree_iter_for_path(relative))
+
+        # A build/deployment tool can replace the directory in one normal batch.
+        (self.root / "src").rename(self.root / "retired-src")
+        (self.root / "src").mkdir()
+        (self.root / "src" / "first.txt").write_text("replacement\n")
+        wait_for_row("src/first.txt")
+        # These later writes happen only after the replacement has reached Files.
+        for name in ("later.txt", "last.txt"):
+            (self.root / "src" / name).write_text("later change\n")
+            wait_for_row(f"src/{name}")
+        self.assertIs(self.manager.store, original_store)
+        self.assertIn("src", self.manager.expanded_paths)
+        self.assertTrue(self.manager.tree.row_expanded(self.manager.store.get_path(self.manager.dir_iters["src"])))
+
     @classmethod
     def setUpClass(cls) -> None:
         """Require the GTK display shared by the repository test session."""
@@ -440,6 +476,65 @@ class ProjectFileManagerTest(unittest.TestCase):
                 self.manager._load_directory("src")
                 self._wait_for_path("src")
                 load.assert_called_once_with("src")
+
+    def test_cached_excluded_directory_is_reloaded_after_project_switch(self) -> None:
+        """Excluded branches refresh missed changes and resume Gio monitoring on project return."""
+
+        preferences = {"show_hidden": False, "show_excluded": True, "expanded_paths": ["node_modules"]}
+        self.manager.set_project("project", str(self.root), preferences, set(), True)
+        context = GLib.MainContext.default()
+
+        def wait_for(predicate) -> None:
+            """Wait boundedly for a real enumeration or supplemental-monitor refresh."""
+
+            deadline = time.monotonic() + 3
+            while not predicate() and time.monotonic() < deadline:
+                context.iteration(False)
+                time.sleep(0.005)
+            self.assertTrue(predicate())
+
+        def first_loaded() -> bool:
+            """Wait until the excluded directory is loaded and no enumeration is pending."""
+
+            return "node_modules" in self.manager.loaded_paths and not self.manager.loading_paths
+
+        wait_for(first_loaded)
+        self.assertIsNotNone(self.manager._tree_iter_for_path("node_modules/package.js"))
+        original_store = self.manager.store
+        self.manager.set_active(False)
+        self.manager.set_project("other", str(self.outside), {}, set(), True)
+        self.manager.set_active(True)
+
+        def other_loaded() -> bool:
+            """Wait for the second project's ordinary root enumeration."""
+
+            return "" in self.manager.loaded_paths and not self.manager.loading_paths
+
+        wait_for(other_loaded)
+        (self.root / "node_modules" / "package.js").unlink()
+        (self.root / "node_modules" / "new-package.js").write_text("new package\n")
+        self.manager.set_active(False)
+        self.manager.set_project("project", str(self.root), preferences, set(), True)
+        self.manager.set_active(True)
+
+        def refreshed() -> bool:
+            """Wait until returning to Files exposes changes missed while monitoring was stopped."""
+
+            return self.manager._tree_iter_for_path("node_modules/new-package.js") is not None
+
+        wait_for(refreshed)
+        self.assertIsNone(self.manager._tree_iter_for_path("node_modules/package.js"))
+        (self.root / "node_modules" / "later.js").write_text("later change\n")
+
+        def later_visible() -> bool:
+            """Wait for a subsequent actual Gio event without a manual refresh."""
+
+            return self.manager._tree_iter_for_path("node_modules/later.js") is not None
+
+        wait_for(later_visible)
+        self.assertIs(self.manager.store, original_store)
+        self.assertTrue(self.manager.tree.row_expanded(
+            self.manager.store.get_path(self.manager.dir_iters["node_modules"])))
 
     def test_expand_all_stops_at_cross_link_cycles(self) -> None:
         """Cross links preserve their first valid expansion but cannot revisit a branch ancestor."""
