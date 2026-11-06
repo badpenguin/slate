@@ -27,6 +27,7 @@ class _SCMTreeState:
     snapshots: dict[RepositoryRef, tuple[FileStatus, ...]]
     branches: dict[RepositoryRef, str]
     sync_statuses: dict[RepositoryRef, RepositorySyncStatus]
+    checked_paths: set[str] = field(default_factory=set)
     expanded_rows: set[str] = field(default_factory=set)
     selected_keys: set[str] = field(default_factory=set)
     scroll_value: float = 0.0
@@ -347,6 +348,10 @@ class SCMPanel(Gtk.Box):
         self.group_iters = state.group_iters
         self.status_by_path = state.status_by_path
         self.iter_by_path = state.iter_by_path
+        # 2026-11-06: le checkbox appartengono al progetto come le righe;
+        # condividere il set selezionava file omonimi di altri progetti,
+        # anche quando il loro modello in cache mostrava checkbox vuote.
+        self.checked_paths = state.checked_paths
         self.current_state = state
         if hasattr(self, "tree"):
             previous_reconciling = self.reconciling_status
