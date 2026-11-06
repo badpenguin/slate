@@ -13,7 +13,7 @@ from slate.bounded_read import BoundedFileRead
 class BoundedReadTest(unittest.TestCase):
     """Exercise real Gio reads, including growth after the metadata check."""
 
-    def _run_read(self, path, limit, cancellable=None):
+    def _run_read(self, path, limit, cancellable=None, root=None):
         """Read one private file while dispatching a bounded test main loop."""
 
         results = []
@@ -34,7 +34,7 @@ class BoundedReadTest(unittest.TestCase):
         timeout = GLib.timeout_add(2000, expired)
         try:
             reader = BoundedFileRead(Gio.File.new_for_path(str(path)), limit,
-                                     cancellable or Gio.Cancellable(), completed)
+                                     cancellable or Gio.Cancellable(), completed, root=root)
             loop.run()
             self.assertEqual(len(results), 1)
             if reader.stream is not None:
@@ -52,6 +52,29 @@ class BoundedReadTest(unittest.TestCase):
                 path.write_bytes(data)
                 _reader, result = self._run_read(path, 8)
                 self.assertEqual(result, (data, None))
+
+    def test_project_worker_transports_binary_empty_and_cancelled_results(self):
+        """The real asynchronous worker preserves bytes and releases its cancellation hook."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            path = root / "file.bin"
+            for data in (b"", b"\xff\0abc"):
+                path.write_bytes(data)
+                reader, result = self._run_read(path, 8, root=root)
+                self.assertEqual(result, (data, None))
+                self.assertIsNone(reader.cancel_handler)
+                self.assertIsNone(reader.command)
+            cancelled = Gio.Cancellable()
+            cancelled.cancel()
+            reader, (data, error) = self._run_read(path, 8, cancellable=cancelled, root=root)
+            self.assertIsNone(data)
+            self.assertTrue(error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED))
+            self.assertIsNone(reader.command)
+            path.write_bytes(b"too large")
+            _reader, (data, error) = self._run_read(path, 2, root=root)
+            self.assertIsNone(data)
+            self.assertIsInstance(error, ValueError)
 
     def test_oversized_metadata_prevents_opening_the_stream(self):
         """A known oversized file is rejected before any contents are read."""
