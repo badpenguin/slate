@@ -1081,6 +1081,14 @@ class TerminalManager:
         self.spawn_cancellables.pop(key, None)
         initial_command = self.initial_commands.pop(key, None)
         if error or pid == -1:
+            # 2026-11-06: un widget senza processo non è un terminale caricato.
+            # Conservare la config ma liberare la cache permette un nuovo add
+            # alla selezione successiva, recuperando anche il launcher configurato.
+            self.terminals.pop(key, None)
+            self.sessions.pop(key, None)
+            self.stack.remove(terminal)
+            self.on_attention(terminal, False)
+            self.request_activity_refresh()
             self.on_error(f"Starting terminal {key}: {error or 'spawn failed'}")
             return
         self._configure_server()
