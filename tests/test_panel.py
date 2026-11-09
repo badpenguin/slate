@@ -668,6 +668,45 @@ class SCMPanelTest(unittest.TestCase):
             "[root] — main — remote: not verified",
         )
 
+    def test_repository_rendering_uses_project_snapshots_without_scanning_file_states(self) -> None:
+        """Render cached repository emphasis correctly across redraws, resets and project switches."""
+
+        hg = RepositoryRef(".", "hg")
+        git = RepositoryRef(".", "git")
+        self.panel.bind_project("A", True)
+        self.panel.set_repositories([hg, git])
+        changed = [FileStatus(f"file-{number}.py", "modified") for number in range(40)]
+        self.panel.update_status(changed, "main", hg)
+        self.panel.update_status([], "main", git)
+        statuses = mock.MagicMock(wraps=self.panel.status_by_path)
+        with mock.patch.object(self.panel, "status_by_path", statuses):
+            for _ in range(10):
+                for repository, expected in ((hg, Pango.Weight.BOLD), (git, Pango.Weight.NORMAL)):
+                    self.panel._render_status_text(None, self.panel.text_renderer, self.panel.store,
+                                                   self.panel.repository_iters[repository])
+                    self.assertEqual(self.panel.text_renderer.get_property("weight"), expected)
+            statuses.values.assert_not_called()
+            statuses.items.assert_not_called()
+        self.panel.bind_project("B", True)
+        self.panel.set_repositories([hg])
+        self.panel.update_status([], "main", hg)
+        self.panel._render_status_text(None, self.panel.text_renderer, self.panel.store, self.panel.repository_iters[hg])
+        self.assertEqual(self.panel.text_renderer.get_property("weight"), Pango.Weight.NORMAL)
+        self.panel.bind_project("A", True)
+        self.panel._render_status_text(None, self.panel.text_renderer, self.panel.store, self.panel.repository_iters[hg])
+        self.assertEqual(self.panel.text_renderer.get_property("weight"), Pango.Weight.BOLD)
+        self.panel.set_supported(False)
+        self.panel._render_status_text(None, self.panel.text_renderer, self.panel.store, self.panel.repository_iters[hg])
+        self.assertEqual(self.panel.text_renderer.get_property("weight"), Pango.Weight.NORMAL)
+        self.panel.set_supported(True)
+        self.panel.update_status(changed, "main", hg)
+        self.assertEqual(len(self.panel.status_by_path), len(changed))
+        self.panel._render_status_text(None, self.panel.text_renderer, self.panel.store, self.panel.repository_iters[hg])
+        self.assertEqual(self.panel.text_renderer.get_property("weight"), Pango.Weight.BOLD)
+        self.panel.update_status([], "main", hg)
+        self.panel._render_status_text(None, self.panel.text_renderer, self.panel.store, self.panel.repository_iters[hg])
+        self.assertEqual(self.panel.text_renderer.get_property("weight"), Pango.Weight.NORMAL)
+
     def test_clean_repository_root_is_not_bold(self) -> None:
         """Repository roots use bold text only while they own visible changes."""
 
@@ -768,6 +807,55 @@ class SCMPanelTest(unittest.TestCase):
         )
         self.assertTrue(self.panel.tree.row_expanded(repository_path))
         self.assertTrue(self.panel.tree.row_expanded(added_path))
+
+    def test_group_labels_count_each_repository_in_one_pass(self) -> None:
+        """Group counts stay scoped by repository path and SCM while scanning statuses once."""
+
+        repositories = [RepositoryRef(".", "hg"), RepositoryRef(".", "git"), RepositoryRef("nested", "hg")]
+        self.panel.set_repositories(repositories)
+        for index, repository in enumerate(repositories):
+            self.panel.update_status(
+                [FileStatus(f"file-{number}.py", "modified", repository=repository.path, scm_type=repository.scm_type)
+                 for number in range(index + 1)], "main", repository)
+        statuses = mock.MagicMock(wraps=self.panel.status_by_path)
+        with mock.patch.object(self.panel, "status_by_path", statuses):
+            self.panel._update_group_labels(repositories[0])
+        statuses.values.assert_called_once_with()
+        for index, repository in enumerate(repositories):
+            for state, title, _icon in self.panel.GROUPS:
+                expected = index + 1 if state == "modified" else 0
+                self.assertEqual(self.panel.store.get_value(self.panel.group_iters[(repository, state)],
+                                                           self.panel.COL_TEXT), f"{title}:  {expected}")
+
+    def test_message_typing_updates_commit_without_rescanning_statuses_or_master_checkboxes(self) -> None:
+        """Text edits use explicit checked targets and leave unchanged selection controls alone."""
+
+        self.panel.set_supported(True)
+        self.panel.update_status([FileStatus(f"file-{number}.py", "modified") for number in range(40)], "main")
+        self._toggle_path("file-0.py")
+        controls = (self.panel.select_all_check, self.panel.commit_select_all_check)
+        selection = [(control.get_active(), control.get_inconsistent()) for control in controls]
+        statuses = mock.MagicMock(wraps=self.panel.status_by_path)
+        with mock.patch.object(self.panel, "status_by_path", statuses), \
+                mock.patch.object(self.panel, "_sync_select_all") as sync_select_all:
+            buffer = self.panel.message.get_buffer()
+            buffer.insert(buffer.get_end_iter(), "a")
+            self.assertTrue(self.panel.commit_button.get_sensitive())
+            statuses.get.assert_called_once()
+            statuses.items.assert_not_called()
+            statuses.values.assert_not_called()
+            sync_select_all.assert_not_called()
+            buffer.set_text("   ")
+            self.assertFalse(self.panel.commit_button.get_sensitive())
+        self.assertEqual([(control.get_active(), control.get_inconsistent()) for control in controls], selection)
+        self.panel.set_commit_busy(True)
+        buffer.set_text("busy message")
+        self.assertFalse(self.panel.commit_button.get_sensitive())
+        self.panel.set_commit_busy(False)
+        self.assertTrue(self.panel.commit_button.get_sensitive())
+        self.panel.update_status([], "main")
+        buffer.set_text("no remaining targets")
+        self.assertFalse(self.panel.commit_button.get_sensitive())
 
     def test_commit_requires_a_nonempty_message_and_respects_busy_state(self) -> None:
         """A visible commit remains inert until all of its prerequisites exist."""
