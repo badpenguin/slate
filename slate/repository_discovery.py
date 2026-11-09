@@ -44,6 +44,9 @@ class RepositoryDiscovery:
 
         self.root = Path(project_root).resolve()
         self.excluded = set(excluded)
+        # 2026-11-07: le esclusioni sono fisse per questa scansione. Il set
+        # di path consente ricerche per antenati senza ripercorrere i riferimenti.
+        self._excluded_paths = frozenset(reference.path for reference in self.excluded)
         self.on_found = on_found
         self.on_complete = on_complete
         self.queue: deque[Path] = deque([self.root])
@@ -149,6 +152,10 @@ class RepositoryDiscovery:
     def _is_below_excluded(self, relative: str) -> bool:
         """Prune descendants of an explicitly excluded repository path."""
 
-        return any(
-            relative.startswith(f"{excluded.path}/") for excluded in self.excluded
-        )
+        # 2026-11-07: escludere solo i discendenti; la root stessa deve ancora
+        # essere ispezionata per conservare i confini dei repository esclusi.
+        while "/" in relative:
+            relative = relative.rsplit("/", 1)[0]
+            if relative in self._excluded_paths:
+                return True
+        return False
