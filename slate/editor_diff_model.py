@@ -59,8 +59,6 @@ def compact_rows(rows: list[DiffRow], context: int = 3,
             end += 1
         head = min(end, index + context) if index else index
         tail = max(head, end - context) if end < len(rows) else end
-        if index == 0:
-            tail = max(head, end - context) if end < len(rows) else end
         if (head, tail) in expanded or head == tail:
             output.extend(rows[index:end])
         else:
