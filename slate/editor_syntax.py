@@ -57,19 +57,27 @@ class DiffSyntaxHighlighter:
         ))
         self.projection.set_highlight_syntax(False)
         self.projection.set_style_scheme(scheme)
-        preferences = self.presentation.editor.appearance
-        colors = diff_colors(preferences, scheme, compact=mode == "compact")
-        for kind, color in zip(("added", "removed"), colors):
-            self.presentation.tags[kind].set_property("background", color)
-            self.presentation.tags[kind].set_property("foreground", preferences.get("text_color") or "#172017")
-            self.presentation.tags[kind].set_property("foreground-set", mode == "compact")
-        self.presentation.new_tag.set_property("background", colors[0])
-        self.presentation.old_tag.set_property("background", colors[1])
+        self.update_colors()
         if mode != "unified":
             self.pause()
             for tag in self.tags.values():
                 self.projection.remove_tag(tag, self.projection.get_start_iter(), self.projection.get_end_iter())
         self.queue()
+
+    def update_colors(self) -> None:
+        """Update diff decorations without restarting language parsing or syntax copying."""
+
+        # 2026-11-07: le preferenze di colore sono indipendenti dai lexer;
+        # riusare i tag esistenti mantiene validi anche i job già in corso.
+        preferences = self.presentation.editor.appearance
+        scheme = self.source.get_style_scheme()
+        colors = diff_colors(preferences, scheme, compact=self.mode == "compact")
+        for kind, color in zip(("added", "removed"), colors):
+            self.presentation.tags[kind].set_property("background", color)
+            self.presentation.tags[kind].set_property("foreground", preferences.get("text_color") or "#172017")
+            self.presentation.tags[kind].set_property("foreground-set", self.mode == "compact")
+        self.presentation.new_tag.set_property("background", colors[0])
+        self.presentation.old_tag.set_property("background", colors[1])
 
     def _settings_changed(self, _buffer, _property) -> None:
         """Propagate filename-language and source-theme changes to derived views."""
