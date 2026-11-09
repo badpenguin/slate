@@ -211,6 +211,51 @@ class DiffSyntaxTest(unittest.TestCase):
         self.assertIsNone(self.editor.appearance["text_color"])
         self.assertIs(self.editor.buffer, buffer)
 
+    def test_generic_monospace_does_not_enumerate_installed_fonts(self) -> None:
+        """Generic font CSS needs no installed-family lookup, including repeated size changes."""
+
+        from slate.editor_appearance import editor_font_css
+
+        with patch("slate.editor_appearance.monospaced_font_families") as families:
+            for family in ("monospace", "Monospace"):
+                for size in (10, 12, 17):
+                    self.assertEqual(editor_font_css({"font_family": family}, size),
+                                     f"textview {{ font-family: monospace; font-size: {size}pt; }}".encode())
+            families.assert_not_called()
+
+    def test_color_and_font_changes_preserve_syntax_work_and_skip_unrelated_updates(self) -> None:
+        """Partial appearance updates preserve syntax jobs, source history and unchanged providers."""
+
+        self._flush_syntax()
+        buffer = self.editor.buffer
+        source_text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        language = buffer.get_language()
+        scheme = buffer.get_style_scheme()
+        values = dict(self.editor.appearance)
+        values["diff_added_color"] = "#123456"
+        with patch.object(self.editor, "set_font_size") as font, \
+                patch.object(self.editor, "_configure_language") as configure_language, \
+                patch.object(self.view.syntax, "configure") as configure_syntax, \
+                patch.object(self.view.syntax, "queue") as queue, \
+                patch("slate.editor.apply_editor_text_color") as text_color:
+            self.editor.set_appearance(values)
+            self.assertAlmostEqual(self.view.new_tag.get_property("background-rgba").red, 0x12 / 255)
+            self.editor.set_appearance(values)
+            font.assert_not_called()
+            configure_language.assert_not_called()
+            configure_syntax.assert_not_called()
+            queue.assert_not_called()
+            text_color.assert_not_called()
+            values["font_family"] = "missing-family-for-slate-test"
+            self.editor.set_appearance(values)
+            font.assert_called_once_with(self.editor.font_size)
+            configure_language.assert_not_called()
+            configure_syntax.assert_not_called()
+            queue.assert_not_called()
+        self.assertIs(buffer.get_language(), language)
+        self.assertIs(buffer.get_style_scheme(), scheme)
+        self.assertEqual(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True), source_text)
+
     def test_monospace_font_and_size_reach_every_code_view_without_affecting_syntax(self) -> None:
         """All native and projected views share the selected fixed-width family and size provider."""
 
