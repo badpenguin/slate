@@ -973,10 +973,15 @@ class RepoWatcher:
     def _is_nested_repository_path(self, relative: str) -> bool:
         """Return whether a path belongs to an independently watched child root."""
 
-        return any(
-            relative == repository or relative.startswith(f"{repository}/")
-            for repository in self.nested_repositories
-        )
+        # 2026-11-07: gli eventi interrogano spesso percorsi estranei;
+        # verificare solo gli antenati limita il lavoro alla profondità del path,
+        # senza scandire tutte le root annidate. Qui conta anche la root esatta.
+        while True:
+            if relative in self.nested_repositories:
+                return True
+            if "/" not in relative:
+                return False
+            relative = relative.rsplit("/", 1)[0]
 
     def _on_metadata_change(
         self, relative: str, event_type: Gio.FileMonitorEvent
