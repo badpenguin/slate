@@ -57,7 +57,6 @@ class CommandIconDialog(Gtk.Dialog):
         for icon_name in available:
             icon_store.append((icon_name,))
         icon_view = Gtk.IconView.new()
-        self.icon_view = icon_view
         icon_view.set_model(icon_store)
         icon_view.set_selection_mode(Gtk.SelectionMode.SINGLE)
         icon_view.set_item_width(48)
