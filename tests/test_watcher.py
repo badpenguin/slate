@@ -20,6 +20,26 @@ from slate.watcher import RepoWatcher
 class RepoWatcherMountTest(unittest.TestCase):
     """Verify that background monitor discovery yields frequently to GTK."""
 
+    def test_nested_boundaries_use_depth_bounded_lookups_and_keep_exact_root_semantics(self) -> None:
+        """Ignore unrelated repository counts while retaining roots, descendants and literal names."""
+
+        roots = {f"libs/pkg-{number}" for number in range(100)} | {"literal\\name", "line\nbreak"}
+        boundaries = MagicMock()
+        boundaries.__contains__.side_effect = roots.__contains__
+        boundaries.__iter__.side_effect = AssertionError("Boundary queries must not scan every nested root")
+        owner = SimpleNamespace(nested_repositories=boundaries)
+        self.assertFalse(RepoWatcher._is_nested_repository_path(owner, "src/components/file.py"))
+        self.assertEqual(boundaries.__contains__.call_count, 3)
+        for relative, expected in (("libs/pkg-1", True), ("libs/pkg-1/file", True),
+                                   ("libs/pkg-1-other/file", False), ("libs", False), (".", False),
+                                   ("literal\\name/file", True), ("line\nbreak/file", True)):
+            with self.subTest(relative=relative):
+                self.assertEqual(RepoWatcher._is_nested_repository_path(owner, relative), expected)
+        roots.remove("libs/pkg-1")
+        self.assertFalse(RepoWatcher._is_nested_repository_path(owner, "libs/pkg-1/file"))
+        roots.add("libs/new")
+        self.assertTrue(RepoWatcher._is_nested_repository_path(owner, "libs/new/file"))
+
     def test_newline_in_ignored_filename_cannot_prune_an_unrelated_source_directory(self) -> None:
         """Parsing ignored names cannot invent a src boundary and suppress its filesystem events."""
 
