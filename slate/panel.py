@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
@@ -1077,6 +1078,9 @@ class SCMPanel(Gtk.Box):
                 self.store.remove(tree_iter)
                 self.iter_by_path.pop(path, None)
             self.status_by_path.clear()
+            # 2026-11-07: lo snapshot usato dai renderer deve rappresentare
+            # le righe correnti; una successiva lettura ricostruirà quelle rimosse.
+            self.current_state.snapshots.clear()
             self.checked_paths.clear()
             for repository in self.repository_iters:
                 self._update_group_labels(repository)
@@ -1095,18 +1099,15 @@ class SCMPanel(Gtk.Box):
     def _update_group_labels(self, repository: RepositoryRef) -> None:
         """Update one repository's group counts before the model refilters."""
 
+        # 2026-11-07: i sette gruppi condividono lo stesso snapshot;
+        # contare in un passaggio evita sette scansioni di tutti i repository.
+        counts = Counter(item.state for item in self.status_by_path.values()
+                         if item.repository == repository.path and item.scm_type == repository.scm_type)
         for state, title, _icon in self.GROUPS:
-            count = sum(
-                1
-                for item in self.status_by_path.values()
-                if item.repository == repository.path
-                and item.scm_type == repository.scm_type
-                and item.state == state
-            )
             self.store.set_value(
                 self.group_iters[(repository, state)],
                 self.COL_TEXT,
-                f"{title}:  {count}",
+                f"{title}:  {counts[state]}",
             )
 
     def _restore_repository_expansion(self, repository: RepositoryRef) -> None:
@@ -1171,11 +1172,9 @@ class SCMPanel(Gtk.Box):
 
         kind = model.get_value(tree_iter, self.COL_KIND)
         repository = model.get_value(tree_iter, self.COL_REPOSITORY)
-        repository_changed = kind == "repository" and any(
-            status.repository == repository.path
-            and status.scm_type == repository.scm_type
-            for status in self.status_by_path.values()
-        )
+        # 2026-11-07: lo snapshot è già qualificato per repository e SCM;
+        # consultarne la presenza evita scansioni di file durante ogni disegno.
+        repository_changed = kind == "repository" and bool(self.current_state.snapshots.get(repository))
         emphasized = kind == "group" or repository_changed
         renderer.set_property("text", model.get_value(tree_iter, self.COL_TEXT))
         renderer.set_property(
@@ -1222,7 +1221,14 @@ class SCMPanel(Gtk.Box):
     def _on_message_changed(self, _buffer: Gtk.TextBuffer) -> None:
         """Re-evaluate the commit action whenever its required message changes."""
 
-        self._sync_checked_actions()
+        # 2026-11-07: digitare non cambia le checkbox né Select all. Leggere
+        # solo i target espliciti e fermarsi al primo valido evita scansioni
+        # complete senza introdurre uno stato di selezione duplicato in cache.
+        enabled = not self.commit_busy and bool(self.message_text()) and any(
+            status is not None and status.state not in {"untracked", "missing"}
+            for status in (self.status_by_path.get(key) for key in self.checked_paths)
+        )
+        self.commit_button.set_sensitive(enabled)
 
     def _on_status_toggled(
         self, _renderer: Gtk.CellRendererToggle, path_text: str
