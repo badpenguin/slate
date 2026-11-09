@@ -19,6 +19,52 @@ from slate.file_manager import ProjectFileManager
 class ProjectFileManagerTest(unittest.TestCase):
     """Verify filters, expansion and reusable file shortcuts."""
 
+    def test_directory_updates_classify_each_visible_entry_once_without_stale_link_cache(self) -> None:
+        """Reuse row classification within a refresh and recheck symlink targets on the next one."""
+
+        for number in range(30):
+            (self.root / f"audit-{number}.txt").write_text("text\n")
+        entries = [Gio.File.new_for_path(str(path)).query_info(
+            self.manager.ATTRIBUTES, Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, None) for path in self.root.iterdir()]
+        with patch.object(self.manager, "_classify_entry", wraps=self.manager._classify_entry) as classify:
+            self.manager._reconcile_directory("", None, entries)
+        new_calls = [call.args[0] for call in classify.call_args_list if call.args[0].startswith("audit-")]
+        self.assertEqual(len(new_calls), 30)
+        self.assertEqual(len(set(new_calls)), 30)
+        link_row = self.manager._tree_iter_for_path("file-link")
+        self.assertFalse(self.manager.store.get_value(link_row, self.manager.COL_BLOCKED))
+        (self.root / "file-link").unlink()
+        (self.root / "file-link").symlink_to(self.outside / "external.txt")
+        with patch.object(self.manager, "_classify_entry", wraps=self.manager._classify_entry) as classify:
+            self.manager._reconcile_directory("", None, entries)
+        self.assertEqual(sum(call.args[0] == "file-link" for call in classify.call_args_list), 1)
+        self.assertTrue(self.manager.store.get_value(link_row, self.manager.COL_BLOCKED))
+        with patch.object(self.manager, "_classify_entry", wraps=self.manager._classify_entry) as classify:
+            self.manager.tree.expand_row(self.manager.store.get_path(self.manager.dir_iters["src"]), False)
+            self._wait_for_path("src")
+        self.assertEqual(sum(call.args[0] == "src/app.py" for call in classify.call_args_list), 1)
+
+    def test_loaded_file_lookup_searches_only_its_parent_and_ignores_placeholders(self) -> None:
+        """Root lookups skip large expanded siblings and unloaded parents stay lazy."""
+
+        for number in range(200):
+            (self.root / "src" / f"audit-{number}.txt").write_text("text\n")
+        self.manager.tree.expand_row(self.manager.store.get_path(self.manager.dir_iters["src"]), False)
+        self._wait_for_path("src")
+        root_count = self.manager.store.iter_n_children(None)
+        with patch.object(self.manager.store, "get_value", wraps=self.manager.store.get_value) as get_value:
+            row = self.manager._tree_iter_for_path("normal.txt")
+        self.assertIsNotNone(row)
+        self.assertLessEqual(get_value.call_count, 2 * root_count)
+        self.assertEqual(self.manager.store.get_value(row, self.manager.COL_PATH), "normal.txt")
+        nested = self.manager._tree_iter_for_path("src/app.py")
+        self.assertIsNotNone(nested)
+        self.assertEqual(self.manager.store.get_value(nested, self.manager.COL_PATH), "src/app.py")
+        self.assertIsNone(self.manager._tree_iter_for_path("unloaded/child.txt"))
+        self.assertIsNone(self.manager._tree_iter_for_path("directory-link/app.py"))
+        self.assertIsNone(self.manager._tree_iter_for_path(""))
+        self.assertNotIn("directory-link", self.manager.loaded_paths)
+
     def test_replaced_expanded_directory_keeps_automatic_updates(self) -> None:
         """Real Gio events keep following a replacement directory without losing expansion."""
 
