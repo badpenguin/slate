@@ -26,7 +26,9 @@ def editor_font_css(preferences: dict, points: int) -> bytes:
     # conservando la preferenza nel JSON e usando monospace come fallback.
     requested = preferences.get("font_family", "monospace")
     family = "monospace"
-    if isinstance(requested, str):
+    # 2026-11-07: il font generico non richiede di enumerare i font installati
+    # per ogni documento o variazione della dimensione.
+    if isinstance(requested, str) and requested.casefold() != "monospace":
         for installed in monospaced_font_families():
             if installed.casefold() == requested.casefold():
                 family = installed
