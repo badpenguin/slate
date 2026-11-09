@@ -1,5 +1,6 @@
 """Reversible experimental views over an existing canonical EditorDocument."""
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -163,8 +164,10 @@ class ExperimentalEditor(Gtk.Box):
         self.new_tag = editor.buffer.create_tag(None, background="#a8eba8")
         self.old_tag = self.old_buffer.create_tag(None, background="#f5a3ab")
         self.syntax = DiffSyntaxHighlighter(self)
-        self.changed_id = editor.buffer.connect("changed", self._document_changed)
-        self.loaded_id = editor.buffer.connect("modified-changed", self._document_ready)
+        editor.buffer.connect("changed", self._document_changed)
+        editor.buffer.connect("modified-changed", self._document_ready)
+        editor.buffer.connect_after("undo", self._history_restored)
+        editor.buffer.connect_after("redo", self._history_restored)
         editor.view.connect("map", self._view_mapped)
         editor.connect("unmap", self._unmapped)
         editor.connect("map", self._mapped)
@@ -464,6 +467,19 @@ class ExperimentalEditor(Gtk.Box):
             self._render_projection()
         self.schedule()
 
+    def _history_restored(self, _buffer) -> None:
+        """Mirror the canonical selection after GtkSource finishes restoring undo or redo."""
+
+        if self.closed or not self.enabled or self.mode not in {"unified", "compact"}:
+            return
+        # 2026-11-08: changed arriva prima che GtkSource ripristini il cursore.
+        # Sincronizzare dopo l'azione evita di mantenere la vecchia selezione
+        # visiva; basta spostare i mark, senza ricostruire il diff né rubare focus.
+        anchor, cursor = self._document_selection()
+        self.projection.select_range(self.projection.get_iter_at_offset(self._visual_offset(cursor)),
+                                     self.projection.get_iter_at_offset(self._visual_offset(anchor)))
+        self.projection_view.scroll_to_mark(self.projection.get_insert(), 0.15, False, 0, 0)
+
     def schedule(self) -> None:
         """Debounce visible derived work and keep hidden editors idle."""
 
@@ -527,12 +543,21 @@ class ExperimentalEditor(Gtk.Box):
                 # 2026-10-30: i mark canonici seguono inserimenti e rimozioni;
                 # gli indici delle righe del vecchio diff non sono stabili.
                 candidate_gaps = set()
+                # 2026-11-08: ricompattare dopo Undo può nascondere la riga
+                # appena ripristinata. Conservare gli estremi della selezione
+                # già visibile, senza espandere contesto alla prima apertura
+                # né interferire con una navigazione esplicita ancora pendente.
+                selection = (self._selection_offsets() if self.mode == "compact"
+                             and self.mode in self.positioned_modes and self.pending_navigation is None else ())
                 for gap in compact_rows(candidate_rows):
                     if gap.kind != "omitted":
                         continue
                     start = self.editor.buffer.get_iter_at_line(candidate_rows[gap.gap_start].new_line).get_offset()
                     last = candidate_rows[gap.gap_end - 1]
                     end = self.editor.buffer.get_iter_at_line(last.new_line).get_offset() + len(last.text)
+                    if any(start <= offset < end for offset in selection):
+                        candidate_gaps.add((gap.gap_start, gap.gap_end))
+                        continue
                     for first_mark, last_mark in self.expanded_gap_marks:
                         if (self.editor.buffer.get_iter_at_mark(first_mark).get_offset() <= start
                                 and self.editor.buffer.get_iter_at_mark(last_mark).get_offset() >= end):
@@ -738,6 +763,11 @@ class ExperimentalEditor(Gtk.Box):
             end = self.editor.buffer.get_iter_at_mark(span.end).get_offset()
             if left <= offset < left + end - start:
                 return start + offset - left
+            # 2026-11-08: dopo una cancellazione GTK può conservare il punto
+            # del vecchio span, ora vuoto, davanti alla coda storica. È ancora
+            # un'ancora del sorgente a EOF, non un carattere della storia.
+            if offset == left and start == end == self.editor.buffer.get_char_count():
+                return end
             if offset == self.projection.get_char_count() and offset == left + end - start:
                 return end
         return None
@@ -755,8 +785,11 @@ class ExperimentalEditor(Gtk.Box):
         if not any(span.visual_start is not None for span in self.spans):
             return self._document_selection()
         anchor = self.projection.get_iter_at_mark(self.projection.get_selection_bound()).get_offset()
-        return (self._source_offset(anchor) if self._source_offset(anchor) is not None else self._canonical_cursor(),
-                self._canonical_cursor())
+        # 2026-11-07: ogni conversione visita gli span; conservare i risultati
+        # evita di cercare due volte l'ancora o il cursore di fallback.
+        source_anchor = self._source_offset(anchor)
+        cursor = self._canonical_cursor()
+        return (source_anchor if source_anchor is not None else cursor, cursor)
 
     def _canonical_cursor(self) -> int:
         """Read the projection caret as a source offset, with a canonical fallback."""
@@ -775,6 +808,7 @@ class ExperimentalEditor(Gtk.Box):
         # _replace_spans mantiene un punto di inserimento vivo in fondo alla vista.
         if offset == self.editor.buffer.get_char_count():
             return self.projection.get_char_count()
+        boundary = None
         for span in self.spans:
             if span.start is None or span.visual_start is None:
                 continue
@@ -785,7 +819,12 @@ class ExperimentalEditor(Gtk.Box):
             # L'EOF resta un punto di inserimento valido nell'ultimo blocco.
             if start <= offset < end:
                 return self.projection.get_iter_at_mark(span.visual_start).get_offset() + offset - start
-        return self.projection.get_char_count()
+            if offset == end:
+                boundary = self.projection.get_iter_at_mark(span.visual_start).get_offset() + end - start
+        # 2026-11-09: un bordo davanti a un gap è un punto d'inserimento vivo.
+        # Usarlo solo in assenza di uno span successivo che rappresenti il punto
+        # conserva la precedenza del testo corrente dopo le righe storiche.
+        return boundary if boundary is not None else self.projection.get_char_count()
 
     def _begin_action(self, _buffer) -> None:
         """Keep native paste/replacement edits in one canonical undo action."""
@@ -840,15 +879,60 @@ class ExperimentalEditor(Gtk.Box):
 
         if self.syncing:
             return
+        boundary_span = None
+        boundary_gap = None
         offset = self._source_offset(position.get_offset())
+        if offset is None and not self.editor.loading and self.editor.view.get_editable():
+            # 2026-11-08: cancellare fino al bordo di uno span può lasciare
+            # l'iteratore GTK davanti alla storia. Il bordo conserva un punto
+            # canonico valido: inserirlo nel successivo span corrente, senza
+            # rendere modificabile il testo storico né usare il fallback a EOF
+            # quando il punto canonico non è rappresentato nella proiezione.
+            for index, span in enumerate(self.spans):
+                if span.start is None or span.visual_start is None:
+                    continue
+                left = self.projection.get_iter_at_mark(span.visual_start).get_offset()
+                start = self.editor.buffer.get_iter_at_mark(span.start).get_offset()
+                end = self.editor.buffer.get_iter_at_mark(span.end).get_offset()
+                if position.get_offset() != left + end - start:
+                    continue
+                visual = self._visual_offset(end)
+                if self._source_offset(visual) == end:
+                    offset = end
+                    position.assign(self.projection.get_iter_at_offset(visual))
+                    break
+                if index + 1 < len(self.spans):
+                    following = self.spans[index + 1]
+                    if (following.gap is not None and following.visual_start is not None
+                            and self.projection.get_iter_at_mark(following.visual_start).get_offset() == position.get_offset()):
+                        # 2026-11-09: il testo nascosto resta nel sorgente;
+                        # inserire sul bordo dello span visibile senza usare EOF.
+                        offset = end
+                        boundary_span = span
+                        boundary_gap = following
+                        break
         if offset is None or self.editor.loading or not self.editor.view.get_editable():
             GObject.signal_stop_emission_by_name(self.projection, "insert-text")
             return
+        # 2026-11-08: anche l'iteratore privato dell'incolla deve puntare al
+        # vero EOF visivo, così il testo entra nello span vivo dopo la storia.
+        if offset == self.editor.buffer.get_char_count():
+            position.assign(self.projection.get_end_iter())
         self.syncing = True
         try:
             source = self.editor.buffer
             source.begin_user_action()
             source.insert(source.get_iter_at_offset(offset), text)
+            if boundary_span is not None:
+                # 2026-11-09: lo span corrente deve possedere il nuovo testo,
+                # mentre il marker del gap deve seguirlo. La gravità destra
+                # conserva questo confine anche durante Undo e Redo nativi.
+                source.delete_mark(boundary_span.end)
+                boundary_span.end = source.create_mark(None, source.get_iter_at_offset(offset + len(text)), False)
+                self.projection.delete_mark(boundary_span.visual_end)
+                boundary_span.visual_end = self.projection.create_mark(None, position, False)
+                self.projection.delete_mark(boundary_gap.visual_start)
+                boundary_gap.visual_start = self.projection.create_mark(None, position, False)
             source.place_cursor(source.get_iter_at_offset(offset + len(text)))
             source.end_user_action()
         finally:
@@ -884,6 +968,12 @@ class ExperimentalEditor(Gtk.Box):
             # del chiamante. Qui fermiamo il default GTK, quindi dobbiamo farlo
             # noi prima che un incolla nativo riutilizzi la posizione d'inserimento.
             insertion = self.projection.get_iter_at_offset(ranges[0][0])
+            # 2026-11-08: se la selezione ha eliminato la coda del sorgente,
+            # la vecchia posizione può ora appartenere a righe storiche protette.
+            # Il punto EOF vivo è dopo quella storia: GTK deve poter completare
+            # l'inserimento della clipboard nella stessa azione di Undo.
+            if ranges[0][2] == source.get_char_count():
+                insertion = self.projection.get_end_iter()
             start.assign(insertion)
             end.assign(insertion)
             self.projection.place_cursor(insertion)
@@ -1044,8 +1134,10 @@ class ExperimentalEditor(Gtk.Box):
             line = next((self.rows[position].new_line for position in range(index, len(self.rows))
                          if self.rows[position].new_line is not None),
                         max(0, self.editor.buffer.get_line_count() - 1))
-        candidates = [value for value in self.hunks if (value - line) * delta > 0]
-        target = (min(candidates) if delta > 0 else max(candidates)) if candidates else (self.hunks[0] if delta > 0 else self.hunks[-1])
+        # 2026-11-07: gli hunk seguono l'ordine delle righe sorgenti. Cercare
+        # il vicino stretto senza scandire/copiarli tutti, mantenendo il wrap.
+        index = bisect_right(self.hunks, line) if delta > 0 else bisect_left(self.hunks, line) - 1
+        target = self.hunks[index % len(self.hunks)]
         self.editor.goto_line_number(target + 1, focus=self.mode not in {"unified", "compact"})
         if self.mode in {"unified", "compact"}:
             offset = self._visual_offset(self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()).get_offset())
