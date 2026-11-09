@@ -190,7 +190,6 @@ class EditorDocument(Gtk.Box):
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         toolbar.get_style_context().add_class("editor-toolbar")
         toolbar_container.add(toolbar)
-        self.toolbar_container = toolbar_container
         self.toolbar = toolbar
         self.path_label = Gtk.Label(label=self.relative_path)
         self.path_label.set_xalign(0)
@@ -574,12 +573,25 @@ class EditorDocument(Gtk.Box):
     def set_appearance(self, values: dict) -> None:
         """Apply a scheme and optional plain-text and diff colors to this live document."""
 
+        previous = self.appearance
         self.appearance = normalize_editor_appearance(values)
-        self.set_font_size(self.font_size)
-        self._configure_language()
-        apply_editor_text_color(self.appearance_provider, self.appearance)
-        if self.experimental is not None:
-            self.experimental.syntax.configure(self.experimental.mode)
+        if self.appearance == previous:
+            return
+        # 2026-11-07: colori e font non cambiano il linguaggio del file.
+        # Aggiornare solo i provider interessati evita lavoro su ogni scheda;
+        # il cambio di tema notifica già il coordinatore della sintassi.
+        if previous["font_family"] != self.appearance["font_family"]:
+            self.set_font_size(self.font_size)
+        if previous["style_scheme"] != self.appearance["style_scheme"]:
+            scheme = editor_scheme(self.appearance)
+            if scheme is not None:
+                self.buffer.set_style_scheme(scheme)
+        if previous["text_color"] != self.appearance["text_color"]:
+            apply_editor_text_color(self.appearance_provider, self.appearance)
+        if self.experimental is not None and any(
+                previous[key] != self.appearance[key] for key in
+                ("style_scheme", "text_color", "diff_added_color", "diff_removed_color")):
+            self.experimental.syntax.update_colors()
 
 
     def _ensure_monitor(self) -> None:
@@ -1530,6 +1542,14 @@ class EditorWorkspace(Gtk.Stack):
             target.relative_to(project_root)
         except (OSError, RuntimeError, ValueError):
             return None
+        # 2026-11-07: il caso comune è una scheda già registrata con questo
+        # percorso. Validare prima target e root, poi usare la chiave esatta
+        # senza risolvere tutti gli altri file; gli alias restano nel fallback.
+        reference = (project_name, relative_path)
+        entry = self.editors.get(reference)
+        if (entry is not None and entry.project_name == project_name
+                and Path(entry.root).resolve() == project_root):
+            return reference
         # 2026-10-12: due alias interni dello stesso file condividono il buffer;
         # mantenere il riferimento originale evita bozze e salvataggi divergenti.
         for reference, entry in self.editors.items():
