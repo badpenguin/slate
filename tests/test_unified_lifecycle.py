@@ -61,6 +61,40 @@ class UnifiedLifecycleTest(unittest.TestCase):
             time.sleep(0.002)
         self.assertIsNotNone(document.etag)
 
+    def test_exact_registered_editor_lookup_avoids_resolving_other_lazy_tabs(self) -> None:
+        """Exact keys retain path validation while avoiding a filesystem walk through other tabs."""
+
+        for number in range(50):
+            name = f"file-{number}.css"
+            (self.root / name).write_text("a {}\n")
+            self.workspace.editors[("project", name)] = EditorEntry("project", str(self.root), name)
+        resolve = Path.resolve
+        with patch("slate.editor.Path.resolve", autospec=True, side_effect=resolve) as resolved:
+            reference = self.workspace.find_open_reference("project", str(self.root), "file-49.css")
+        self.assertEqual(reference, ("project", "file-49.css"))
+        self.assertEqual(resolved.call_count, 3)
+        (self.root / "alias.css").symlink_to("file-49.css")
+        self.assertEqual(self.workspace.find_open_reference("project", str(self.root), "alias.css"), reference)
+        self.assertTrue(all(entry.document is None for entry in self.workspace.editors.values()))
+
+    def test_exact_registered_editor_lookup_rejects_retargeted_roots_and_escaping_links(self) -> None:
+        """A matching key cannot bypass root identity, containment or regular path resolution."""
+
+        key = ("project", "file.css")
+        self.workspace.editors[key] = EditorEntry("project", str(self.root), "file.css")
+        with tempfile.TemporaryDirectory(prefix="slate-lookup-outside-", dir="/tmp") as temporary:
+            other_root = Path(temporary)
+            (other_root / "file.css").write_text("external\n")
+            self.assertIsNone(self.workspace.find_open_reference("project", str(other_root), "file.css"))
+            (self.root / "file.css").unlink()
+            (self.root / "file.css").symlink_to(other_root / "file.css")
+            self.assertIsNone(self.workspace.find_open_reference("project", str(self.root), "file.css"))
+            (self.root / "file.css").unlink()
+            self.assertIsNone(self.workspace.find_open_reference("project", str(self.root), "file.css"))
+            (self.root / "file.css").symlink_to("file.css")
+            self.assertIsNone(self.workspace.find_open_reference("project", str(self.root), "file.css"))
+        self.assertIsNone(self.workspace.editors[key].document)
+
     def test_initial_code_load_rejects_input_until_disk_text_is_ready(self) -> None:
         """Code and promoted previews accept typing only after the initial Gio read completes."""
 
