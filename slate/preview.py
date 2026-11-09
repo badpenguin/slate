@@ -860,18 +860,6 @@ class FilePreview(Gtk.Box):
             return None
         return self.diff_edit_lines[line_index]
 
-    def current_diff_line(self) -> int:
-        """Return the zero-based diff row containing the insertion cursor."""
-
-        return self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_line()
-
-    def diff_text(self) -> str:
-        """Return the unified diff currently rendered by the preview."""
-
-        return self.buffer.get_text(
-            self.buffer.get_start_iter(), self.buffer.get_end_iter(), True
-        )
-
     def _on_edit_change_activate(self, _item: Gtk.MenuItem) -> None:
         """Open the current mappable diff row in the persistent editor."""
 
