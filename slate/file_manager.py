@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Callable
 
@@ -608,24 +607,19 @@ class ProjectFileManager(Gtk.Box):
     def _tree_iter_for_path(self, relative_path: str) -> Gtk.TreeIter | None:
         """Find one currently loaded real row by its project-relative path."""
 
-        def _walk(parent: Gtk.TreeIter | None) -> Gtk.TreeIter | None:
-            """Depth-first search loaded rows without triggering enumeration."""
-
-            tree_iter = self.store.iter_children(parent)
-            while tree_iter is not None:
-                if (
-                    not self.store.get_value(tree_iter, self.COL_PLACEHOLDER)
-                    and self.store.get_value(tree_iter, self.COL_PATH)
-                    == relative_path
-                ):
-                    return tree_iter
-                found = _walk(tree_iter)
-                if found is not None:
-                    return found
-                tree_iter = self.store.iter_next(tree_iter)
+        # 2026-11-07: il percorso identifica già il padre caricato; cercare
+        # solo fra i suoi figli evita di visitare rami estranei, senza nuovi indici.
+        parent_path = os.path.dirname(relative_path)
+        parent = self.dir_iters.get(parent_path) if parent_path else None
+        if parent_path and parent is None:
             return None
-
-        return _walk(None)
+        tree_iter = self.store.iter_children(parent)
+        while tree_iter is not None:
+            if (not self.store.get_value(tree_iter, self.COL_PLACEHOLDER)
+                    and self.store.get_value(tree_iter, self.COL_PATH) == relative_path):
+                return tree_iter
+            tree_iter = self.store.iter_next(tree_iter)
+        return None
 
     def _focus_tree_iter(self, tree_iter: Gtk.TreeIter) -> None:
         """Select and scroll to one already loaded File-manager row."""
@@ -829,12 +823,14 @@ class ProjectFileManager(Gtk.Box):
             self._resolve_pending_reveal(relative)
             self._continue_expand_all()
             return
-        visible = [info for info in entries if self._entry_visible(relative, info)]
-        visible.sort(key=partial(self._entry_sort_key, relative))
+        # 2026-11-07: classificare ogni voce una volta per questo snapshot;
+        # ordinamento e inserimento riusano i valori, senza cache fra refresh.
+        visible = [self._entry_values(relative, info) for info in entries if self._entry_visible(relative, info)]
+        visible.sort(key=self._entry_sort_key)
         # 2026-08-16: i figli reali entrano prima di togliere il placeholder;
         # evitando un nodo temporaneamente vuoto GTK non richiude l'expander.
-        for info in visible:
-            self._append_entry(parent, relative, info)
+        for values in visible:
+            self._append_entry(parent, values)
         if placeholder is not None:
             self.store.remove(placeholder)
         self._resolve_pending_reveal(relative)
@@ -849,8 +845,10 @@ class ProjectFileManager(Gtk.Box):
     ) -> None:
         """Apply directory changes while retaining unchanged GTK tree rows."""
 
-        visible = [info for info in entries if self._entry_visible(relative, info)]
-        visible.sort(key=partial(self._entry_sort_key, relative))
+        # 2026-11-07: condividere la classificazione fra sort, confronto e
+        # append elimina controlli filesystem ripetuti nello stesso aggiornamento.
+        visible = [self._entry_values(relative, info) for info in entries if self._entry_visible(relative, info)]
+        visible.sort(key=self._entry_sort_key)
         current: dict[str, Gtk.TreeIter] = {}
         stale_rows: list[Gtk.TreeIter] = []
         child = self.store.iter_children(parent)
@@ -862,10 +860,7 @@ class ProjectFileManager(Gtk.Box):
                 stale_rows.append(child)
             child = self.store.iter_next(child)
 
-        wanted = {
-            f"{relative}/{info.get_name()}" if relative else info.get_name()
-            for info in visible
-        }
+        wanted = {values[self.COL_PATH] for values in visible}
         added_directory = False
         self.rebuilding_model = True
         try:
@@ -878,9 +873,8 @@ class ProjectFileManager(Gtk.Box):
                     self._drop_directory_state(path)
                     self.store.remove(tree_iter)
                     current.pop(path)
-            for info in visible:
-                path = f"{relative}/{info.get_name()}" if relative else info.get_name()
-                values = self._entry_values(relative, info)
+            for values in visible:
+                path = values[self.COL_PATH]
                 tree_iter = current.get(path)
                 if tree_iter is not None and self.store.get_value(
                     tree_iter, self.COL_DIRECTORY
@@ -889,7 +883,7 @@ class ProjectFileManager(Gtk.Box):
                     self.store.remove(tree_iter)
                     tree_iter = None
                 if tree_iter is None:
-                    tree_iter = self._append_entry(parent, relative, info)
+                    tree_iter = self._append_entry(parent, values)
                     current[path] = tree_iter
                     added_directory = added_directory or values[self.COL_DIRECTORY]
                 else:
@@ -905,10 +899,7 @@ class ProjectFileManager(Gtk.Box):
                                 self.store.set_value(
                                     tree_iter, self.COL_ICON, values[self.COL_ICON]
                                 )
-            desired = [
-                f"{relative}/{info.get_name()}" if relative else info.get_name()
-                for info in visible
-            ]
+            desired = [values[self.COL_PATH] for values in visible]
             actual: list[str] = []
             child = self.store.iter_children(parent)
             while child is not None:
@@ -968,17 +959,12 @@ class ProjectFileManager(Gtk.Box):
         # rappresenta correttamente la directory di fallback del progetto.
         self.pending_cursor_path = None
 
-    def _entry_sort_key(
-        self, parent: str, info: Gio.FileInfo
-    ) -> tuple[bool, str]:
+    def _entry_sort_key(self, values: list[object]) -> tuple[bool, str]:
         """Sort directories before files and names without case sensitivity."""
 
-        name = info.get_name()
-        relative = f"{parent}/{name}" if parent else name
-        is_directory, _is_symlink, _blocked = self._classify_entry(relative, info)
         return (
-            not is_directory,
-            info.get_display_name().casefold(),
+            not values[self.COL_DIRECTORY],
+            values[self.COL_NAME].casefold(),
         )
 
     def _classify_entry(
@@ -1053,12 +1039,10 @@ class ProjectFileManager(Gtk.Box):
     def _append_entry(
         self,
         parent: Gtk.TreeIter | None,
-        parent_path: str,
-        info: Gio.FileInfo,
+        values: list[object],
     ) -> Gtk.TreeIter:
         """Append one safe filesystem entry and a lazy directory placeholder."""
 
-        values = self._entry_values(parent_path, info)
         relative = values[self.COL_PATH]
         is_directory = values[self.COL_DIRECTORY]
         excluded = values[self.COL_EXCLUDED]
