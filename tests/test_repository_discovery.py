@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from unittest.mock import MagicMock
 from operator import attrgetter
 from pathlib import Path
 
@@ -28,6 +29,32 @@ def _make_git(root: Path) -> None:
 
 class RepositoryDiscoveryTest(unittest.TestCase):
     """Verify discovery boundaries, exclusions and stable relative identities."""
+
+    def test_excluded_descendants_use_ancestor_lookups_without_skipping_the_root(self) -> None:
+        """Prune descendants by path regardless of SCM kind while retaining exact-root inspection."""
+
+        with tempfile.TemporaryDirectory(prefix="slate-discovery-", dir="/tmp") as directory:
+            excluded = {RepositoryRef(f"libs/pkg-{number}", "hg") for number in range(100)}
+            excluded.update({RepositoryRef("literal\\name", "git"), RepositoryRef("line\nbreak", "hg")})
+            discovery = RepositoryDiscovery(directory, excluded, MagicMock(), MagicMock())
+            paths = discovery._excluded_paths
+            boundaries = MagicMock()
+            boundaries.__contains__.side_effect = paths.__contains__
+            boundaries.__iter__.side_effect = AssertionError("Exclusion queries must not scan every root")
+            discovery._excluded_paths = boundaries
+            self.assertFalse(discovery._is_below_excluded("src/components/file.py"))
+            self.assertEqual(boundaries.__contains__.call_count, 2)
+            for relative, expected in (("libs/pkg-1", False), ("libs/pkg-1/file", True),
+                                       ("libs/pkg-1-other/file", False), ("libs", False), (".", False),
+                                       ("literal\\name", False), ("literal\\name/file", True),
+                                       ("line\nbreak/file", True)):
+                with self.subTest(relative=relative):
+                    self.assertEqual(discovery._is_below_excluded(relative), expected)
+            discovery.cancel()
+            excluded.discard(RepositoryRef("libs/pkg-1", "hg"))
+            replacement = RepositoryDiscovery(directory, excluded, MagicMock(), MagicMock())
+            self.assertFalse(replacement._is_below_excluded("libs/pkg-1/file"))
+            replacement.cancel()
 
     def test_wide_directory_yields_without_finishing_in_one_turn(self) -> None:
         """A flat directory must respect entry budgets, not just directory counts."""
