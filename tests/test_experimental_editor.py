@@ -66,6 +66,40 @@ class ExperimentalEditorTest(unittest.TestCase):
         self.parent.destroy()
         self.temporary.cleanup()
 
+    def test_selection_capture_maps_each_endpoint_once_and_preserves_historical_fallback(self) -> None:
+        """Capture live and historical selection anchors without redundant span scans."""
+
+        live = next(span for span in self.presentation.spans if span.start is not None)
+        historical = next(span for span in self.presentation.spans if span.start is None)
+        source_start = self.editor.buffer.get_iter_at_mark(live.start).get_offset()
+        self.editor.buffer.place_cursor(self.editor.buffer.get_iter_at_offset(source_start + 3))
+        live_start = self.presentation.projection.get_iter_at_mark(live.visual_start).get_offset()
+        old_start = self.presentation.projection.get_iter_at_mark(historical.visual_start).get_offset()
+        for anchor in (live_start + 1, old_start):
+            with self.subTest(historical=anchor == old_start):
+                self.presentation.projection.select_range(
+                    self.presentation.projection.get_iter_at_offset(live_start + 3),
+                    self.presentation.projection.get_iter_at_offset(anchor))
+                with patch.object(self.presentation, "_source_offset", wraps=self.presentation._source_offset) as lookup:
+                    actual = self.presentation._selection_offsets()
+                self.assertEqual(actual, (source_start + (3 if anchor == old_start else 1), source_start + 3))
+                self.assertEqual(lookup.call_count, 2)
+
+    def test_hunk_navigation_skips_duplicate_targets_and_wraps_in_both_directions(self) -> None:
+        """Previous and next choose strict neighbors and wrap at either end of ordered hunks."""
+
+        self.editor.buffer.set_text("line\n" * 12)
+        self.presentation.set_mode("side")
+        self.presentation.last_side = "current"
+        self.presentation.hunks = [1, 4, 4, 9]
+        for line, previous, following in ((0, 9, 1), (1, 9, 4), (4, 1, 9), (9, 4, 1), (11, 9, 1)):
+            for direction, target in ((-1, previous), (1, following)):
+                with self.subTest(line=line, direction=direction):
+                    self.editor.buffer.place_cursor(self.editor.buffer.get_iter_at_line(line))
+                    with patch.object(self.editor, "goto_line_number") as navigate:
+                        self.presentation._navigate(direction)
+                    navigate.assert_called_once_with(target + 1, focus=True)
+
     def test_goto_changed_line_accepts_typing_and_preserves_undo_in_each_mode(self) -> None:
         """Navigate to a changed line and edit the live version through native GTK actions."""
 
@@ -587,9 +621,265 @@ class ExperimentalEditorTest(unittest.TestCase):
                     self.editor.undo()
                     self.assertEqual(self.presentation.text(), "keep\nnew\nend\n")
                     self.assertFalse(self.editor.buffer.can_undo())
+                    self.assertEqual(self.presentation._selection_offsets(), self.presentation._document_selection())
+                    self.editor.redo()
+                    self.assertEqual(self.presentation.text(), "replacement\n")
+                    self.assertEqual(self.presentation._selection_offsets(), self.presentation._document_selection())
+                    # 2026-11-08: anche un successivo risultato completo del diff
+                    # deve conservare il cursore ripristinato, senza timing rapido.
+                    self.presentation.rows = project_diff(self.presentation.base, self.presentation.text())
+                    self.presentation.rows_serial = self.presentation.serial
+                    self.presentation.rows_base_serial = self.presentation.base_serial
+                    self.presentation._replace_spans()
+                    self.presentation._render_projection()
+                    self.presentation.projection_view.emit("insert-at-cursor", "next")
+                    self.assertEqual(self.presentation.text(), "replacement\nnext")
                 finally:
                     buffer.disconnect(signal)
                     clipboard.clear()
+
+    def test_native_paste_replaces_live_text_before_deleted_tail_with_one_undo(self) -> None:
+        """Native Paste must insert after deleting live text even when read-only history follows it."""
+
+        for mode in ("compact", "unified", "side", "code"):
+            with self.subTest(mode=mode):
+                self.editor.buffer.begin_not_undoable_action()
+                self.editor.buffer.set_text("a\n")
+                self.editor.buffer.end_not_undoable_action()
+                self.editor.buffer.set_modified(False)
+                self.presentation.base = "a\nremoved\n"
+                self.presentation.old_buffer.set_text(self.presentation.base)
+                self.presentation.rows = project_diff(self.presentation.base, "a\n")
+                self.presentation.rows_serial = self.presentation.serial
+                self.presentation.rows_base_serial = self.presentation.base_serial
+                self.presentation.set_mode(mode)
+                projected = mode in {"compact", "unified"}
+                if projected:
+                    self.presentation._replace_spans()
+                    self.presentation._render_projection()
+                buffer = self.presentation.projection if projected else self.editor.buffer
+                buffer.select_range(buffer.get_start_iter(), buffer.get_end_iter())
+                clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                clipboard.set_text("replacement è\n", -1)
+                completed = []
+
+                def pasted(_buffer, _clipboard) -> None:
+                    """Record the real asynchronous GTK clipboard transfer."""
+
+                    completed.append(True)
+
+                signal = buffer.connect("paste-done", pasted)
+                try:
+                    buffer.paste_clipboard(clipboard, None, True)
+                    deadline = time.monotonic() + 3
+                    context = GLib.MainContext.default()
+                    while not completed and time.monotonic() < deadline:
+                        while context.pending():
+                            context.iteration(False)
+                        time.sleep(0.002)
+                    self.assertTrue(completed)
+                    self.assertEqual(self.presentation.text(), "replacement è\n")
+                    if projected:
+                        self.assertIn("removed\n", buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True))
+                        cursor = buffer.get_iter_at_mark(buffer.get_insert()).get_offset()
+                        self.assertEqual(self.presentation._source_offset(cursor), len("replacement è\n"))
+                    self.editor.undo()
+                    self.assertEqual(self.presentation.text(), "a\n")
+                    self.assertFalse(self.editor.buffer.can_undo())
+                    self.editor.redo()
+                    self.assertEqual(self.presentation.text(), "replacement è\n")
+                    view = self.presentation.projection_view if projected else self.editor.view
+                    view.emit("insert-at-cursor", "next")
+                    self.assertEqual(self.presentation.text(), "replacement è\nnext")
+                finally:
+                    buffer.disconnect(signal)
+                    clipboard.clear()
+
+    def test_native_paste_at_internal_history_boundary_preserves_suffix_and_undo(self) -> None:
+        """Replace whole current lines before history without losing the clipboard or untouched suffix."""
+
+        for prefix in ("", "start\n"):
+            for mode in ("compact", "unified", "side", "code"):
+                with self.subTest(prefix=prefix, mode=mode):
+                    current = prefix + "keep\nend\n"
+                    expected = prefix + "replacement è\nend\n"
+                    self.editor.buffer.begin_not_undoable_action()
+                    self.editor.buffer.set_text(current)
+                    self.editor.buffer.end_not_undoable_action()
+                    self.editor.buffer.set_modified(False)
+                    self.presentation.base = prefix + "keep\nremoved\nend\n"
+                    self.presentation.old_buffer.set_text(self.presentation.base)
+                    self.presentation.rows = project_diff(self.presentation.base, current)
+                    self.presentation.rows_serial = self.presentation.serial
+                    self.presentation.rows_base_serial = self.presentation.base_serial
+                    self.presentation.set_mode(mode)
+                    projected = mode in {"compact", "unified"}
+                    if projected:
+                        self.presentation._replace_spans()
+                        self.presentation._render_projection()
+                    buffer = self.presentation.projection if projected else self.editor.buffer
+                    buffer.select_range(buffer.get_iter_at_offset(len(prefix)),
+                                        buffer.get_iter_at_offset(len(prefix + "keep\n")))
+                    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                    clipboard.set_text("replacement è\n", -1)
+                    completed = []
+
+                    def pasted(_buffer, _clipboard) -> None:
+                        """Record completion of the real native clipboard transfer."""
+
+                        completed.append(True)
+
+                    signal = buffer.connect("paste-done", pasted)
+                    try:
+                        buffer.paste_clipboard(clipboard, None, True)
+                        deadline = time.monotonic() + 3
+                        context = GLib.MainContext.default()
+                        while not completed and time.monotonic() < deadline:
+                            while context.pending():
+                                context.iteration(False)
+                            time.sleep(0.002)
+                        self.assertTrue(completed)
+                        self.assertEqual(self.presentation.text(), expected)
+                        if projected:
+                            self.assertIn("removed\n", buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True))
+                            self.assertEqual(self.presentation._canonical_cursor(), len(prefix + "replacement è\n"))
+                            historical = next(span for span in self.presentation.spans if span.kind == "removed")
+                            protected_offset = buffer.get_iter_at_mark(historical.visual_start).get_offset() + 1
+                            visual_text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+                            buffer.insert(buffer.get_iter_at_offset(protected_offset), "FORBIDDEN")
+                            self.assertEqual(self.presentation.text(), expected)
+                            self.assertEqual(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True), visual_text)
+                        self.editor.undo()
+                        self.assertEqual(self.presentation.text(), current)
+                        self.assertFalse(self.editor.buffer.can_undo())
+                        self.editor.redo()
+                        self.assertEqual(self.presentation.text(), expected)
+                        view = self.presentation.projection_view if projected else self.editor.view
+                        view.emit("insert-at-cursor", "NEXT")
+                        self.assertEqual(self.presentation.text(), prefix + "replacement è\nNEXTend\n")
+                    finally:
+                        buffer.disconnect(signal)
+                        clipboard.clear()
+
+    def test_native_paste_before_compact_gap_preserves_hidden_text_and_history(self) -> None:
+        """Replace context before internal or trailing gaps without losing hidden source, caret or undo."""
+
+        before = "".join(f"line {number}\n" for number in range(1, 101))
+        payload = "replacement è\nextra\n"
+        for trailing in (False, True):
+            current = before.replace("line 20\n", "changed 20\n")
+            if not trailing:
+                current = current.replace("line 80\n", "changed 80\n")
+            for first in (23, 21):
+                selected = "".join(f"line {number}\n" for number in range(first, 24))
+                for mode in ("compact", "unified", "side", "code"):
+                    with self.subTest(trailing=trailing, first=first, mode=mode):
+                        self.editor.buffer.begin_not_undoable_action()
+                        self.editor.buffer.set_text(current)
+                        self.editor.buffer.end_not_undoable_action()
+                        self.editor.buffer.set_modified(False)
+                        self.presentation.base = before
+                        self.presentation.old_buffer.set_text(before)
+                        self.presentation.rows = project_diff(before, current)
+                        self.presentation.rows_serial = self.presentation.serial
+                        self.presentation.rows_base_serial = self.presentation.base_serial
+                        self.presentation.set_mode(mode)
+                        projected = mode in {"compact", "unified"}
+                        if projected:
+                            self.presentation._replace_spans()
+                            self.presentation._render_projection()
+                        buffer = self.presentation.projection if projected else self.editor.buffer
+                        visual = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+                        start = visual.index(selected)
+                        buffer.select_range(buffer.get_iter_at_offset(start), buffer.get_iter_at_offset(start + len(selected)))
+                        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                        clipboard.set_text(payload, -1)
+                        completed = []
+
+                        def pasted(_buffer, _clipboard) -> None:
+                            """Record completion of the real asynchronous GTK clipboard transfer."""
+
+                            completed.append(True)
+
+                        signal = buffer.connect("paste-done", pasted)
+                        try:
+                            buffer.paste_clipboard(clipboard, None, True)
+                            deadline = time.monotonic() + 3
+                            context = GLib.MainContext.default()
+                            while not completed and time.monotonic() < deadline:
+                                while context.pending():
+                                    context.iteration(False)
+                                time.sleep(0.002)
+                            self.assertTrue(completed)
+                            expected = current.replace(selected, payload)
+                            self.assertEqual(self.presentation.text(), expected)
+                            caret = current.index(selected) + len(payload)
+                            if projected:
+                                self.assertEqual(self.presentation._canonical_cursor(), caret)
+                            self.editor.undo()
+                            self.assertEqual(self.presentation.text(), current)
+                            self.assertFalse(self.editor.buffer.can_undo())
+                            self.editor.redo()
+                            self.assertEqual(self.presentation.text(), expected)
+                            view = self.presentation.projection_view if projected else self.editor.view
+                            view.emit("insert-at-cursor", "NEXT")
+                            self.assertEqual(self.presentation.text(), expected[:caret] + "NEXT" + expected[caret:])
+                        finally:
+                            buffer.disconnect(signal)
+                            clipboard.clear()
+
+    def test_undo_keeps_restored_line_visible_after_real_diff_worker_recompacts(self) -> None:
+        """Typing after Undo and a complete worker refresh must stay on the restored source line."""
+
+        before = "".join(f"line {number}\n" for number in range(1, 101))
+        current = before.replace("line 50\n", "changed 50\n")
+        for mode in ("compact", "unified", "side"):
+            with self.subTest(mode=mode):
+                self.editor.buffer.begin_not_undoable_action()
+                self.editor.buffer.set_text(current)
+                self.editor.buffer.end_not_undoable_action()
+                self.editor.buffer.set_modified(False)
+                self.presentation.base = before
+                self.presentation.old_buffer.set_text(before)
+                self.presentation.rows = project_diff(before, current)
+                self.presentation.rows_serial = self.presentation.serial
+                self.presentation.rows_base_serial = self.presentation.base_serial
+                self.presentation.set_mode("code")
+                self.editor.goto_line_number(10, focus=False)
+                self.editor.view.emit("insert-at-cursor", "X")
+                self.assertEqual(self.presentation.text(), current.replace("line 10\n", "Xline 10\n"))
+
+                def wait_for_worker() -> None:
+                    """Wait boundedly for the real subprocess and trailing diff refresh to finish."""
+
+                    deadline = time.monotonic() + 5
+                    context = GLib.MainContext.default()
+                    while time.monotonic() < deadline:
+                        while context.pending():
+                            context.iteration(False)
+                        if (self.presentation.command is None and self.presentation.debounce is None
+                                and self.presentation.rows_serial == self.presentation.serial):
+                            return
+                        time.sleep(0.005)
+                    self.fail("The real diff worker did not finish")
+
+                # 2026-11-08: simulare solo il mapping abilita il worker reale
+                # senza creare finestre; la verifica attende tutto il ricalcolo.
+                with patch.object(self.editor, "get_mapped", return_value=True):
+                    self.presentation.set_mode(mode)
+                    wait_for_worker()
+                    self.editor.undo()
+                    self.assertEqual(self.presentation.text(), current)
+                    wait_for_worker()
+                    source = self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert())
+                    self.assertEqual(source.get_line(), 9)
+                    if mode != "side":
+                        self.assertEqual(self.presentation._canonical_cursor(), source.get_offset())
+                    if mode == "compact":
+                        self.assertTrue(any(span.gap is not None for span in self.presentation.spans))
+                    view = self.editor.view if mode == "side" else self.presentation.projection_view
+                    view.emit("insert-at-cursor", "NEXT")
+                    self.assertEqual(self.presentation.text(), current.replace("line 10\n", "NEXTline 10\n"))
 
     def test_fragmented_worker_result_preserves_previous_projection_and_recovers_after_edit(self) -> None:
         """A rejected projection never publishes valid serials or destroys the old marks and text."""
